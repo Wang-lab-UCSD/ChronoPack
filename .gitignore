@@ -1,0 +1,15 @@
+# Ignore everything by default
+*
+
+# But allow Git to traverse directories
+!*/
+
+# Track Jupyter notebooks
+!*.ipynb
+
+# Track this ignore file itself
+!.gitignore
+
+# Don't track Jupyter checkpoint notebooks
+.ipynb_checkpoints/
+k562-tnfa-puromycin.hg38/DimensionalityReductionClustering.Old.ipynb

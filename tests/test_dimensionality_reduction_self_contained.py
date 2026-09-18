@@ -56,21 +56,27 @@ def test_checkpoint_reads_from_old_dimensionality_notebooks_are_not_active_input
 
 def test_all_four_datasets_are_loaded_from_primary_tradeseq_configs():
     active = _active_code()
+    assert "chronopack_dimred_config(" in active
+    assert "load_dimred_fixed_tradeSeq_outputs(cfg)" in active
     for key in ["K562_puro", "K562a", "K562b", "THP1"]:
-        assert re.search(rf"\b{key}\s*=\s*list\(", active)
-    assert "load_tradeSeq_dataset" in active
-    assert "fit_extension_for_key" in active
-    assert 'extend = FALSE' in active
-    assert active.count("extend = TRUE") == 3
+        assert re.search(rf'"{key}"', active)
 
 
-def test_fresh_kernel_helpers_are_active_not_comment_only():
+def test_dimred_helpers_are_sourced_from_chronopack():
     active = _active_code()
-    assert "plot_trajectory_clustering_metrics <- function" in active
-    assert "calculate_trajectory_clustering_metrics <- function" in active
-    assert "X_n <- normalize_columns(X_pc)" in active
-    assert "Xd_n <- normalize_columns(Xd_pc)" in active
+    assert "dimred_clustering_helpers.R" in active
+    assert "dimred_plotting_helpers.R" in active
+    assert "run_dimred_signed_clustering(" in active
+    assert "prepare_dimred_clustering_inputs(X_mat, Xd_mat)" in active
     assert "cl_repressed_renamed" not in active
+
+
+def test_notebook_has_no_inline_function_definitions():
+    for source in _code_cells():
+        stripped = "\n".join(
+            line for line in source.splitlines() if not line.lstrip().startswith("#")
+        )
+        assert "<- function" not in stripped
 
 
 def test_optional_reference_validation_is_gated_by_environment_variable():

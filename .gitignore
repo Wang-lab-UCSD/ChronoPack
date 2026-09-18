@@ -8,6 +8,15 @@
 !*.ipynb
 !*.R
 !*.py
+!*.md
+!*.toml
+!LICENSE*
+!README*
+!src/**
+!tests/**
+
+__pycache__/
+*.py[cod]
 
 # Track this ignore file itself
 !.gitignore

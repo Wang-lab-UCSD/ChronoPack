@@ -11,7 +11,8 @@ NOTEBOOKS = [
     "thp1-k562-lps.hg38.rep/PreprocessDatasets.ipynb",
     "thp1-k562-lps.hg38.rep/GetTrajectories.ipynb",
     "thp1-k562-lps.hg38.rep/PrepareForTradeSeq.ipynb",
-    "k562-tnfa-puromycin.hg38/Preprocess_GetTrajectories_MapFates.ipynb",
+    "k562-tnfa-puromycin.hg38/PreprocessDatasets.ipynb",
+    "k562-tnfa-puromycin.hg38/GetTrajectories.ipynb",
     "k562-tnfa-puromycin.hg38/PrepareForTradeSeq.ipynb",
 ]
 
@@ -66,7 +67,7 @@ def test_preprocess_notebooks_use_loader_and_qc_helper():
     for path in [
         "k562-tnfa.hg38.rep/PreprocessDatasets.ipynb",
         "thp1-k562-lps.hg38.rep/PreprocessDatasets.ipynb",
-        "k562-tnfa-puromycin.hg38/Preprocess_GetTrajectories_MapFates.ipynb",
+        "k562-tnfa-puromycin.hg38/PreprocessDatasets.ipynb",
     ]:
         joined = "\n".join(_code_sources(path))
         assert "load_time_tagged_anndata" in joined, path
@@ -78,7 +79,7 @@ def test_wot_notebooks_use_workflow_helper():
     for path in [
         "k562-tnfa.hg38.rep/GetTrajectories.ipynb",
         "thp1-k562-lps.hg38.rep/GetTrajectories.ipynb",
-        "k562-tnfa-puromycin.hg38/Preprocess_GetTrajectories_MapFates.ipynb",
+        "k562-tnfa-puromycin.hg38/GetTrajectories.ipynb",
     ]:
         joined = "\n".join(_code_sources(path))
         assert "run_wot_transport_workflow" in joined, path

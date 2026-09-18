@@ -6,6 +6,8 @@
 
 # Track Jupyter notebooks
 !*.ipynb
+!*.R
+!*.py
 
 # Track this ignore file itself
 !.gitignore

@@ -1,0 +1,556 @@
+"""Trajectory and WaddingtonOT graph helpers."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import scanpy as sc
+import scipy.sparse as sp
+import matplotlib.pyplot as plt
+from scipy import sparse
+from sklearn.neighbors import NearestNeighbors
+from sklearn.preprocessing import normalize
+
+
+def read_tmap(fpath):
+    """Read a WOT transport map and return a row-normalized sparse matrix."""
+    fpath = Path(fpath)
+    ad = sc.read_h5ad(fpath)
+    t_src, t_tgt = map(float, fpath.stem.split("_")[1:])
+    T = sparse.csr_matrix(ad.X)
+    row_sums = np.asarray(T.sum(axis=1)).ravel()
+    inv_row = 1.0 / np.maximum(row_sums, 1e-12)
+    T_norm = T.multiply(inv_row[:, None])
+    return t_src, t_tgt, T_norm, ad.obs_names.to_numpy(), ad.var_names.to_numpy()
+
+
+def build_transition_matrices(df, make_dense=False, renorm_rows=True):
+    """Build per-time transport CSR matrices from long-form WOT couplings."""
+    matrices = {}
+    for (t_src, t_tgt), g in df.groupby(["t_source", "t_target"]):
+        src_ids = g["cell_i"].unique()
+        tgt_ids = g["cell_j"].unique()
+        src_lookup = {cid: i for i, cid in enumerate(src_ids)}
+        tgt_lookup = {cid: i for i, cid in enumerate(tgt_ids)}
+        rows = g["cell_i"].map(src_lookup).to_numpy()
+        cols = g["cell_j"].map(tgt_lookup).to_numpy()
+        data = g["p_ij"].to_numpy()
+        T = sparse.csr_matrix((data, (rows, cols)), shape=(len(src_ids), len(tgt_ids)))
+        if renorm_rows:
+            row_sums = np.asarray(T.sum(axis=1)).flatten()
+            nz = row_sums != 0
+            row_sums[nz] = 1.0 / row_sums[nz]
+            T = sparse.diags(row_sums) @ T
+        matrices[t_src] = {
+            "csr": T,
+            "dense": T.toarray() if make_dense else None,
+            "src_ids": src_ids,
+            "tgt_ids": tgt_ids,
+            "t_next": t_tgt,
+            "src_lookup": src_lookup,
+        }
+    print(f"Built {len(matrices)} transport matrices.")
+    return matrices
+
+
+def extract_wot_couplings(tmap_path, make_dense=False):
+    """Read all WOT maps from a directory into tmaps, long table, and tmats."""
+    tmap_files = sorted(Path(tmap_path).glob("*.h5ad"))
+    tmaps = [read_tmap(fp) for fp in tmap_files]
+    tidy_frames = []
+    for t_src, t_tgt, T, src_ids, tgt_ids in tmaps:
+        coo = T.tocoo()
+        tidy_frames.append(
+            pd.DataFrame(
+                {
+                    "t_source": t_src,
+                    "t_target": t_tgt,
+                    "cell_i": src_ids[coo.row],
+                    "cell_j": tgt_ids[coo.col],
+                    "p_ij": coo.data,
+                }
+            )
+        )
+    transitions_long = pd.concat(tidy_frames, ignore_index=True)
+    tmats = build_transition_matrices(transitions_long, make_dense=make_dense)
+    return tmaps, transitions_long, tmats
+
+
+def run_wot_transport_workflow(
+    adata,
+    tmap_dir,
+    ot_model_kwargs=None,
+    compute_transport_maps=True,
+    transition_topk=30,
+    symmetrize="maximum",
+    use_unpruned_as_pruned=False,
+    attach_graph=True,
+    graph_key="ot_graph",
+    umap_key="X_ot_umap",
+    umap_random_state=10,
+    umap_kwargs=None,
+):
+    """Run WaddingtonOT maps, extract couplings, and attach transition graph outputs."""
+    tmap_dir = Path(tmap_dir)
+    tmap_dir.mkdir(parents=True, exist_ok=True)
+    if compute_transport_maps:
+        import wot
+
+        kwargs = dict(epsilon=0.05, lambda1=1, lambda2=50, growth_iters=3, day_field="time")
+        if ot_model_kwargs:
+            kwargs.update(ot_model_kwargs)
+        ot_model = wot.ot.OTModel(adata, **kwargs)
+        ot_model.compute_all_transport_maps(tmap_out=str(tmap_dir / "tmaps"))
+
+    tmaps, transitions_long, tmats = extract_wot_couplings(tmap_dir)
+    T_full, T_pruned, T_sym = sparse_adjacency_from_tmats(
+        adata,
+        tmats,
+        topk=transition_topk,
+        symmetrize=symmetrize,
+    )
+    if use_unpruned_as_pruned:
+        T_pruned = T_full
+        T_sym = 0.5 * (T_pruned + T_pruned.T) if symmetrize == "average" else T_pruned.maximum(T_pruned.T)
+    if attach_graph:
+        adata.obsp[graph_key] = T_sym
+        adata.uns[graph_key] = {
+            "connectivities_key": graph_key,
+            "distances_key": graph_key,
+            "params": {
+                "method": "WOT_tmats",
+                "top_k": transition_topk,
+                "symmetric": symmetrize,
+            },
+        }
+        kwargs = dict(init_pos="spectral", copy=False, random_state=umap_random_state)
+        if umap_kwargs:
+            kwargs.update(umap_kwargs)
+        sc.tl.umap(adata, neighbors_key=graph_key, **kwargs)
+        adata.obsm[umap_key] = adata.obsm["X_umap"].copy()
+    return {
+        "tmaps": tmaps,
+        "transitions_long": transitions_long,
+        "tmats": tmats,
+        "T_full": T_full,
+        "T_pruned": T_pruned,
+        "T_sym": T_sym,
+    }
+
+
+def keep_topk(mat, k):
+    """For each sparse row, keep only the k largest elements."""
+    mat = mat.tolil()
+    for i in range(mat.shape[0]):
+        if len(mat.data[i]) > k:
+            keep = np.argsort(mat.data[i])[-k:]
+            mat.rows[i] = list(np.array(mat.rows[i])[keep])
+            mat.data[i] = list(np.array(mat.data[i])[keep])
+    return mat.tocsr()
+
+
+def sparse_adjacency_from_tmats(bdata, tmats, topk=30, symmetrize="maximum"):
+    """Embed per-time transition matrices into one cell-by-cell adjacency."""
+    C = bdata.n_obs
+    rows_all, cols_all, data_all = [], [], []
+    for _, tdict in tmats.items():
+        M = tdict["csr"].tocsr()
+        src_ids = np.asarray(tdict["src_ids"])
+        tgt_ids = np.asarray(tdict["tgt_ids"])
+        src_pos = bdata.obs_names.get_indexer(src_ids)
+        tgt_pos = bdata.obs_names.get_indexer(tgt_ids)
+        r, c = M.nonzero()
+        rows_all.extend(src_pos[r])
+        cols_all.extend(tgt_pos[c])
+        data_all.extend(M.data)
+    T_full = sp.csr_matrix((data_all, (rows_all, cols_all)), shape=(C, C))
+    T_pruned = keep_topk(T_full, topk)
+    if symmetrize == "average":
+        T_sym = 0.5 * (T_pruned + T_pruned.T)
+    else:
+        T_sym = T_pruned.maximum(T_pruned.T)
+    return T_full, T_pruned, T_sym
+
+
+def embed_block(A, idx, n):
+    """Place square block A at rows/cols given by idx inside an n x n sparse matrix."""
+    A = A.tocoo()
+    return sparse.csr_matrix((A.data, (idx[A.row], idx[A.col])), shape=(n, n))
+
+
+def topk_csr_rows(M_csr, k=200, renorm=True, eps=1e-15):
+    """Keep only top-k values per CSR row, optionally row-normalizing."""
+    M = M_csr.tocsr()
+    indptr, indices, data = [0], [], []
+    for i in range(M.shape[0]):
+        start, end = M.indptr[i], M.indptr[i + 1]
+        cols = M.indices[start:end]
+        vals = M.data[start:end]
+        if vals.size == 0:
+            indptr.append(indptr[-1])
+            continue
+        if vals.size > k:
+            keep = np.argpartition(vals, -k)[-k:]
+            order = keep[np.argsort(-vals[keep])]
+        else:
+            order = np.argsort(-vals)
+        cols = cols[order]
+        vals = vals[order]
+        if renorm and vals.sum() > 0:
+            vals = vals / (vals.sum() + eps)
+        indices.extend(cols.tolist())
+        data.extend(vals.tolist())
+        indptr.append(len(indices))
+    out = sp.csr_matrix(
+        (np.asarray(data, dtype=np.float64), np.asarray(indices, dtype=np.int32), np.asarray(indptr, dtype=np.int64)),
+        shape=M.shape,
+    )
+    out.eliminate_zeros()
+    return out
+
+
+def _topk_csr_rows(M_csr, k=100, eps=1e-12):
+    return topk_csr_rows(M_csr, k=k, renorm=False, eps=eps)
+
+
+def CalculateTerminalFatesAcrossCells(adata, T, topk=200):
+    """Compute sparse terminal-cell fate distributions for every cell."""
+    assert sp.issparse(T), "T must be a scipy sparse matrix."
+    assert T.shape == (adata.n_obs, adata.n_obs), "T must be n_cells x n_cells."
+    T = T.tocsr().astype(np.float64).copy()
+    t = adata.obs["time"]
+    time_levels = list(t.cat.categories) if hasattr(t, "cat") else sorted(pd.unique(t))
+    tt = t.to_numpy().astype(object)
+    idx_by_time_all = [np.where(tt == lvl)[0] for lvl in time_levels]
+    idx_by_time = [ii for ii in idx_by_time_all if ii.size > 0]
+    time_levels_nonempty = [lvl for lvl, ii in zip(time_levels, idx_by_time_all) if ii.size > 0]
+    assert len(idx_by_time) >= 2, "Need at least 2 timepoints."
+    idx_last = idx_by_time[-1]
+    n_last = idx_last.size
+    n = adata.n_obs
+    print(f"Terminal timepoint: {time_levels_nonempty[-1]} | n_terminal={n_last}")
+    D_by_time = [None] * len(idx_by_time)
+    D_by_time[-1] = sp.identity(n_last, format="csr", dtype=np.float64)
+    for ti in range(len(idx_by_time) - 2, -1, -1):
+        ii = idx_by_time[ti]
+        future_idx = np.concatenate(idx_by_time[ti + 1 :])
+        D_future = sp.vstack([D_by_time[j] for j in range(ti + 1, len(idx_by_time))], format="csr")
+        A = T[ii][:, future_idx].tocsr()
+        rs = np.asarray(A.sum(axis=1)).ravel()
+        inv = np.zeros_like(rs, dtype=np.float64)
+        nz = rs > 0
+        inv[nz] = 1.0 / (rs[nz] + 1e-15)
+        D_t = (sp.diags(inv, format="csr") @ A) @ D_future
+        D_t = topk_csr_rows(D_t.tocsr(), k=topk, renorm=True)
+        zero_rows = np.where(np.asarray(D_t.sum(axis=1)).ravel() == 0)[0]
+        if zero_rows.size:
+            D_t = D_t.tolil()
+            for r in zero_rows:
+                D_t.rows[r] = [0]
+                D_t.data[r] = [1.0]
+            D_t = D_t.tocsr()
+        D_by_time[ti] = D_t
+        print(f"Computed terminal distributions for time bin {ti + 1}/{len(idx_by_time)} (n={ii.size})")
+    rows_all, cols_all, data_all = [], [], []
+    for ti, ii in enumerate(idx_by_time):
+        D_t = D_by_time[ti].tocoo()
+        rows_all.append(ii[D_t.row])
+        cols_all.append(D_t.col)
+        data_all.append(D_t.data)
+    D_full = sp.coo_matrix(
+        (np.concatenate(data_all), (np.concatenate(rows_all), np.concatenate(cols_all))),
+        shape=(n, n_last),
+    ).tocsr()
+    rs = np.asarray(D_full.sum(axis=1)).ravel()
+    D_full = sp.diags(1.0 / np.where(rs > 0, rs, 1.0), format="csr") @ D_full
+    adata.obsm["terminal_cell_dist"] = D_full.astype(np.float32)
+    adata.uns["terminal_cell_dist_idx_last"] = idx_last
+    print(f"Stored adata.obsm['terminal_cell_dist'] with shape {D_full.shape} (sparse nnz={D_full.nnz})")
+    return D_full
+
+
+def cosine_topk_leiden_from_terminal_dist(adata, dist_key="terminal_cell_dist", topk=100, random_state=0):
+    """Build a cosine top-k graph from terminal-cell distributions."""
+    assert dist_key in adata.obsm, f"Need adata.obsm['{dist_key}']"
+    X = adata.obsm[dist_key]
+    X = sp.csr_matrix(X) if not sp.issparse(X) else X.tocsr()
+    n = adata.n_obs
+    Xn = normalize(X, norm="l2", axis=1, copy=True)
+    nn = NearestNeighbors(n_neighbors=min(topk + 1, n), metric="cosine", algorithm="brute", n_jobs=-1)
+    nn.fit(Xn)
+    W = nn.kneighbors_graph(Xn, mode="distance").tocsr()
+    W.data = (1.0 - W.data).astype(np.float32)
+    W.setdiag(0.0)
+    W.eliminate_zeros()
+    W_pruned = _topk_csr_rows(W.maximum(W.T).tocsr(), k=topk)
+    adata.obsp["W_terminal_cosine_topk"] = W_pruned
+    return W_pruned
+
+
+def terminal_fate_trajectory_clustering(
+    adata,
+    T,
+    cluster_key="traj_clusters",
+    resolution=0.3,
+    terminal_topk=200,
+    graph_topk=500,
+    random_state=0,
+    directed=False,
+):
+    """Compute terminal fate distributions and Leiden trajectory clusters."""
+    CalculateTerminalFatesAcrossCells(adata, T, topk=terminal_topk)
+    W_pruned = cosine_topk_leiden_from_terminal_dist(
+        adata,
+        dist_key="terminal_cell_dist",
+        topk=graph_topk,
+        random_state=random_state,
+    )
+    sc.tl.leiden(
+        adata,
+        adjacency=W_pruned.tocsr(),
+        directed=directed,
+        use_weights=True,
+        key_added=cluster_key,
+        resolution=resolution,
+        random_state=random_state,
+    )
+    return W_pruned
+
+
+def terminal_fates_from_terminal_clusters(adata, terminal_cluster_key="traj_clusters", out_key="terminal_fate_probs_traj"):
+    """Aggregate terminal-cell distributions by terminal trajectory cluster."""
+    D = adata.obsm["terminal_cell_dist"].tocsr()
+    idx_last = adata.uns["terminal_cell_dist_idx_last"]
+    term_clusters = adata.obs.iloc[idx_last][terminal_cluster_key].astype(str).to_numpy()
+    fate_names = sorted(pd.unique(term_clusters))
+    F_cols = []
+    for fate in fate_names:
+        cols = np.where(term_clusters == fate)[0]
+        F_cols.append(np.asarray(D[:, cols].sum(axis=1)).ravel())
+    F = np.vstack(F_cols).T
+    F = F / np.maximum(F.sum(axis=1, keepdims=True), 1e-12)
+    adata.obsm[out_key] = F
+    adata.uns[f"{out_key}_fates"] = fate_names
+    adata.uns[f"{out_key}_names"] = fate_names
+    for j, fate in enumerate(fate_names):
+        adata.obs[f"{out_key}_{fate}"] = F[:, j]
+    return F, fate_names
+
+
+def fate_umap_2x2_scanpy(
+    adata,
+    fate_key="terminal_fate_probs_traj",
+    fate_names_key="terminal_fate_probs_traj_fates",
+    umap_basis="umap",
+    fate_obs_prefix="fate",
+    which_two=(0, 1),
+    max_entropy_norm=True,
+    size=15,
+):
+    """Plot two fate probabilities plus entropy and max fate probability."""
+    assert fate_key in adata.obsm, f"Need adata.obsm['{fate_key}']"
+    assert fate_names_key in adata.uns, f"Need adata.uns['{fate_names_key}']"
+    F = np.asarray(adata.obsm[fate_key])
+    fates = list(adata.uns[fate_names_key])
+    i0, i1 = which_two
+    for j, name in enumerate(fates):
+        key = f"{fate_obs_prefix}_{name}"
+        if key not in adata.obs:
+            adata.obs[key] = F[:, j].astype(np.float32)
+    eps = 1e-12
+    P = np.clip(F, eps, 1.0)
+    ent = -np.sum(P * np.log(P), axis=1)
+    if max_entropy_norm and len(fates) > 1:
+        ent = ent / np.log(len(fates))
+    adata.obs[f"{fate_obs_prefix}_entropy"] = ent.astype(np.float32)
+    adata.obs[f"{fate_obs_prefix}_maxprob"] = np.max(F, axis=1).astype(np.float32)
+    fig, axes = plt.subplots(2, 2, figsize=(5, 4.5), constrained_layout=True)
+    sc.pl.embedding(adata, basis=umap_basis, color=f"{fate_obs_prefix}_{fates[i0]}", cmap="Reds", vmin=0, vmax=1, size=size, ax=axes[0, 0], show=False, title=f"Fate prob: {fates[i0]}")
+    sc.pl.embedding(adata, basis=umap_basis, color=f"{fate_obs_prefix}_{fates[i1]}", cmap="Blues", vmin=0, vmax=1, size=size, ax=axes[0, 1], show=False, title=f"Fate prob: {fates[i1]}")
+    sc.pl.embedding(adata, basis=umap_basis, color=f"{fate_obs_prefix}_entropy", cmap="viridis", vmin=0, vmax=1 if max_entropy_norm else None, size=size, ax=axes[1, 0], show=False, title="Fate entropy" + (" (norm)" if max_entropy_norm else ""))
+    sc.pl.embedding(adata, basis=umap_basis, color=f"{fate_obs_prefix}_maxprob", cmap="viridis", vmin=0, vmax=1, size=size, ax=axes[1, 1], show=False, title="Fate maxprob")
+    plt.show()
+    return fig, axes
+
+
+def mass_retention_plots_and_umap(
+    adata,
+    T,
+    cluster_key,
+    time_key="time",
+    umap_basis="umap",
+    n_reps=50,
+    clusters_to_plot=None,
+    size=15,
+    eps=1e-12,
+    random_state=0,
+    store_prefix=None,
+    show=True,
+):
+    """Compute and plot cluster mass retention across adjacent time bins."""
+    assert sp.issparse(T), "T must be scipy sparse"
+    assert T.shape == (adata.n_obs, adata.n_obs)
+    assert cluster_key in adata.obs
+    assert time_key in adata.obs
+    if store_prefix is None:
+        store_prefix = cluster_key
+    T = T.tocsr().astype(np.float64).copy()
+    rs = np.asarray(T.sum(axis=1)).ravel()
+    zero = rs == 0
+    if np.any(zero):
+        T[zero, zero] = 1.0
+        rs = np.asarray(T.sum(axis=1)).ravel()
+    T = sp.diags(1.0 / (rs + 1e-15), format="csr") @ T
+    t = adata.obs[time_key]
+    time_levels = list(t.cat.categories) if hasattr(t, "cat") else sorted(pd.unique(t))
+    tt = t.to_numpy().astype(object)
+    idx_by_time_all = [np.where(tt == lvl)[0] for lvl in time_levels]
+    idx_by_time = [ii for ii in idx_by_time_all if ii.size > 0]
+    time_levels_nonempty = [lvl for lvl, ii in zip(time_levels, idx_by_time_all) if ii.size > 0]
+    n_steps = len(idx_by_time) - 1
+    step_labels = [f"{time_levels_nonempty[i]}->{time_levels_nonempty[i + 1]}" for i in range(n_steps)]
+    lab = adata.obs[cluster_key].astype(str).to_numpy()
+    clusters_all = pd.unique(lab)
+    rng = np.random.default_rng(random_state)
+    cell_obs = np.full(adata.n_obs, np.nan, dtype=np.float32)
+    rows, rows_overall = [], []
+    for ti in range(n_steps):
+        idx_src, idx_dst = idx_by_time[ti], idx_by_time[ti + 1]
+        A = T[idx_src, :][:, idx_dst].tocsr()
+        denom = np.asarray(A.sum(axis=1)).ravel()
+        src_lab, dst_lab = lab[idx_src], lab[idx_dst]
+        dst_frac = (pd.Series(dst_lab).value_counts() / max(1, len(idx_dst))).to_dict()
+        src_rows_by_c = {c: np.where(src_lab == c)[0] for c in clusters_all}
+        total_out_by_c = {c: float(denom[src_rows_by_c[c]].sum()) if src_rows_by_c[c].size else 0.0 for c in clusters_all}
+        ret_obs, base_analytic = {}, {}
+        for c in clusters_all:
+            rr = src_rows_by_c[c]
+            total_out = total_out_by_c[c]
+            if total_out <= 0:
+                ret_obs[c] = np.nan
+                base_analytic[c] = np.nan
+                continue
+            base_analytic[c] = float(dst_frac.get(c, 0.0))
+            dst_cols = np.where(dst_lab == c)[0]
+            same_per_row = np.asarray(A[:, dst_cols].sum(axis=1)).ravel() if dst_cols.size else np.zeros(A.shape[0])
+            ret_obs[c] = float(same_per_row[rr].sum()) / total_out
+            d = denom[rr]
+            obs_i = np.zeros_like(d, dtype=np.float64)
+            good = d > 0
+            obs_i[good] = same_per_row[rr][good] / d[good]
+            cell_obs[idx_src[rr]] = obs_i.astype(np.float32)
+        total_out_all = float(denom.sum())
+        same_mass_all = sum(float(A[src_rows_by_c[c], :][:, np.where(dst_lab == c)[0]].sum()) for c in clusters_all if total_out_by_c[c] > 0)
+        base_mass_all = sum(total_out_by_c[c] * float(dst_frac.get(c, 0.0)) for c in clusters_all if total_out_by_c[c] > 0)
+        overall_perm = []
+        ret_perm = {c: [] for c in clusters_all}
+        for _ in range(max(0, int(n_reps or 0))):
+            dst_perm = np.asarray(dst_lab, dtype=object)[rng.permutation(len(dst_lab))]
+            same_all = 0.0
+            for c in clusters_all:
+                rr = src_rows_by_c[c]
+                total_out = total_out_by_c[c]
+                if total_out <= 0:
+                    continue
+                dst_cols = np.where(dst_perm == c)[0]
+                same_mass = float(A[rr, :][:, dst_cols].sum()) if dst_cols.size else 0.0
+                ret_perm[c].append(same_mass / total_out)
+                same_all += same_mass
+            overall_perm.append(same_all / max(total_out_all, eps))
+        for c in clusters_all:
+            vals = ret_perm[c]
+            rows.append(
+                {
+                    "step": ti,
+                    "step_label": step_labels[ti],
+                    "time_src": time_levels_nonempty[ti],
+                    "time_dst": time_levels_nonempty[ti + 1],
+                    "cluster": c,
+                    "ret_obs": ret_obs.get(c, np.nan),
+                    "base_analytic": base_analytic.get(c, np.nan),
+                    "base_perm_mean": float(np.mean(vals)) if vals else np.nan,
+                    "base_perm_sd": float(np.std(vals)) if vals else np.nan,
+                    "total_out_mass": total_out_by_c.get(c, 0.0),
+                    "n_src_cells": int((src_lab == c).sum()),
+                    "n_dst_cells": int((dst_lab == c).sum()),
+                }
+            )
+        rows_overall.append(
+            {
+                "step": ti,
+                "step_label": step_labels[ti],
+                "ret_obs": same_mass_all / max(total_out_all, eps),
+                "base_analytic": base_mass_all / max(total_out_all, eps),
+                "base_perm_mean": float(np.mean(overall_perm)) if overall_perm else np.nan,
+                "base_perm_sd": float(np.std(overall_perm)) if overall_perm else np.nan,
+                "total_out_mass": total_out_all,
+            }
+        )
+    df = pd.DataFrame(rows)
+    df_overall = pd.DataFrame(rows_overall)
+    if clusters_to_plot is None:
+        clusters_to_plot = list(df.groupby("cluster")["total_out_mass"].sum().sort_values(ascending=False).head(2).index)
+    clusters_to_plot = [str(x) for x in clusters_to_plot]
+    adata.obs[f"{store_prefix}_mass_ret_cell"] = cell_obs
+    adata.uns[f"{store_prefix}_mass_retention_table"] = df
+    adata.uns[f"{store_prefix}_mass_retention_overall"] = df_overall
+    adata.uns[f"{store_prefix}_mass_retention_clusters_plotted"] = clusters_to_plot
+    if show:
+        x = df_overall["step"].to_numpy()
+        plt.figure(figsize=(9, 3.5))
+        plt.plot(x, df_overall["ret_obs"], marker="o", label="observed")
+        plt.plot(x, df_overall["base_analytic"], marker="o", linestyle="--", label="analytic baseline")
+        if np.isfinite(df_overall["base_perm_mean"]).any():
+            m = df_overall["base_perm_mean"].to_numpy()
+            s = df_overall["base_perm_sd"].to_numpy()
+            plt.plot(x, m, marker="o", linestyle="--", label="permutation baseline (mean)")
+            plt.fill_between(x, m - s, m + s, alpha=0.2, label="perm +/-1 sd")
+        plt.xticks(x, df_overall["step_label"], rotation=45, ha="right")
+        plt.xlabel("time step")
+        plt.ylabel("mass retention")
+        plt.legend(bbox_to_anchor=(1.02, 1), loc="upper left")
+        plt.tight_layout()
+        plt.show()
+        sc.pl.embedding(
+            adata,
+            basis=umap_basis,
+            color=f"{store_prefix}_mass_ret_cell",
+            cmap="viridis",
+            vmin=0,
+            vmax=1,
+            size=size,
+            na_color="lightgray",
+            title=f"Per-cell mass retention to own cluster (k={cluster_key})",
+        )
+    return {"per_cluster": df, "overall": df_overall, "cell_key": f"{store_prefix}_mass_ret_cell", "clusters_plotted": clusters_to_plot}
+
+
+def PlotHardClusterMassProportionsOverTime(adata, cluster_key="traj_clusters", time_key="time"):
+    """Plot hard cluster proportions by time as a stacked area plot."""
+    assert time_key in adata.obs, f"Need adata.obs['{time_key}']"
+    assert cluster_key in adata.obs, f"Need adata.obs['{cluster_key}']"
+    t = adata.obs[time_key]
+    c = adata.obs[cluster_key].astype(str)
+    if hasattr(t, "cat"):
+        time_levels = list(t.cat.categories)
+    else:
+        uu = pd.unique(t.astype(str))
+        num = pd.to_numeric(uu, errors="coerce")
+        time_levels = [str(x) for x in uu[np.argsort(num)]] if np.all(~np.isnan(num)) else sorted([str(x) for x in uu])
+    tab = pd.crosstab(
+        pd.Categorical(t.astype(str), categories=[str(x) for x in time_levels], ordered=True),
+        pd.Categorical(c),
+    )
+    props = tab.div(tab.sum(axis=1), axis=0).fillna(0.0)
+    x = np.arange(props.shape[0])
+    plt.figure(figsize=(8, 4))
+    plt.stackplot(x, props.T.to_numpy(), labels=[str(cl) for cl in props.columns])
+    plt.xticks(x, props.index.to_list(), rotation=45, ha="right")
+    plt.xlabel("time")
+    plt.ylabel("hard proportion")
+    plt.title(f"Hard mass proportions over time (stacked): {cluster_key}")
+    plt.legend(bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0)
+    plt.tight_layout()
+    plt.show()

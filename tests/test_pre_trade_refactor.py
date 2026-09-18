@@ -83,7 +83,10 @@ def test_wot_notebooks_use_workflow_helper():
         "k562-tnfa-puromycin.hg38/GetTrajectories.ipynb",
     ]:
         joined = "\n".join(_code_sources(path))
-        assert "run_wot_transport_workflow" in joined, path
+        assert "cp.tl.get_trajectories" in joined, path
+        assert "cp.tl.cluster_cell_state_trajectories" in joined, path
+        assert "cp.tl.compute_terminal_fate_probabilities" in joined, path
+        assert "from chronopack.trajectories import" not in joined, path
 
 
 def test_production_notebooks_do_not_contain_metacell_or_beeline_scratch_code():
@@ -96,3 +99,16 @@ def test_production_notebooks_do_not_contain_metacell_or_beeline_scratch_code():
 
 def test_beeline_scratch_cells_were_extracted():
     assert (ROOT / "k562-tnfa.hg38.rep/ignore/PrepareForTradeSeq_BEELINE_extracted.ipynb").exists()
+
+
+def test_tradeseq_fit_notebooks_use_backend_entrypoint():
+    for path in [
+        "k562-tnfa.hg38.rep/TradeSeqFits.ipynb",
+        "k562-tnfa-puromycin.hg38/TradeSeqFits.ipynb",
+        "thp1-k562-lps.hg38.rep/TradeSeqFits.K562.ipynb",
+        "thp1-k562-lps.hg38.rep/TradeSeqFits.THP1.ipynb",
+    ]:
+        joined = "\n".join(_code_sources(path))
+        assert "run_tradeseq_single_lineage" in joined, path
+        assert "fit_tradeseq_sce(" not in joined, path
+        assert "fit_tradeseq_gamlist(" not in joined, path

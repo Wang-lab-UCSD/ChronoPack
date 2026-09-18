@@ -1377,3 +1377,280 @@ Regression tests:
 
 Full-data preprocessing regeneration was not rerun in this pass; this slice
 was verified with deterministic fixtures and structural notebook checks.
+
+Full-data regression was subsequently performed for the representative
+puromycin preprocessing workflow.
+
+Historical-runtime equivalence:
+
+- Compared old preprocessing + `wot2` against package-backed preprocessing +
+  `wot2`.
+- `adata_full.chk0.h5ad`: both `4034 x 18833`.
+- `adata_hvg.chk0.h5ad`: both `4034 x 3000`.
+- retained cell IDs/order: identical.
+- retained gene IDs/order: identical.
+- `X`: exact match.
+- shared layers `counts`, `cpm`, and `log1p`: exact match.
+- `predicted_doublet`: identical.
+- final retained cells: identical.
+- maximum observed `doublet_score` deviation:
+  `0.015541014255667104`; acceptable because the filtering outcome is
+  unchanged.
+
+Status:
+
+- PreprocessDatasets package migration: COMPLETE.
+- Historical-output equivalence under `wot2`: CONFIRMED.
+- Unified-runtime clustering compatibility: OPEN / separate issue.
+
+Unified-runtime compatibility finding:
+
+- The unified ChronoPack runtime produces materially different Leiden
+  partitions in the manual-QC cells.
+- This is documented as version-sensitive graph/Leiden drift, not a package
+  refactor regression.
+- First manual exclusion: ARI `0.5046855055033237`, NMI
+  `0.5158418451310945`; `wot2` cluster `4` has 145 cells, unified numeric
+  cluster `4` has 26 cells and instead matches `wot2` cluster `5`.
+- Second manual exclusion: ARI `0.4458315620650641`, NMI
+  `0.4938063221387045`; `wot2` cluster `3` has 66 cells, unified numeric
+  cluster `3` has 948 cells, and the intended `wot2` cluster maps best to
+  unified cluster `4` with Jaccard `0.875`.
+
+Relevant versions:
+
+- `wot2`: Scanpy `1.11.1`, AnnData `0.11.4`, NumPy `2.2.6`,
+  SciPy `1.15.3`, scikit-learn `1.7.1`, scikit-image `0.25.2`.
+- unified runtime: Scanpy `1.11.5`, AnnData `0.12.19`, NumPy `2.4.6`,
+  SciPy `1.17.1`, scikit-learn `1.9.1`, scikit-image `0.26.0`.
+
+Full preprocessing in the unified runtime exposed additional direct runtime
+dependencies, now recorded in `env/environment.yml`:
+
+- `scikit-image`
+- `python-igraph`
+- `leidenalg`
+
+The provenance serialization fix is retained so ChronoPack provenance written
+under `adata.uns["chronopack"]` is h5ad-safe.
+
+## GetTrajectories Package Migration
+
+Started the second scientific vertical migration after the preprocessing
+checkpoint was accepted.
+
+Added migration mapping:
+
+- `docs/developer/get_trajectories_migration_mapping.md`
+
+Terminology boundary:
+
+- This workflow covers WOT-derived cell-state / fate trajectories.
+- It does not cover fitted gene-expression trajectories, dynamic modes, or
+  gene-trajectory clustering.
+
+Public trajectory/fate API now lives under `cp.tl`:
+
+- `cp.tl.get_trajectories()`
+- `cp.tl.cluster_cell_state_trajectories()`
+- `cp.tl.compute_terminal_fate_probabilities()`
+
+Internal/result-object additions:
+
+- `chronopack.tl._trajectories.CellStateTrajectoryResult`
+- migrated the previous implementation from `_legacy.trajectories` into
+  `chronopack.tl._trajectories`
+- kept temporary compatibility shims:
+  - `chronopack.trajectories`
+  - `chronopack._legacy.trajectories`
+
+AnnData output convention:
+
+- `adata.obs['traj_clusters']`: per-cell cell-state/fate cluster labels.
+- `adata.obsm['X_ot_umap']`: WOT graph UMAP embedding.
+- `adata.obsm['terminal_cell_dist']`: per-cell distribution over terminal
+  cells.
+- `adata.obsm['terminal_fate_probs_traj']`: per-cell fate probabilities.
+- `adata.obsp['ot_graph']`: square WOT-derived cell graph.
+- `adata.obsp['W_terminal_cosine_topk']`: square terminal-distribution graph.
+- rectangular WOT time-to-time matrices, long couplings, and raw tmap tuples
+  stay in `CellStateTrajectoryResult`, not in AnnData.
+
+Updated active GetTrajectories notebooks to use the new `cp.tl` public API:
+
+- `k562-tnfa.hg38.rep/GetTrajectories.ipynb`
+- `k562-tnfa-puromycin.hg38/GetTrajectories.ipynb`
+- `thp1-k562-lps.hg38.rep/GetTrajectories.ipynb`
+
+Dataset-specific configuration remains notebook-local:
+
+- WOT directories and compute/load choices.
+- WOT parameters.
+- symmetrization choices.
+- transition top-k values.
+- UMAP random states.
+- fate clustering resolutions/top-k values.
+- THP1/K562 split-and-block-embed logic.
+- plotting genes and output paths.
+
+Tests added:
+
+- `tests/test_cell_state_trajectories.py`
+
+Verification:
+
+- Targeted trajectory/notebook tests in the `chronopack` environment:
+  `15 passed`.
+- Full lightweight test suite in the `chronopack` environment:
+  `31 passed, 1 warning`.
+
+Representative full-data check:
+
+- Dataset: `k562-tnfa-puromycin.hg38`.
+- Runtime: historical `wot2`.
+- The check used the historical `chk0` HVG AnnData and the existing saved
+  `tmaps_sc` WOT maps, so it did not recompute WOT transport maps.
+- Comparison script:
+  `verification_runs/get_trajectories_package_backed_wot2_20260918_trajectory_migration/compare_puromycin_get_trajectories.py`
+- Summary:
+  `verification_runs/get_trajectories_package_backed_wot2_20260918_trajectory_migration/puromycin_get_trajectories_wot2_comparison_summary.json`
+
+Full-data result:
+
+- shape: `4034 x 3000` in package-backed and saved reference objects.
+- retained cells/order: identical.
+- retained genes/order: identical.
+- `X`: allclose, maximum absolute difference
+  `1.7763568394002505e-15`.
+- shared layers `counts`, `cpm`, `log1p`, and `corrected`: allclose; raw
+  count-derived layers are exact.
+- square cell-cell graphs match exactly:
+  - `ot_graph`
+  - `t_pruned`
+  - `W_terminal_cosine_topk`
+- terminal-cell distribution `terminal_cell_dist` matches exactly.
+- current `traj_clusters` matches the older saved `traj_leiden_sr` labels
+  exactly.
+- current `terminal_fate_probs_traj` does not match the older saved
+  `fate_probs_traj_last` matrix (`max_abs_diff=0.2618742883205414`) because
+  the older artifact used a separate backward-DP fate calculation rather than
+  the active notebook's terminal-cell distribution aggregation.
+
+Reference-artifact caveat:
+
+- The saved historical puromycin artifact uses the older obs/obsm naming branch
+  (`traj_leiden_sr`, `fate_probs_traj_last`).
+- The active notebooks now use standardized names (`traj_clusters`,
+  `terminal_fate_probs_traj`).
+- Therefore, the representative full-data check confirms exact equivalence of
+  the core WOT graph construction, cell-state clustering, and terminal-cell
+  distribution machinery, but the old saved fate-probability matrix is not a
+  direct reference for the active workflow.
+
+Status:
+
+- PreprocessDatasets: COMPLETE.
+- GetTrajectories / fate migration: COMPLETE.
+- Historical active-workflow equivalence: CONFIRMED.
+- Lightweight regression tests: passed.
+- Representative full-data core trajectory/fate comparison under `wot2`:
+  passed with the naming caveat above.
+- Fate probability difference versus the older `fate_probs_traj_last` artifact
+  remains documented as a historical workflow-version/reference-artifact
+  difference, not a package-migration regression.
+- Next vertical slice: PrepareForTradeSeq + TradeSeqFits as the
+  gene-dynamics fitting workflow.
+- Gene-dynamics fitting migration is now in progress below.
+
+Checkpoint note:
+
+- A Git checkpoint was requested after accepting the GetTrajectories migration,
+  but this managed session cannot write to `.git`:
+  `fatal: Unable to create .../.git/index.lock: Read-only file system`.
+- The working tree contains the accepted GetTrajectories changes and the
+  current gene-dynamics migration work; a manual checkpoint will be needed from
+  a writable Git session.
+
+## Gene-Dynamics Fitting Migration
+
+Started the next vertical slice:
+
+- `PrepareForTradeSeq`
+- `TradeSeqFits`
+
+This slice treats them together as the gene-dynamics fitting workflow. The
+intended public abstraction is:
+
+- `cp.tl.fit_gene_dynamics(...)`
+
+Added migration mapping:
+
+- `docs/developer/gene_dynamics_migration_mapping.md`
+
+Implemented package pieces:
+
+- `cp.tl.fit_gene_dynamics()` now has a real tradeSeq orchestration path.
+- `GeneDynamicsResult` records metadata, association/significant tables,
+  selected genes, sidecar paths, and optional backend result state.
+- `prepare_tradeseq_inputs()` writes the existing counts/time/subset-gene/full
+  library-size CSV inputs from AnnData.
+- Scalar association-test outputs can be written into `adata.var` under
+  `key_added`, for example `{key_added}_waldStat_1`,
+  `{key_added}_pvalue_1`, `{key_added}_qval_1`, and
+  `{key_added}_significant`.
+- Native SCE/gamList objects remain sidecar RDS outputs rather than being
+  stored in AnnData.
+
+Implemented R backend pieces:
+
+- Added `run_tradeseq_single_lineage()` to the bundled R backend:
+  `src/chronopack/_backends/r/tradeseq_helpers.R`.
+- Synced the source-checkout compatibility helper:
+  `chronopack/R/tradeseq_helpers.R`.
+- The new R function wraps the existing scientific behavior:
+  - read fixed tradeSeq CSV inputs;
+  - construct size factors, single-lineage pseudotime, cell weights, and
+    offset matrix;
+  - screen fit with `nknots=4`;
+  - `associationTest(..., global=FALSE, lineages=TRUE, inverse="Chol")`;
+  - p-value based gene selection with `pvalue_1 < 0.05`;
+  - final SCE and gamList fits with `nknots=8`;
+  - write configured CSV/RDS outputs and legacy aliases.
+
+Updated active TradeSeqFits notebooks to thin package-backed R workflow clients:
+
+- `k562-tnfa.hg38.rep/TradeSeqFits.ipynb`
+- `k562-tnfa-puromycin.hg38/TradeSeqFits.ipynb`
+- `thp1-k562-lps.hg38.rep/TradeSeqFits.K562.ipynb`
+- `thp1-k562-lps.hg38.rep/TradeSeqFits.THP1.ipynb`
+
+Runtime note:
+
+- The historical `tradeSeq_CE` environment has R/tradeSeq but does not have
+  `rpy2`.
+- Therefore historical-runtime equivalence should call the packaged R helper
+  directly from R.
+- The unified ChronoPack runtime can use the Python-first
+  `cp.tl.fit_gene_dynamics()` bridge.
+
+Verification so far:
+
+- R helper source/entrypoint smoke under `tradeSeq_CE`: passed for packaged and
+  compatibility helper paths.
+- R parse validation for all four active TradeSeqFits notebooks under
+  `tradeSeq_CE`: passed.
+- Targeted Python tests for gene dynamics and notebook structure:
+  `11 passed`.
+- Full lightweight pytest suite in the `chronopack` environment:
+  `35 passed, 1 warning`.
+
+Still pending for this slice:
+
+- Convert or further simplify active `PrepareForTradeSeq` notebooks.
+- Run representative historical-runtime regression under `tradeSeq_CE`
+  comparing old notebook implementation versus package-backed R helper.
+- Run representative unified-runtime smoke via `cp.tl.fit_gene_dynamics()`.
+- Perform full-data/HPC regression for the generated association CSVs and
+  SCE/gamList sidecars.
+- Do not begin DimensionalityReductionClustering until this boundary is
+  reviewed after those checks.

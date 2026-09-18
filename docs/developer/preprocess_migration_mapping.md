@@ -73,3 +73,87 @@ Optional fields used by some downstream paths:
 - Scanpy operations remain direct Scanpy calls unless ChronoPack adds workflow
   semantics.
 - No thresholds or biological filters should change in this migration.
+
+## Full-Data Regression
+
+Representative dataset:
+
+- `k562-tnfa-puromycin.hg38`
+
+Reference:
+
+- old preprocessing implementation under the historical `wot2` runtime.
+
+Validation run:
+
+- package-backed preprocessing implementation under the same historical `wot2`
+  runtime.
+- verification directory:
+  `verification_runs/preprocess_package_backed_wot2_20260918_134429`
+
+Result:
+
+- `adata_full.chk0.h5ad`: old and package-backed outputs are both
+  `4034 x 18833`.
+- `adata_hvg.chk0.h5ad`: old and package-backed outputs are both
+  `4034 x 3000`.
+- retained cell IDs and ordering match exactly.
+- retained gene IDs and ordering match exactly.
+- `X` matrices match exactly.
+- shared layers `counts`, `cpm`, and `log1p` match exactly.
+- relevant obs/var metadata match exactly except for small `doublet_score`
+  numerical differences.
+- `predicted_doublet` assignments match exactly.
+- final retained-cell set is unchanged.
+
+The maximum observed `doublet_score` absolute deviation was
+`0.015541014255667104`. This is not treated as a refactor blocker because the
+doublet calls and final preprocessing outputs are unchanged.
+
+Conclusion:
+
+- PreprocessDatasets package migration is scientifically equivalent under the
+  historical `wot2` runtime.
+
+## Unified Runtime Compatibility Note
+
+The unified ChronoPack runtime produces materially different Leiden partitions
+in the puromycin preprocessing notebook. This is documented as runtime/version
+sensitivity, not as a package-refactor regression.
+
+Observed versions:
+
+- historical `wot2`: Scanpy `1.11.1`, AnnData `0.11.4`, NumPy `2.2.6`,
+  SciPy `1.15.3`, scikit-learn `1.7.1`, scikit-image `0.25.2`.
+- unified ChronoPack runtime: Scanpy `1.11.5`, AnnData `0.12.19`,
+  NumPy `2.4.6`, SciPy `1.17.1`, scikit-learn `1.9.1`,
+  scikit-image `0.26.0`.
+
+First manual QC exclusion:
+
+- `wot2`: 6 Leiden clusters; numeric cluster `4` contains 145 cells.
+- unified runtime: 5 Leiden clusters; numeric cluster `4` contains 26 cells.
+- ARI: `0.5046855055033237`.
+- NMI: `0.5158418451310945`.
+- unified numeric cluster `4` exactly matches `wot2` cluster `5`, indicating
+  that numeric cluster IDs are not stable across runtimes.
+
+Second manual QC exclusion:
+
+- `wot2`: 4 Leiden clusters; numeric cluster `3` contains 66 cells.
+- unified runtime: 5 Leiden clusters; numeric cluster `3` contains 948 cells.
+- ARI: `0.4458315620650641`.
+- NMI: `0.4938063221387045`.
+- the intended `wot2` excluded cluster `3` maps best to unified cluster `4`
+  with Jaccard `0.875`.
+
+This issue is left open as a separate compatibility/methodology decision. This
+migration does not repin the unified environment to `wot2`, redo manual QC, or
+establish a new preprocessing baseline.
+
+Full preprocessing execution in the unified environment also surfaced direct
+runtime dependencies required by the active notebooks:
+
+- `scikit-image` for Scrublet.
+- `python-igraph` for Leiden clustering.
+- `leidenalg` for Leiden clustering.

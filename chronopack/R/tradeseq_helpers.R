@@ -248,3 +248,128 @@ save_rds_with_aliases <- function(x, path, aliases = character()) {
   }
   invisible(normalizePath(paths, mustWork = FALSE))
 }
+
+run_tradeseq_single_lineage <- function(input_dir,
+                                        n_points = 9,
+                                        workers = 4,
+                                        screen_nknots = 4,
+                                        final_nknots = 8,
+                                        p_threshold = 0.05,
+                                        output_association = "asso_df.1trajectory.nknots4.csv",
+                                        output_significant = "sig_df.1trajectory.nknots4.csv",
+                                        output_sce = "sce.1trajectory.nknots8.rds",
+                                        output_gamlist = "gamList.1trajectory.nknots8.rds",
+                                        association_aliases = character(),
+                                        significant_aliases = character(),
+                                        sce_aliases = character(),
+                                        gamlist_aliases = character(),
+                                        tag = "",
+                                        verbose = TRUE) {
+  old_wd <- getwd()
+  on.exit(setwd(old_wd), add = TRUE)
+  set_tradeseq_workdir(input_dir)
+
+  inputs <- read_tradeseq_inputs(tag = tag)
+  counts_sub <- inputs$counts_sub
+  time_vec <- inputs$time_vec
+  sf <- inputs$sf
+
+  stopifnot(
+    identical(colnames(counts_sub), names(time_vec)),
+    length(sf) == ncol(counts_sub)
+  )
+
+  single_lineage <- prepare_single_lineage(counts_sub, time_vec, sf)
+  PT <- single_lineage$PT
+  CW <- single_lineage$CW
+  offset_mat <- single_lineage$offset_mat
+
+  sce_screen <- fit_tradeseq_sce(
+    counts_sub = counts_sub,
+    pseudotime = PT,
+    cell_weights = CW,
+    offset_mat = offset_mat,
+    nknots = screen_nknots,
+    workers = workers,
+    verbose = verbose
+  )
+
+  asso_df <- association_df_single(sce_screen, n_points = n_points)
+  asso_df <- asso_df[!is.na(asso_df$waldStat_1), , drop = FALSE]
+
+  sig_df <- asso_df[!is.na(asso_df$qval_1) & asso_df$qval_1 < 0.05, , drop = FALSE]
+  sig_df <- sig_df[order(-sig_df$waldStat_1, -sig_df$meanLogFC), , drop = FALSE]
+
+  genes_keep <- significant_single_lineage(
+    asso_df,
+    p_threshold = p_threshold
+  )
+
+  write_csv_with_aliases(
+    asso_df,
+    output_association,
+    association_aliases
+  )
+  write_csv_with_aliases(
+    sig_df,
+    output_significant,
+    significant_aliases
+  )
+
+  counts_sig <- counts_sub[genes_keep, , drop = FALSE]
+  offset_sig <- make_offset_matrix(counts_sig, sf)
+
+  sce <- fit_tradeseq_sce(
+    counts_sub = counts_sig,
+    pseudotime = PT,
+    cell_weights = CW,
+    offset_mat = offset_sig,
+    nknots = final_nknots,
+    workers = workers,
+    verbose = verbose
+  )
+  sce_paths <- save_rds_with_aliases(
+    sce,
+    output_sce,
+    sce_aliases
+  )
+
+  gamList <- fit_tradeseq_gamlist(
+    counts_sub = counts_sig,
+    pseudotime = PT,
+    cell_weights = CW,
+    offset_mat = offset_sig,
+    nknots = final_nknots,
+    workers = workers,
+    verbose = verbose
+  )
+  gamlist_paths <- save_rds_with_aliases(
+    gamList,
+    output_gamlist,
+    gamlist_aliases
+  )
+
+  list(
+    input_dir = normalizePath(getwd(), mustWork = TRUE),
+    counts_dim = dim(inputs$counts),
+    counts_sub_dim = dim(counts_sub),
+    final_counts_dim = dim(counts_sig),
+    n_subset_genes = length(inputs$subset_genes),
+    n_genes_kept_initial = length(inputs$genes_keep),
+    n_tested = nrow(asso_df),
+    n_qval_significant = nrow(sig_df),
+    n_pvalue_significant = length(genes_keep),
+    genes_keep = genes_keep,
+    association_path = normalizePath(output_association, mustWork = FALSE),
+    significant_path = normalizePath(output_significant, mustWork = FALSE),
+    sce_path = normalizePath(output_sce, mustWork = FALSE),
+    gamlist_path = normalizePath(output_gamlist, mustWork = FALSE),
+    sce_paths = sce_paths,
+    gamlist_paths = gamlist_paths,
+    pseudotime = PT,
+    cell_weights = CW,
+    size_factors = sf,
+    association = asso_df,
+    significant = sig_df
+  )
+}

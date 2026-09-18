@@ -13,3 +13,4 @@
 # Don't track Jupyter checkpoint notebooks
 .ipynb_checkpoints/
 k562-tnfa-puromycin.hg38/DimensionalityReductionClustering.Old.ipynb
+k562-tnfa-puromycin.hg38/reference/DimensionalityReductionClustering.Old.ipynb

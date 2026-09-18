@@ -1299,3 +1299,81 @@ Environment milestone status:
 - Reproducible env definition: complete.
 
 No additional scientific workflow migration was started during this checkpoint.
+
+## PreprocessDatasets Package Migration
+
+Started the first scientific vertical migration after the packed HPC
+environment milestone was accepted.
+
+Added a preprocessing migration mapping:
+
+- `docs/developer/preprocess_migration_mapping.md`
+
+Public preprocessing API now lives under `cp.io`:
+
+- `cp.io.read_time_tagged_dge()`
+- `cp.io.add_time_metadata()`
+- `cp.io.annotate_qc_metrics()`
+- `cp.io.filter_cells_by_qc()`
+- `cp.io.filter_technical_genes()`
+- `cp.io.filter_low_count_genes()`
+- `cp.io.initialize_expression_layers()`
+- `cp.io.score_cell_cycle()`
+- `cp.io.validate_preprocessed_adata()`
+
+Internal schema/validation additions:
+
+- `src/chronopack/_core/_schema.py`
+- expanded `src/chronopack/_core/_validation.py`
+
+Established the current AnnData contract for preprocessing outputs:
+
+- unique cell IDs in `obs_names`
+- unique gene IDs/symbols in `var_names`
+- numeric `obs["time"]`
+- coarse categorical `obs["time_group"]` where time tags are loaded
+- sample metadata in `obs["sample"]` for current experiments
+- raw counts in `layers["counts"]`
+- normalized counts in `layers["cpm"]`
+- log-normalized expression in `layers["log1p"]`
+- QC flags `var["mt"]` and `var["rb"]`
+- Scanpy QC columns in `obs`
+- optional `layers["corrected"]` and `obs["cell_type"]` where produced
+- aligned matrix/layer/obs/var dimensions
+
+Kept dataset-specific choices in notebooks:
+
+- input paths and sample names
+- QC thresholds
+- Scrublet calls
+- Scanpy normalization/HVG/PCA/neighbors/UMAP/Leiden/ComBat workflow choices
+- manual QC cluster exclusions
+- THP1/K562 marker lists and cell-type assignment
+- output paths
+
+Updated active preprocessing notebooks to use `cp.io` for reusable behavior and
+to validate final checkpoint AnnData objects before writing:
+
+- `k562-tnfa.hg38.rep/PreprocessDatasets.ipynb`
+- `k562-tnfa-puromycin.hg38/PreprocessDatasets.ipynb`
+- `thp1-k562-lps.hg38.rep/PreprocessDatasets.ipynb`
+
+Removed stale trajectory imports from the puromycin preprocessing notebook.
+
+Compatibility shims remain temporarily:
+
+- `chronopack/preprocessing.py`
+- `src/chronopack/preprocessing.py`
+- `src/chronopack/_legacy/preprocessing.py`
+
+Regression tests:
+
+- Added `tests/test_preprocessing_api.py` with synthetic fixtures for DGE
+  loading, QC cell filtering, technical-gene filtering, low-count filtering,
+  expression-layer initialization, and explicit validation errors.
+- Updated notebook-structure tests to require `cp.io` preprocessing calls.
+- Notebook code cells parse successfully.
+- Full test suite in the verified packed runtime passed: `27 passed`.
+
+Full-data preprocessing regeneration was not rerun in this pass; this slice
+was verified with deterministic fixtures and structural notebook checks.

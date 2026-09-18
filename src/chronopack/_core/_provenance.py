@@ -8,6 +8,19 @@ from typing import Any
 from ._keys import CHRONOPACK_UNS_KEY
 
 
+def _h5ad_safe(value: Any) -> Any:
+    """Convert small provenance payloads to AnnData/HDF5-writable values."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, tuple):
+        return [_h5ad_safe(item) for item in value]
+    if isinstance(value, list):
+        return [_h5ad_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _h5ad_safe(item) for key, item in value.items()}
+    return str(value)
+
+
 def record_provenance(
     adata,
     key: str,
@@ -25,8 +38,8 @@ def record_provenance(
         "analysis": analysis,
         "chronopack_version": version,
         "backend": backend,
-        "parameters": dict(parameters or {}),
-        "result_keys": dict(result_keys or {}),
+        "parameters": _h5ad_safe(dict(parameters or {})),
+        "result_keys": _h5ad_safe(dict(result_keys or {})),
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }
     adata.uns[CHRONOPACK_UNS_KEY][key] = entry

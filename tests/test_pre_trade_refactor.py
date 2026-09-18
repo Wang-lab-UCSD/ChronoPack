@@ -40,7 +40,7 @@ def _code_sources(path):
 def test_refactored_notebooks_import_chronopack():
     for path in NOTEBOOKS:
         joined = "\n".join(_code_sources(path))
-        assert "from chronopack." in joined, path
+        assert ("from chronopack." in joined) or ("import chronopack" in joined), path
 
 
 def test_shared_helpers_are_not_redefined_in_active_cells():
@@ -70,8 +70,9 @@ def test_preprocess_notebooks_use_loader_and_qc_helper():
         "k562-tnfa-puromycin.hg38/PreprocessDatasets.ipynb",
     ]:
         joined = "\n".join(_code_sources(path))
-        assert "load_time_tagged_anndata" in joined, path
-        assert "filter_cells_by_qc" in joined, path
+        assert "cp.io.read_time_tagged_dge" in joined, path
+        assert "cp.io.filter_cells_by_qc" in joined, path
+        assert "cp.io.validate_preprocessed_adata" in joined, path
         assert "sc.pp.filter_cells" not in joined, path
 
 

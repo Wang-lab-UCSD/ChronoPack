@@ -1,0 +1,57 @@
+name: chronopack
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - python=3.11
+  - pip
+
+  # Core Python / AnnData / Scanpy workflow
+  - numpy>=2.0
+  - pandas>=2.2
+  - scipy>=1.15
+  - scikit-learn>=1.5
+  - statsmodels>=0.14
+  - anndata>=0.11
+  - scanpy>=1.11
+  - matplotlib>=3.10
+  - seaborn
+  - gseapy
+
+  # Python GRN/C2C/runtime bridge
+  - networkx>=3.4
+  - omnipath>=1.0
+  - rpy2
+
+  # Development / testing
+  - pytest
+  - hatchling
+  - ipykernel
+
+  # R / Bioconductor backend aligned with the working tradeSeq stack
+  - r-base=4.4
+  - bioconductor-tradeseq>=1.20
+  - bioconductor-singlecellexperiment>=1.28
+  - bioconductor-slingshot>=2.14
+  - bioconductor-biocparallel>=1.40
+  - bioconductor-summarizedexperiment>=1.36
+  - r-matrix
+  - r-fdrtool
+  - r-ggplot2
+  - r-dplyr
+  - r-tidyr
+  - r-tibble
+  - r-matrixstats
+  - r-rcolorbrewer
+  - r-patchwork
+  - r-circlize
+  - r-cluster
+  - r-ggrepel
+  - r-shadowtext
+  - r-purrr
+  - r-scales
+
+  # WaddingtonOT is not consistently available from conda-forge/bioconda.
+  - pip:
+      - wot==1.0.8.post2

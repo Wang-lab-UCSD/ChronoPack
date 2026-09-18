@@ -12,11 +12,18 @@
 !*.toml
 !LICENSE*
 !README*
+!env/*.yml
+!env/*.lock
+!env/*.txt
+!r/chronopackR/DESCRIPTION
 !src/**
 !tests/**
 
 __pycache__/
 *.py[cod]
+.conda_home/
+.conda_pkgs*/
+.envs/
 
 # Track this ignore file itself
 !.gitignore

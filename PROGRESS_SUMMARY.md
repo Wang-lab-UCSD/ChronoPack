@@ -1179,3 +1179,123 @@ Static verification:
   structure, C2C, OmniPath TF, and pre/trade notebook-structure tests.
 - Bundled R backend files parse successfully in the `tradeseq_ce` conda
   environment.
+
+## Unified Environment Setup
+
+Started the reproducible ChronoPack development/runtime environment pass before
+migrating additional scientific workflows.
+
+Added:
+
+- `env/environment.yml`: human-maintained mixed Python/R/Bioconductor
+  compatibility spec for the full ChronoPack workflow.
+- `env/README.md`: creation, editable-install, lockfile, and smoke-test
+  instructions.
+- `docs/developer/dependency_audit.md`: audited imports, versions observed in
+  `wot2`, `omnipath`, `tradeseq_ce`, and `r-fdr`, dependency categories, and
+  installer status.
+- `r/chronopackR/DESCRIPTION`: R backend dependency metadata placeholder for
+  the internal R package layer.
+
+The unified spec solves with Python 3.11, R 4.4.3, tradeSeq 1.20.0,
+SingleCellExperiment 1.28.0, slingshot 2.14.0, fdrtool 1.2.18, rpy2 3.6.6,
+scanpy/anndata, OmniPath, and WOT. No package-level conflict was observed.
+
+Follow-up verification established that the earlier install failures were
+filesystem/transaction issues on NFS rather than dependency conflicts. A tiny
+test environment and the full ChronoPack environment both installed
+successfully on `/tmp` tmpfs. The verified reference prefix is:
+
+- `/tmp/chronopack-ref-20260918113425`
+
+Phase E smoke tests passed:
+
+- ChronoPack installed in editable mode.
+- `import chronopack as cp`, `cp.io`, `cp.tl`, and `cp.pl` work from outside
+  the repository root.
+- Principal Python dependencies import successfully.
+- WOT imports and computes a toy 2 x 2 transport map.
+- R 4.4.3 starts from the prefix.
+- tradeSeq, SingleCellExperiment, fdrtool, and retained R plotting dependencies
+  load successfully.
+- rpy2 initializes the prefix R when the prefix `bin` is on `PATH`, and a
+  Python -> R -> Python round trip succeeds.
+- Bundled R backend resources are accessible through package resources.
+- `pytest` passes: 22 tests.
+
+Generated exact snapshots:
+
+- `env/conda-linux-64.lock`
+- `env/pip-freeze.txt`
+
+During verification, `cluster` was identified as a direct R plotting
+dependency and added to `env/environment.yml` and `r/chronopackR/DESCRIPTION`.
+
+## Packed HPC Environment Deployment
+
+The persistent environment strategy was updated after testing the cluster
+filesystem model:
+
+- `/new-stg/home/...` is persistent shared NFS.
+- `/tmp` is fast node-local tmpfs.
+- `/scratch/$USER/...` is fast node-local storage within compute allocations
+  but is not shared back to the login node.
+- `$TMPDIR` defaults to NFS and should be overridden for environment work.
+
+Decision:
+
+- Do not maintain a permanent live conda prefix on NFS.
+- Do not treat `/scratch` as persistent.
+- Keep `env/environment.yml`, `env/conda-linux-64.lock`, and
+  `env/pip-freeze.txt` as the canonical environment definition.
+- Use a persistent packed conda archive as the HPC deployment artifact.
+- Unpack that archive to node-local scratch per Slurm allocation/job.
+
+Created:
+
+- `env/activate_chronopack_hpc.sh`
+- `env/smoke_test_chronopack_hpc.sh`
+- `jobs/verify_chronopack_packed_env.slurm`
+
+Packed artifact:
+
+- `artifacts/env/chronopack-linux-64-20260918.tar.gz`
+- approximately 1.2 GB
+- not committed to Git
+
+The packed archive intentionally omits an editable ChronoPack install because
+`conda-pack` refuses editable packages. The activation helper unpacks the
+dependency runtime, runs `conda-unpack`, activates the prefix, and installs the
+current checkout in editable mode.
+
+Packed reconstruction verification:
+
+- Slurm job `925682`
+- runtime prefix `/scratch/alex/chronopack-925682/env`
+- ChronoPack import from outside the repository root passed.
+- `cp.io`, `cp.tl`, and `cp.pl` imports passed.
+- WOT toy transport smoke test passed.
+- R 4.4.3, tradeSeq, SingleCellExperiment, fdrtool, and retained R plotting
+  dependencies loaded.
+- rpy2 Python -> R -> Python round trip passed.
+- Bundled R resources were found through package-resource lookup.
+- `pytest` passed: 22 tests.
+
+Environment milestone status:
+
+- Package skeleton: complete.
+- Dependency audit: complete.
+- Unified specification: complete.
+- Solver compatibility: complete.
+- Packed HPC deployment: complete.
+- Editable install after unpack: complete.
+- Python runtime: complete.
+- R runtime: complete.
+- Python/R bridge: complete.
+- WOT smoke test: complete.
+- tradeSeq/fdrtool: complete.
+- R plotting dependencies: complete.
+- pytest: complete.
+- Reproducible env definition: complete.
+
+No additional scientific workflow migration was started during this checkpoint.

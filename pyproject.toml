@@ -13,21 +13,38 @@ authors = [
   { name = "ChronoPack developers" }
 ]
 dependencies = [
-  "anndata",
-  "numpy",
-  "pandas",
-  "scipy",
-  "scikit-learn",
+    "anndata",
+    "numpy",
+    "pandas",
+    "scipy",
+    "scikit-learn",
 ]
 
 [project.optional-dependencies]
 scanpy = [
   "scanpy",
 ]
+wot = [
+  "scanpy",
+  "wot==1.0.8.post2",
+]
+grn = [
+  "networkx",
+  "omnipath",
+]
+c2c = [
+  "matplotlib",
+  "scanpy",
+  "statsmodels",
+]
 r = [
   "rpy2",
 ]
 test = [
+  "pytest",
+]
+dev = [
+  "hatchling",
   "pytest",
 ]
 

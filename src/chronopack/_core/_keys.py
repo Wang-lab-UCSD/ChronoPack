@@ -19,5 +19,7 @@ CELL_STATE_TRAJECTORY_CLUSTER_KEY = "traj_clusters"
 TERMINAL_COSINE_GRAPH_KEY = "W_terminal_cosine_topk"
 
 GENE_DYNAMICS_KEY = "gene_dynamics"
+GENE_TRAJECTORY_KEY = "gene_trajectories"
+GENE_TRAJECTORY_CLUSTERING_KEY = "gene_trajectory_clusters"
 GENE_MODE_KEY = "cp_mode"
 GENE_FIT_KEY = "cp_fit"

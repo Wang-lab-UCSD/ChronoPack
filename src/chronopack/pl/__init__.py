@@ -15,4 +15,19 @@ def read_r_plotting_resource(name="dimred_plotting_helpers.R"):
     return read_r_resource_text(name)
 
 
-__all__ = ["r_plotting_resource_path", "read_r_plotting_resource"]
+def __getattr__(name):
+    if name in {"RPlotResult", "gene_trajectory", "cluster_trajectories", "trajectory_features"}:
+        from . import _gene_trajectory_plots
+
+        return getattr(_gene_trajectory_plots, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = [
+    "RPlotResult",
+    "cluster_trajectories",
+    "gene_trajectory",
+    "r_plotting_resource_path",
+    "read_r_plotting_resource",
+    "trajectory_features",
+]

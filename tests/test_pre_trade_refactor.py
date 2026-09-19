@@ -112,3 +112,17 @@ def test_tradeseq_fit_notebooks_use_backend_entrypoint():
         assert "run_tradeseq_single_lineage" in joined, path
         assert "fit_tradeseq_sce(" not in joined, path
         assert "fit_tradeseq_gamlist(" not in joined, path
+
+
+def test_prepare_tradeseq_notebooks_use_gene_dynamics_backend():
+    for path in [
+        "k562-tnfa.hg38.rep/PrepareForTradeSeq.ipynb",
+        "k562-tnfa-puromycin.hg38/PrepareForTradeSeq.ipynb",
+        "thp1-k562-lps.hg38.rep/PrepareForTradeSeq.ipynb",
+    ]:
+        joined = "\n".join(_code_sources(path))
+        assert "cp.tl.fit_gene_dynamics" in joined, path
+        assert "gd.compute_smooth_correlations" in joined, path
+        assert "gd.refilter_tag_bias_candidates" in joined, path
+        assert "gd.tag_bias_exclusion_genes" in joined, path
+        assert "WriteTradeSeqInputsFromAnnData" not in joined, path

@@ -1564,12 +1564,9 @@ Status:
 
 Checkpoint note:
 
-- A Git checkpoint was requested after accepting the GetTrajectories migration,
-  but this managed session cannot write to `.git`:
-  `fatal: Unable to create .../.git/index.lock: Read-only file system`.
-- The working tree contains the accepted GetTrajectories changes and the
-  current gene-dynamics migration work; a manual checkpoint will be needed from
-  a writable Git session.
+- Git checkpointing is intentionally user-managed from here onward.
+- This session leaves the working tree intact and does not attempt to write
+  `.git/index.lock`.
 
 ## Gene-Dynamics Fitting Migration
 
@@ -1624,6 +1621,26 @@ Updated active TradeSeqFits notebooks to thin package-backed R workflow clients:
 - `thp1-k562-lps.hg38.rep/TradeSeqFits.K562.ipynb`
 - `thp1-k562-lps.hg38.rep/TradeSeqFits.THP1.ipynb`
 
+Updated active PrepareForTradeSeq notebooks to thin package-backed workflow
+clients for reusable preparation logic:
+
+- `k562-tnfa.hg38.rep/PrepareForTradeSeq.ipynb`
+- `k562-tnfa-puromycin.hg38/PrepareForTradeSeq.ipynb`
+- `thp1-k562-lps.hg38.rep/PrepareForTradeSeq.ipynb`
+
+Reusable preparation now lives behind the gene-dynamics workflow rather than in
+notebook-local implementations:
+
+- counts/time/subset-gene/full-library-size construction:
+  `prepare_tradeseq_inputs()`;
+- negative-control loading and temporal pseudobulk:
+  `load_negative_control_logcpm()` and
+  `temporal_pseudobulk_from_anndata()`;
+- time-tag-bias scoring and filtering:
+  `compute_smooth_correlations()`,
+  `refilter_tag_bias_candidates()`, and
+  `tag_bias_exclusion_genes()`.
+
 Runtime note:
 
 - The historical `tradeSeq_CE` environment has R/tradeSeq but does not have
@@ -1642,15 +1659,283 @@ Verification so far:
 - Targeted Python tests for gene dynamics and notebook structure:
   `11 passed`.
 - Full lightweight pytest suite in the `chronopack` environment:
-  `35 passed, 1 warning`.
+  `36 passed, 1 warning`.
 
-Still pending for this slice:
+Representative full-data regression:
 
-- Convert or further simplify active `PrepareForTradeSeq` notebooks.
-- Run representative historical-runtime regression under `tradeSeq_CE`
-  comparing old notebook implementation versus package-backed R helper.
-- Run representative unified-runtime smoke via `cp.tl.fit_gene_dynamics()`.
-- Perform full-data/HPC regression for the generated association CSVs and
-  SCE/gamList sidecars.
-- Do not begin DimensionalityReductionClustering until this boundary is
-  reviewed after those checks.
+- Dataset: K562 + TNFa + puromycin fixed tradeSeq input.
+- Verification directory:
+  `verification_runs/gene_dynamics_migration_20260918/`.
+- Historical runtime:
+  `tradeseq_ce`, R 4.4.3, tradeSeq 1.20.0, R-only helper invocation.
+- Unified runtime:
+  `chronopack`, Python-first `cp.tl.fit_gene_dynamics()` through `rpy2`.
+
+Input equivalence:
+
+- Counts matrix, gene order, cell order, and values matched exactly.
+- `cell_times.csv.gz`, `subset_genes.csv`, and `cell_libsize_full.csv`
+  matched byte-for-byte for both verification runs.
+
+Historical saved artifact versus packaged R-helper rerun:
+
+- association rows: `13896` saved versus `13890` rerun.
+- association-gene overlap: `13885`, Jaccard `0.998849`.
+- q-value-significant rows: `678` saved versus `674` rerun.
+- q-value-significant overlap: `673`, Jaccard `0.991163`.
+- final fitted genes in SCE/gamList: `1645` saved versus `1641` rerun.
+- final fitted-gene overlap: `1636`, Jaccard `0.991515`.
+- association median absolute differences on shared rows:
+  - `waldStat_1`: `0.0004227`
+  - `pvalue_1`: `2.49e-05`
+  - `qval_1`: `0`
+  - `meanLogFC`: `3.0e-15`
+- `predictSmooth` on shared final gamList genes:
+  - shared genes: `1636`
+  - evaluation points: `9`
+  - median absolute difference: `0.0485`
+  - correlation: `0.9278`
+
+Unified runtime versus saved historical artifact:
+
+- association rows: `13888`.
+- association-gene overlap: `13883`, Jaccard `0.998705`.
+- q-value-significant rows: `674`.
+- q-value-significant overlap: `674`, Jaccard `0.994100`.
+- final fitted genes in SCE/gamList: `1639`.
+- final fitted-gene overlap: `1636`, Jaccard `0.992718`.
+- association median absolute differences on shared rows:
+  - `waldStat_1`: `0.0003911`
+  - `pvalue_1`: `2.32e-05`
+  - `qval_1`: `0`
+  - `meanLogFC`: `3.0e-15`
+- `predictSmooth` on shared final gamList genes:
+  - median absolute difference: `0.0619`
+  - correlation: `0.9307`
+
+Interpretation:
+
+- The preparation/refactor layer is equivalent: all inputs reaching tradeSeq are
+  identical.
+- Native tradeSeq outputs are not exactly reproducible on rerun because the
+  active historical workflow did not set a random seed; this affects a small
+  number of nonconverged/tested genes and near-threshold significant genes even
+  under the historical `tradeseq_ce` runtime.
+- No thresholds or scientific behavior were changed to improve agreement.
+
+Unified-runtime smoke:
+
+- `cp.tl.fit_gene_dynamics()` completed from Python/AnnData through rpy2 into
+  the bundled R tradeSeq backend.
+- `rpy2` worked under normal conda activation.
+- R resources were found from the package source/resource path.
+- `adata.var` contains:
+  `gene_dynamics_waldStat_1`, `gene_dynamics_df_1`,
+  `gene_dynamics_pvalue_1`, `gene_dynamics_meanLogFC`,
+  `gene_dynamics_qval_1`, and `gene_dynamics_significant`.
+- Provenance and sidecar paths were serializable.
+- The resulting AnnData wrote to and read from `.h5ad`.
+
+Downstream compatibility:
+
+- DimensionalityReductionClustering still consumes association CSVs,
+  significant CSVs, `sce.1trajectory.nknots8.rds`,
+  `gamList.1trajectory.nknots8.rds`, and the fixed count/time/library-size
+  sidecars.
+- Those sidecars remain intentionally preserved in this slice.
+- Fitted trajectories are not yet standardized into `adata.varm`; that belongs
+  with the later gene-trajectory characterization /
+  DimensionalityReductionClustering migration.
+
+Status:
+
+- PrepareForTradeSeq + TradeSeqFits package migration: COMPLETE with the
+  stochastic tradeSeq rerun caveat documented above.
+- Historical-runtime preparation equivalence: CONFIRMED.
+- Full native tradeSeq output exact equality: NOT EXPECTED for reruns without a
+  fixed seed; observed drift quantified above.
+- Unified-runtime smoke: PASSED.
+- DimensionalityReductionClustering migration began after this accepted
+  boundary.
+
+## Gene-Trajectory Characterization / Dynamic-Mode Migration
+
+Migrated the computational portion of
+`k562-tnfa-puromycin.hg38/DimensionalityReduction&Clustering.self_contained.ipynb`
+into ChronoPack.
+
+Public API introduced:
+
+- `cp.tl.characterize_gene_trajectories(...)`
+- `cp.tl.cluster_gene_trajectories(...)`
+
+Implementation notes:
+
+- The established R implementation remains the scientific backend.
+- Python orchestrates the R backend and writes standardized AnnData outputs.
+- Native SCE/gamList sidecars are still retained because downstream retained R
+  plotting has not yet been migrated.
+- Publication plotting, mode conservation, GRN, and C2C remain out of scope.
+
+New/updated implementation files:
+
+- `src/chronopack/tl/_gene_clustering.py`
+- `src/chronopack/_backends/r/dimred_clustering_helpers.R`
+- `chronopack/R/dimred_clustering_helpers.R`
+- `src/chronopack/_core/_keys.py`
+
+Standardized AnnData contract:
+
+- Characterization writes descriptor columns into `adata.var`, namespaced by
+  `key_added`.
+- Fitted curves are written to `adata.varm[f"{key}_fit"]`.
+- Derivative/normalized derivative curves are written to
+  `adata.varm[f"{key}_fit_ddt"]`.
+- Clustering writes dynamic-mode / cluster annotations into `adata.var`.
+- PCA scores are written to `adata.varm[f"{key}_X_pca"]`.
+- Provenance and sidecar paths are recorded in `adata.uns["chronopack"]`.
+
+Active notebook update:
+
+- `k562-tnfa-puromycin.hg38/DimensionalityReduction&Clustering.self_contained.ipynb`
+  is now a thin Python workflow client with:
+  - dataset/root configuration;
+  - `cp.tl.characterize_gene_trajectories(...)`;
+  - `cp.tl.cluster_gene_trajectories(...)`;
+  - inspection and output saving.
+
+R backend changes:
+
+- Added task-level functions:
+  - `chronopack_characterize_gene_trajectories()`
+  - `chronopack_cluster_gene_trajectories()`
+- Replaced the fragile `cluster::silhouette()` dependency with an internal
+  silhouette-width calculation using the same distance-matrix/label definition.
+  This was necessary because the current unified R runtime did not expose the
+  `cluster` package to the backend.
+
+Regression verification:
+
+- Verification directory:
+  `verification_runs/dimred_package_migration_20260918/`
+- Fixed upstream tradeSeq sidecars were used; no NB-GAM fits were regenerated.
+- Package task output was compared against an old-style stepwise execution of
+  the active helper sequence on the same sidecars.
+
+Package task versus stepwise helper sequence:
+
+- `pc_df.new.csv`: same shape `500 x 35`.
+- Row order: identical.
+- Column order: identical.
+- Numeric columns: maximum absolute difference `0` for every compared column.
+- Categorical columns: match fraction `1.0`.
+- Standardized fitted trajectory matrix: same shape `500 x 8`.
+- Fitted trajectory values: maximum absolute difference `0`.
+
+Important sidecar-universe caveat:
+
+- The current saved fixed sidecars used for this regression contain only
+  per-experiment fitted genes.
+- The active DimRed feature-selection logic requires fitted genes to be
+  available across contexts.
+- Therefore the current sidecar set produces `500` gene-context rows.
+- The older extended reference produced `6753` rows because it used larger
+  union/extension gamLists.
+- This is an upstream sidecar/fitted-gene-universe difference, not a
+  DimensionalityReductionClustering package-wrapper discrepancy.
+
+Testing:
+
+- Added `tests/test_gene_trajectory_clustering.py`.
+- Updated structural notebook tests for the new public API.
+- Full lightweight suite:
+  `39 passed, 1 warning`.
+
+Status:
+
+- Computational DimensionalityReductionClustering migration: COMPLETE for the
+  currently available fixed sidecar universe.
+- Historical package-vs-stepwise behavior on identical inputs: CONFIRMED.
+- Older extended-reference row-count mismatch: DOCUMENTED as an input-sidecar
+  universe difference.
+- Native tradeSeq sidecars: still required for retained plotting and not
+  deprecated yet.
+- Stop before retained R plotting, mode conservation, GRN, or C2C.
+
+## Retained R Plotting Integration
+
+Status: COMPLETE for reusable gene-dynamics / gene-trajectory /
+dynamic-mode plotting primitives.
+
+Scope:
+
+- Migrated reusable plotting operations behind `chronopack.pl`.
+- Preserved the existing R/ggplot2 rendering boundary.
+- Did not migrate mode conservation, Sankey/chord cross-context analysis, GRN,
+  C2C, or any new scientific methodology.
+
+Public plotting API:
+
+- `cp.pl.gene_trajectory(...)`
+- `cp.pl.cluster_trajectories(...)`
+- `cp.pl.trajectory_features(...)`
+
+Implementation:
+
+- Added Python wrappers in `src/chronopack/pl/_gene_trajectory_plots.py`.
+- Added explicit R renderers to
+  `src/chronopack/_backends/r/dimred_plotting_helpers.R` and mirrored them in
+  `chronopack/R/dimred_plotting_helpers.R`.
+- The wrappers extract explicit plotting tables from standardized AnnData and
+  return an `RPlotResult` containing the plotted data and output path.
+- R renderers consume CSV plotting tables and write `pdf`, `svg`, or `png`.
+
+Standardized inputs consumed:
+
+- `adata.varm["gene_trajectories_fit"]`
+- `adata.varm["gene_trajectory_clusters_X_pca"]`
+- dynamic-mode / fine-cluster columns in `adata.var`
+- descriptor columns in `adata.var`
+- time grid in `adata.uns["chronopack"]["gene_trajectories"]`
+
+Active notebook update:
+
+- `k562-tnfa-puromycin.hg38/DimensionalityReduction&Clustering.cluster_visualization.ipynb`
+  now loads `gene_trajectory_clusters.h5ad`, keeps dataset-specific selections
+  in the notebook, and calls `cp.pl` for reusable plotting.
+- Reusable ggplot helper definitions were removed from the active notebook.
+
+Sidecar status:
+
+- Migrated plot primitives use standardized AnnData only.
+- Native `gamList*.rds` and `sce*.rds` are not required by these migrated plot
+  functions.
+- Native sidecars are still retained for unmigrated diagnostics/plotting and
+  future mode-conservation review; no sidecars were deleted.
+
+Documentation:
+
+- Added `docs/developer/gene_trajectory_plotting_migration_mapping.md`.
+
+Testing:
+
+- Added `tests/test_gene_trajectory_plots.py`.
+- Plot-data regression checks cover selected gene trajectories, median/IQR
+  cluster summaries, PCA/feature extraction, and missing-key errors.
+- R-backed smoke test renders a representative SVG through ggplot2.
+- Full-data plotting-data regression on the fixed DimRed package-migration
+  outputs:
+  - standardized AnnData shape: `0 x 500`;
+  - selected gene-trajectory plotting data max absolute difference: `0`;
+  - broad-cluster median/IQR summary max absolute difference: `0`;
+  - representative rendered SVGs:
+    `cluster_trajectories.svg` (`54,796` bytes) and
+    `trajectory_features.svg` (`254,698` bytes).
+- Full lightweight suite: `45 passed, 1 warning`.
+
+Handoff fix:
+
+- `cp.tl.cluster_gene_trajectories(...)` now preserves the characterization
+  AnnData when called with a characterization result, so the final clustering
+  AnnData retains standardized fitted trajectories in
+  `adata.varm["gene_trajectories_fit"]` for downstream plotting.

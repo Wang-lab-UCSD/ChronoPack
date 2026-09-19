@@ -224,6 +224,152 @@ Unified-runtime smoke:
   the unified ChronoPack runtime through `cp.tl.fit_gene_dynamics()`.
 - Report numerical/version drift separately from refactor equivalence.
 
+## Implemented API And Backend Boundary
+
+Implemented public entry point:
+
+```python
+cp.tl.fit_gene_dynamics(
+    adata=None,
+    *,
+    time_key="time",
+    layer="counts",
+    backend="tradeseq",
+    key_added="gene_dynamics",
+    input_dir=None,
+    output_dir=None,
+    full_adata=None,
+    prepare_inputs=False,
+    run_backend=True,
+    n_points=9,
+    workers=4,
+    screen_nknots=4,
+    final_nknots=8,
+    p_threshold=0.05,
+    outputs=None,
+    legacy_outputs=None,
+    tag="",
+    verbose=True,
+    copy=False,
+    return_model=True,
+)
+```
+
+Former `PrepareForTradeSeq` functionality is represented internally by:
+
+- `prepare_tradeseq_inputs()`;
+- `temporal_pseudobulk_from_anndata()`;
+- `load_negative_control_logcpm()`;
+- `compute_smooth_correlations()`;
+- `refilter_tag_bias_candidates()`;
+- `tag_bias_exclusion_genes()`.
+
+The active `PrepareForTradeSeq` notebooks are now thin workflow clients that
+retain dataset paths and explicit filtering choices but call the package-backed
+helpers. The active `TradeSeqFits` notebooks call
+`run_tradeseq_single_lineage()` from the bundled R backend.
+
+## Full-Data Regression: Puromycin Representative
+
+Verification directory:
+
+- `verification_runs/gene_dynamics_migration_20260918/`
+
+Reference active historical outputs:
+
+- `verification_runs/filename_migration_20260917_074750/k562-tnfa-puromycin.hg38/intmd/sc-K562-1e6-to-tradeSeq.fixed/`
+
+Historical-runtime regression:
+
+- Runtime: `tradeseq_ce`, R 4.4.3, tradeSeq 1.20.0.
+- Invocation: packaged R helper directly from R/Rscript, without `rpy2`.
+- Inputs reaching tradeSeq were identical to the active historical reference:
+  - counts matrix shape, genes, cells, order, and values matched exactly;
+  - `cell_times.csv.gz`, `subset_genes.csv`, and `cell_libsize_full.csv`
+    matched byte-for-byte.
+
+The historical active workflow did not set a random seed. A rerun under the
+same `tradeseq_ce` runtime therefore did not reproduce the saved native
+tradeSeq objects exactly. This is recorded as tradeSeq/runtime stochasticity,
+not as a preparation-layer refactor difference.
+
+Observed historical saved artifact versus packaged R-helper rerun:
+
+- association rows: `13896` saved versus `13890` rerun;
+- association-gene overlap: `13885` genes, Jaccard `0.998849`;
+- q-value-significant rows: `678` saved versus `674` rerun;
+- q-value-significant overlap: `673` genes, Jaccard `0.991163`;
+- final gamList/SCE genes: `1645` saved versus `1641` rerun;
+- final fitted-gene overlap: `1636` genes, Jaccard `0.991515`;
+- association median absolute differences on shared rows:
+  - `waldStat_1`: `0.0004227`;
+  - `pvalue_1`: `2.49e-05`;
+  - `qval_1`: `0`;
+  - `meanLogFC`: `3.0e-15`.
+
+Downstream fitted-curve check on shared final gamList genes:
+
+- shared genes: `1636`;
+- evaluation points: `9`;
+- `predictSmooth` median absolute difference: `0.0485`;
+- `predictSmooth` correlation: `0.9278`.
+
+Unified-runtime smoke:
+
+- Runtime: unified `chronopack` environment.
+- Invocation: Python-first `cp.tl.fit_gene_dynamics()` with AnnData supplied.
+- `rpy2` initialized successfully through normal conda activation.
+- Packaged R resources were located through the package source/resource path.
+- Standardized columns were written to `adata.var`:
+  - `gene_dynamics_waldStat_1`;
+  - `gene_dynamics_df_1`;
+  - `gene_dynamics_pvalue_1`;
+  - `gene_dynamics_meanLogFC`;
+  - `gene_dynamics_qval_1`;
+  - `gene_dynamics_significant`.
+- Provenance and sidecar paths were serializable.
+- The resulting AnnData wrote to and read from `.h5ad`.
+
+Unified runtime versus saved historical artifact:
+
+- association rows: `13888`;
+- association-gene overlap: `13883` genes, Jaccard `0.998705`;
+- q-value-significant rows: `674`;
+- q-value-significant overlap: `674` genes, Jaccard `0.994100`;
+- final gamList/SCE genes: `1639`;
+- final fitted-gene overlap: `1636` genes, Jaccard `0.992718`;
+- association median absolute differences on shared rows:
+  - `waldStat_1`: `0.0003911`;
+  - `pvalue_1`: `2.32e-05`;
+  - `qval_1`: `0`;
+  - `meanLogFC`: `3.0e-15`.
+- `predictSmooth` median absolute difference: `0.0619`;
+- `predictSmooth` correlation: `0.9307`.
+
+The direct packaged R-helper rerun and unified Python/rpy2 run were also very
+similar to each other:
+
+- final fitted-gene overlap: `1633` genes, Jaccard `0.991500`.
+
+## Downstream Compatibility
+
+The next DimensionalityReductionClustering workflow currently consumes native
+sidecars directly:
+
+- association CSVs;
+- significant-gene CSVs;
+- `sce.1trajectory.nknots8.rds`;
+- `gamList.1trajectory.nknots8.rds`;
+- counts/cell-time/full-library-size inputs used to reconstruct `PT`, `CW`,
+  and size factors.
+
+Therefore SCE and gamList sidecars remain required compatibility artifacts for
+the next migration. Standardized scalar association outputs in `adata.var` are
+available now, but fitted trajectories are not yet written to `adata.varm`
+because the active TradeSeqFits notebooks do not extract fitted curves. That
+standardization belongs with the later gene-trajectory characterization /
+DimensionalityReductionClustering migration.
+
 ## Out Of Scope For This Slice
 
 - DimensionalityReductionClustering.

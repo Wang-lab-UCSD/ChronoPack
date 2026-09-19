@@ -678,6 +678,33 @@ calculate_trajectory_clustering_metrics <- function(
 
   if (max(K_grid) >= n) stop("max(K_grid) must be smaller than the number of genes.")
 
+  silhouette_widths_from_dist <- function(cl, D) {
+    cl <- as.factor(cl)
+    Dm <- as.matrix(D)
+    n <- length(cl)
+    out <- numeric(n)
+    levels_cl <- levels(cl)
+    for (i in seq_len(n)) {
+      same <- which(cl == cl[i])
+      same <- same[same != i]
+      if (!length(same)) {
+        out[i] <- 0
+        next
+      }
+      a <- mean(Dm[i, same], na.rm = TRUE)
+      other_levels <- setdiff(levels_cl, as.character(cl[i]))
+      b_vals <- vapply(other_levels, function(k) {
+        idx <- which(cl == k)
+        if (!length(idx)) return(Inf)
+        mean(Dm[i, idx], na.rm = TRUE)
+      }, numeric(1))
+      b <- min(b_vals, na.rm = TRUE)
+      denom <- max(a, b)
+      out[i] <- if (is.finite(denom) && denom > 0) (b - a) / denom else 0
+    }
+    out
+  }
+
   calc_for_k <- function(K) {
 
     if (!is.null(hc)) {
@@ -698,13 +725,13 @@ calculate_trajectory_clustering_metrics <- function(
     }
 
     d_to_centroid <- sqrt(rowSums((X_mat - gene_centroids)^2))
-    sil <- cluster::silhouette(cl, D)
+    sil_width <- silhouette_widths_from_dist(cl, D)
 
     data.frame(
       K = K,
       WSS = sum(d_to_centroid^2),
       p90_centroid_distance = unname(quantile(d_to_centroid, 0.90, na.rm = TRUE)),
-      mean_silhouette = mean(sil[, "sil_width"], na.rm = TRUE)
+      mean_silhouette = mean(sil_width, na.rm = TRUE)
     )
   }
 
@@ -713,12 +740,12 @@ calculate_trajectory_clustering_metrics <- function(
   WSS_minK <- metrics$WSS[1]
   WSS_maxK <- metrics$WSS[nrow(metrics)]
 
-  metrics <- metrics %>%
-    dplyr::mutate(
+  metrics <- dplyr::mutate(
+    metrics,
       resolution = (WSS_minK - WSS) / (WSS_minK - WSS_maxK),
       k_norm = (K - min(K)) / (max(K) - min(K)),
       elbow_score = resolution - k_norm
-    )
+  )
 
   eligible <- which(metrics$resolution >= wss_fraction)
 
@@ -1259,4 +1286,219 @@ finalize_dimred_pc_df <- function(pc_df, cell_type_order = c("K562a", "K562b", "
   pc_df$cluster_dist_broad <- dplyr::coalesce(pc_df$cluster_dist_broad_induced, pc_df$cluster_dist_broad_repressed)
   pc_df$cluster_dist_fine <- dplyr::coalesce(pc_df$cluster_dist_fine_induced, pc_df$cluster_dist_fine_repressed)
   pc_df[order(match(as.character(pc_df$cell_type), cell_type_order)), , drop = FALSE]
+}
+
+write_matrix_csv <- function(x, path) {
+  write.csv(as.data.frame(x, check.names = FALSE), path, row.names = TRUE)
+  invisible(normalizePath(path, mustWork = FALSE))
+}
+
+chronopack_characterize_gene_trajectories <- function(
+  cfg,
+  output_dir,
+  keys = c("K562a", "K562_puro", "K562b", "THP1"),
+  t_interval_map = c(K562a = 10, K562_puro = 10, K562b = 15, THP1 = 15),
+  time_map = c(K562a = 12, K562_puro = 12, K562b = 12, THP1 = 12),
+  offset_map = c(K562a = 0, K562_puro = 0, K562b = 0, THP1 = 0),
+  scale_map = c(THP1 = 0.65),
+  pvalue_threshold = 0.05,
+  descriptor_args = NULL,
+  lineage_pick = 1,
+  write_outputs = TRUE
+) {
+  output_dir <- normalizePath(output_dir, mustWork = FALSE)
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+  loaded <- load_dimred_fixed_tradeSeq_outputs(cfg)
+  feature_info <- select_dimred_features(
+    asso_df.ls = loaded$asso_df.ls,
+    gamList.ls = loaded$gamList.ls,
+    keys = keys,
+    pvalue_threshold = pvalue_threshold
+  )
+
+  traj.ls <- extract_dimred_smooth_trajectories(
+    gamList.ls = loaded$gamList.ls,
+    sce.ls = loaded$sce.ls,
+    sf.ls = loaded$sf.ls,
+    PT.ls = loaded$PT.ls,
+    features = feature_info$usable_features,
+    keys = keys,
+    t_interval_map = t_interval_map,
+    lineage_pick = lineage_pick
+  )
+
+  align_res <- align_rescale_dimred_trajectories(
+    traj.ls = traj.ls,
+    time_map = time_map,
+    offset_map = offset_map,
+    scale_map = scale_map
+  )
+
+  traj_res <- construct_dimred_traj_matrix(align_res$traj_trunc_rescaled.ls)
+  traj_mat <- traj_res$traj_mat
+  tt <- traj_res$tt
+
+  if (is.null(descriptor_args)) {
+    descriptor_args <- list(
+      N_minutes = 10 / length(tt),
+      z_diff_threshold = 0.2,
+      require_consecutive = 30,
+      onset_mode = "horizontal",
+      pseudocount = 0
+    )
+  }
+
+  pc_df <- build_dimred_pc_df(
+    traj_mat = traj_mat,
+    tt = tt,
+    asso_df.ls = loaded$asso_df.ls,
+    scale_map_use = align_res$scale_map_use,
+    descriptor_args = descriptor_args
+  )
+
+  matrix_res <- prepare_dimred_matrices(
+    traj_mat = traj_mat,
+    tt = tt,
+    pc_df = pc_df,
+    significance_col = "pvalue_1",
+    significance_threshold = pvalue_threshold
+  )
+
+  paths <- list()
+  if (isTRUE(write_outputs)) {
+    paths$traj_mat <- file.path(output_dir, "gene_trajectory_fit.csv")
+    paths$time_grid <- file.path(output_dir, "gene_trajectory_time_grid.csv")
+    paths$pc_df_characterized <- file.path(output_dir, "pc_df.characterized.csv")
+    paths$X <- file.path(output_dir, "gene_trajectory_fit_z.csv")
+    paths$Xd <- file.path(output_dir, "gene_trajectory_fit_ddt_z.csv")
+    paths$X_mat <- file.path(output_dir, "gene_trajectory_fit_significant_z.csv")
+    paths$Xd_mat <- file.path(output_dir, "gene_trajectory_fit_ddt_significant_z.csv")
+
+    write_matrix_csv(traj_mat, paths$traj_mat)
+    write.csv(data.frame(time = tt), paths$time_grid, row.names = FALSE)
+    write.csv(pc_df, paths$pc_df_characterized)
+    write_matrix_csv(matrix_res$X, paths$X)
+    write_matrix_csv(matrix_res$Xd, paths$Xd)
+    write_matrix_csv(matrix_res$X_mat, paths$X_mat)
+    write_matrix_csv(matrix_res$Xd_mat, paths$Xd_mat)
+  }
+
+  out <- list(
+    loaded = loaded,
+    feature_info = feature_info,
+    traj = traj.ls,
+    align = align_res,
+    tt = tt,
+    traj_mat = traj_mat,
+    pc_df = pc_df,
+    matrix_res = matrix_res,
+    paths = paths,
+    parameters = list(
+      keys = keys,
+      t_interval_map = t_interval_map,
+      time_map = time_map,
+      offset_map = offset_map,
+      scale_map = scale_map,
+      pvalue_threshold = pvalue_threshold,
+      descriptor_args = descriptor_args,
+      lineage_pick = lineage_pick
+    )
+  )
+  class(out) <- c("chronopack_gene_trajectory_characterization", class(out))
+  out
+}
+
+chronopack_cluster_gene_trajectories <- function(
+  characterization,
+  output_dir,
+  alpha = 0.25,
+  log2fc_threshold = 0,
+  K_grid = 2:100,
+  wss_fraction = 0.95,
+  select_k_by = "elbow",
+  variance_threshold = 0.99,
+  pca_columns = 4,
+  cell_type_order = c("K562a", "K562b", "K562_puro", "THP1"),
+  write_outputs = TRUE
+) {
+  output_dir <- normalizePath(output_dir, mustWork = FALSE)
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+  pc_df <- characterization$pc_df
+  matrix_res <- characterization$matrix_res
+  X_mat <- matrix_res$X_mat
+  Xd_mat <- matrix_res$Xd_mat
+
+  pca_res <- compute_dimred_pca(
+    X_mat = X_mat,
+    Xd_mat = Xd_mat,
+    variance_threshold = variance_threshold
+  )
+  pc_df <- add_dimred_pca_columns(pc_df, pca_res$pca_X, n_columns = pca_columns)
+
+  clustering_inputs <- prepare_dimred_clustering_inputs(X_mat, Xd_mat)
+  induced_res <- run_dimred_signed_clustering(
+    pc_df = pc_df,
+    X_n = clustering_inputs$X_n,
+    Xd_n = clustering_inputs$Xd_n,
+    sign = "induced",
+    alpha = alpha,
+    log2fc_threshold = log2fc_threshold,
+    K_grid = K_grid,
+    wss_fraction = wss_fraction,
+    select_k_by = select_k_by
+  )
+  repressed_res <- run_dimred_signed_clustering(
+    pc_df = pc_df,
+    X_n = clustering_inputs$X_n,
+    Xd_n = clustering_inputs$Xd_n,
+    sign = "repressed",
+    alpha = alpha,
+    log2fc_threshold = log2fc_threshold,
+    K_grid = K_grid,
+    wss_fraction = wss_fraction,
+    select_k_by = select_k_by
+  )
+
+  pc_df <- add_dimred_signed_clusters(pc_df, induced_res, repressed_res)
+  pc_df <- finalize_dimred_pc_df(pc_df, cell_type_order = cell_type_order)
+
+  paths <- list()
+  if (isTRUE(write_outputs)) {
+    paths$pc_df <- file.path(output_dir, "pc_df.new.csv")
+    paths$pc_df_rds <- file.path(output_dir, "pc_df.new.rds")
+    paths$pca_X <- file.path(output_dir, "gene_trajectory_X_pca.csv")
+    paths$pca_Xd <- file.path(output_dir, "gene_trajectory_Xd_pca.csv")
+    paths$induced_metrics <- file.path(output_dir, "cluster_metrics.induced.csv")
+    paths$repressed_metrics <- file.path(output_dir, "cluster_metrics.repressed.csv")
+
+    write.csv(pc_df, paths$pc_df)
+    saveRDS(pc_df, paths$pc_df_rds)
+    write_matrix_csv(pca_res$pca_X$x, paths$pca_X)
+    write_matrix_csv(pca_res$pca_Xd$x, paths$pca_Xd)
+    write.csv(induced_res$clust_eval$metrics, paths$induced_metrics, row.names = FALSE)
+    write.csv(repressed_res$clust_eval$metrics, paths$repressed_metrics, row.names = FALSE)
+  }
+
+  out <- list(
+    pc_df = pc_df,
+    pca_res = pca_res,
+    clustering_inputs = clustering_inputs,
+    induced = induced_res,
+    repressed = repressed_res,
+    paths = paths,
+    parameters = list(
+      alpha = alpha,
+      log2fc_threshold = log2fc_threshold,
+      K_grid = K_grid,
+      wss_fraction = wss_fraction,
+      select_k_by = select_k_by,
+      variance_threshold = variance_threshold,
+      pca_columns = pca_columns,
+      cell_type_order = cell_type_order
+    )
+  )
+  class(out) <- c("chronopack_gene_trajectory_clustering", class(out))
+  out
 }

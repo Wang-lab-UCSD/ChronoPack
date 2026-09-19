@@ -27,8 +27,8 @@ def test_notebook_exists_and_writes_expected_outputs():
     assert NOTEBOOK.exists()
     active = _active_code()
     assert 'pc_df.new.csv' in active
-    assert 'pc_df.new.rds' in active
-    assert 'saveRDS(pc_df, file.path(SELF_CONTAINED_OUTDIR, "pc_df.new.rds"))' in active
+    assert "gene_trajectory_characterization.h5ad" in active
+    assert "gene_trajectory_clusters.h5ad" in active
 
 
 def test_checkpoint_reads_from_old_dimensionality_notebooks_are_not_active_inputs():
@@ -56,18 +56,17 @@ def test_checkpoint_reads_from_old_dimensionality_notebooks_are_not_active_input
 
 def test_all_four_datasets_are_loaded_from_primary_tradeseq_configs():
     active = _active_code()
-    assert "chronopack_dimred_config(" in active
-    assert "load_dimred_fixed_tradeSeq_outputs(cfg)" in active
-    for key in ["K562_puro", "K562a", "K562b", "THP1"]:
-        assert re.search(rf'"{key}"', active)
+    assert "cp.tl.characterize_gene_trajectories(" in active
+    assert "cp.tl.cluster_gene_trajectories(" in active
+    for key in ["root_puro", "root_k562a", "root_lps"]:
+        assert key in active
 
 
-def test_dimred_helpers_are_sourced_from_chronopack():
+def test_dimred_notebook_uses_public_chronopack_api():
     active = _active_code()
-    assert "dimred_clustering_helpers.R" in active
-    assert "dimred_plotting_helpers.R" in active
-    assert "run_dimred_signed_clustering(" in active
-    assert "prepare_dimred_clustering_inputs(X_mat, Xd_mat)" in active
+    assert "import chronopack as cp" in active
+    assert "run_dimred_signed_clustering(" not in active
+    assert "prepare_dimred_clustering_inputs(" not in active
     assert "cl_repressed_renamed" not in active
 
 
@@ -81,5 +80,4 @@ def test_notebook_has_no_inline_function_definitions():
 
 def test_optional_reference_validation_is_gated_by_environment_variable():
     active = _active_code()
-    assert 'Sys.getenv("CHRONOPACK_VALIDATE_REFERENCE")' in active
-    assert 'VALIDATE_AGAINST_REFERENCE <- identical(Sys.getenv("CHRONOPACK_VALIDATE_REFERENCE"), "1")' in active
+    assert 'os.environ.get("CHRONOPACK_VALIDATE_REFERENCE")' in active

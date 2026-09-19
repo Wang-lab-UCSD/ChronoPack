@@ -4576,3 +4576,151 @@ plot_pca_reconstruction <- function(gene, X_mat, pca_X, time = tt, n_pcs = c(3, 
     theme_classic()
 }
 
+chronopack_save_ggplot <- function(plot, output, width = 7, height = 5, dpi = 300) {
+  output <- path.expand(output)
+  dir.create(dirname(output), recursive = TRUE, showWarnings = FALSE)
+  ext <- tolower(tools::file_ext(output))
+
+  if (ext == "pdf") {
+    grDevices::pdf(output, width = width, height = height)
+  } else if (ext == "svg") {
+    grDevices::svg(output, width = width, height = height)
+  } else if (ext == "png") {
+    grDevices::png(output, width = width, height = height, units = "in", res = dpi)
+  } else {
+    stop("Unsupported plot output extension: ", ext, ". Use pdf, svg, or png.")
+  }
+  on.exit(grDevices::dev.off(), add = TRUE)
+  print(plot)
+  invisible(output)
+}
+
+chronopack_mode_palette <- function(levels) {
+  base <- c(
+    "impulse-up_1" = "#F8766D",
+    "impulse-up_2" = "#D84A42",
+    "trend-up" = "#C29A33",
+    "transient-down" = "#8B78C6",
+    "trend-down_1" = "#619CFF",
+    "trend-down_2" = "#3C6FB6"
+  )
+  levels <- as.character(levels)
+  missing <- setdiff(levels, names(base))
+  if (length(missing) > 0) {
+    extra <- grDevices::hcl.colors(length(missing), palette = "Dark 3")
+    names(extra) <- missing
+    base <- c(base, extra)
+  }
+  base[levels]
+}
+
+chronopack_plot_gene_trajectory_csv <- function(
+  data_path,
+  output,
+  width = 9,
+  height = 6,
+  title = "",
+  normalize = FALSE
+) {
+  df <- utils::read.csv(data_path, check.names = FALSE, stringsAsFactors = FALSE)
+  required <- c("row_id", "gene", "cell_type", "time", "value")
+  missing <- setdiff(required, colnames(df))
+  if (length(missing) > 0) stop("Missing required columns: ", paste(missing, collapse = ", "))
+
+  df$label <- ifelse(
+    is.na(df$cell_type) | df$cell_type == "",
+    df$gene,
+    paste0(df$gene, " (", df$cell_type, ")")
+  )
+  if (!"broad_cluster" %in% colnames(df)) df$broad_cluster <- "trajectory"
+  df$broad_cluster <- as.character(df$broad_cluster)
+  pal <- chronopack_mode_palette(sort(unique(df$broad_cluster)))
+  title_value <- if (nzchar(title)) title else NULL
+
+  p <- ggplot2::ggplot(df, ggplot2::aes(time, value, color = broad_cluster, group = row_id)) +
+    ggplot2::geom_line(linewidth = 0.9, alpha = 0.9) +
+    ggplot2::facet_wrap(stats::as.formula("~ label"), scales = "free_y", ncol = 3) +
+    ggplot2::scale_color_manual(values = pal) +
+    ggplot2::labs(
+      title = title_value,
+      x = "Aligned time (min)",
+      y = ifelse(isTRUE(normalize), "z trajectory", "Trajectory"),
+      color = NULL
+    ) +
+    ggplot2::theme_classic(base_size = 11) +
+    ggplot2::theme(
+      strip.text = ggplot2::element_text(size = 8),
+      legend.position = "bottom"
+    )
+
+  chronopack_save_ggplot(p, output, width = width, height = height)
+}
+
+chronopack_plot_cluster_trajectories_csv <- function(
+  data_path,
+  output,
+  width = 8,
+  height = 5,
+  title = "",
+  normalize = TRUE
+) {
+  df <- utils::read.csv(data_path, check.names = FALSE, stringsAsFactors = FALSE)
+  required <- c("cluster", "time", "median", "q25", "q75", "n")
+  missing <- setdiff(required, colnames(df))
+  if (length(missing) > 0) stop("Missing required columns: ", paste(missing, collapse = ", "))
+  df$cluster <- as.character(df$cluster)
+  pal <- chronopack_mode_palette(sort(unique(df$cluster)))
+  title_value <- if (nzchar(title)) title else NULL
+
+  p <- ggplot2::ggplot(df, ggplot2::aes(time, median, color = cluster, fill = cluster)) +
+    ggplot2::geom_ribbon(ggplot2::aes(ymin = q25, ymax = q75), alpha = 0.18, color = NA) +
+    ggplot2::geom_line(linewidth = 1.1) +
+    ggplot2::scale_color_manual(values = pal) +
+    ggplot2::scale_fill_manual(values = pal) +
+    ggplot2::labs(
+      title = title_value,
+      x = "Aligned time (min)",
+      y = ifelse(isTRUE(normalize), "Median z trajectory", "Median trajectory"),
+      color = NULL,
+      fill = NULL
+    ) +
+    ggplot2::theme_classic(base_size = 12)
+
+  chronopack_save_ggplot(p, output, width = width, height = height)
+}
+
+chronopack_plot_trajectory_features_csv <- function(
+  data_path,
+  output,
+  width = 6,
+  height = 5,
+  title = "",
+  x = "PC1",
+  y = "PC2",
+  color = "broad_cluster"
+) {
+  df <- utils::read.csv(data_path, check.names = FALSE, stringsAsFactors = FALSE)
+  required <- c(x, y, color)
+  missing <- setdiff(required, colnames(df))
+  if (length(missing) > 0) stop("Missing required columns: ", paste(missing, collapse = ", "))
+  title_value <- if (nzchar(title)) title else NULL
+
+  p <- ggplot2::ggplot(df, ggplot2::aes_string(x = x, y = y, color = color)) +
+    ggplot2::geom_point(size = 1.3, alpha = 0.9) +
+    ggplot2::labs(
+      title = title_value,
+      x = x,
+      y = y,
+      color = color
+    ) +
+    ggplot2::theme_classic(base_size = 12)
+
+  if (!is.numeric(df[[color]])) {
+    pal <- chronopack_mode_palette(sort(unique(as.character(df[[color]]))))
+    p <- p + ggplot2::scale_color_manual(values = pal)
+  } else {
+    p <- p + ggplot2::scale_color_viridis_c()
+  }
+
+  chronopack_save_ggplot(p, output, width = width, height = height)
+}

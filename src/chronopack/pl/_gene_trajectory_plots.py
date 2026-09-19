@@ -40,7 +40,12 @@ def _prefixed_var_col(adata, key: str, col: str) -> str:
 def _fit_matrix(adata, fit_key: str) -> np.ndarray:
     key = f"{fit_key}_fit"
     if key not in adata.varm:
-        raise KeyError(f"Missing standardized fitted trajectory matrix adata.varm['{key}'].")
+        raise KeyError(
+            f"Missing standardized fitted trajectory matrix adata.varm['{key}']. "
+            "Regenerate this object with cp.tl.characterize_gene_trajectories() and "
+            "cp.tl.cluster_gene_trajectories(), or migrate the legacy artifact by "
+            "adding the standardized fitted-trajectory matrix before plotting."
+        )
     fit = np.asarray(adata.varm[key], dtype=float)
     if fit.shape[0] != adata.n_vars:
         raise ValueError(f"adata.varm['{key}'] has {fit.shape[0]} rows but adata has {adata.n_vars} genes.")

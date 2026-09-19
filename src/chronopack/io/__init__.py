@@ -38,6 +38,7 @@ __all__ = [
     "TIME_GROUP_CATEGORIES",
     "add_time_metadata",
     "annotate_qc_flags",
+    "annotate_qc_metrics",
     "filter_cells_by_qc",
     "filter_low_count_genes",
     "filter_technical_genes",
@@ -50,12 +51,16 @@ __all__ = [
     "validate",
     "validate_preprocessed_adata",
     "write_h5ad",
-    "write_tradeseq_inputs",
 ]
 
 
 def write_tradeseq_inputs(*args, **kwargs):
-    """Write tradeSeq inputs using the legacy-compatible helper."""
+    """Write tradeSeq inputs using the legacy-compatible helper.
+
+    This helper is retained for migrated notebooks. New workflows should call
+    :func:`chronopack.tl.fit_gene_dynamics`, which prepares tradeSeq inputs as
+    an internal backend step.
+    """
     from chronopack._legacy.tradeseq import WriteTradeSeqInputsFromAnnData
 
     return WriteTradeSeqInputsFromAnnData(*args, **kwargs)

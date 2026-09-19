@@ -1939,3 +1939,457 @@ Handoff fix:
   AnnData when called with a characterization result, so the final clustering
   AnnData retains standardized fitted trajectories in
   `adata.varm["gene_trajectories_fit"]` for downstream plotting.
+
+## Cross-Context Mode Conservation / Mode Switching
+
+Status: COMPLETE for reusable cross-context dynamic-mode comparison analysis
+and direct result-object plotting.
+
+Scope:
+
+- Migrated mode-conservation and mode-switching analysis into `chronopack.tl`.
+- Added cross-context plotting wrappers in `chronopack.pl`.
+- Did not migrate GRN, C2C, or introduce new scientific methodology.
+
+Public API:
+
+- `cp.tl.mode_conservation(...)`
+- `cp.tl.mode_switchers(...)`
+- `cp.pl.mode_conservation(...)`
+- `cp.pl.mode_sankey(...)`
+- `cp.pl.mode_chord(...)`
+
+Result object:
+
+- `ModeConservationResult.directional_scores`
+- `ModeConservationResult.conservation_scores`
+- `ModeConservationResult.gene_matches`
+- `ModeConservationResult.mode_transitions`
+- `ModeConservationResult.switchers`
+- `ModeConservationResult.parameters`
+
+Conservation definition preserved:
+
+- For each source mode, select high-confidence dynamic genes.
+- Rank by the existing NB-GAM/Wald rank column.
+- Retain the current top-k source set.
+- Recover genes in the target if they are high-confidence and retain the same
+  broad mode.
+- Repeat in the opposite direction.
+- Average directional recovery fractions.
+
+Important semantics:
+
+- Source selection remains top-k/rank based.
+- Target recovery remains high-confidence same-mode membership and does not
+  require rank preservation.
+- Missing genes and low-significance genes are represented separately by
+  default.
+- `treat_missing_as_low_significance=True` is available for workflows that
+  intentionally impute missing assignments into the low-significance category.
+- Plotting consumes result tables and does not reimplement significance
+  filtering, top-k selection, or mode matching.
+
+Standardized inputs consumed:
+
+- `adata.var["gene_trajectories_gene"]`
+- `adata.var["gene_trajectories_cell_type"]`
+- `adata.var["gene_trajectories_waldStat_1"]`
+- `adata.var["gene_trajectories_qval_1"]`
+- `adata.var["gene_trajectory_clusters_broad_cluster"]`
+
+Temporary compatibility:
+
+- `pc_df`-style DataFrames are accepted for regression and notebook migration.
+- Historical `pc_df` CSV/RDS files are not the core package representation.
+
+Active notebook:
+
+- Added `k562-tnfa-puromycin.hg38/ModeConservation.ipynb`.
+- The notebook loads standardized `gene_trajectory_clusters.h5ad`, runs
+  `cp.tl.mode_conservation(...)`, writes result tables, and renders package
+  plots.
+
+Regression verification:
+
+- Fixed upstream input:
+  `verification_runs/dimred_package_migration_20260918/output_pkg3/pc_df.new.csv`
+  (`500 x 35`).
+- No tradeSeq fits or clustering were regenerated.
+- Package output was compared against an independent stepwise calculation of
+  the documented conservation definition.
+
+Representative checks:
+
+- `K562a` to `THP1`
+  - top-k: `20`
+  - directional rows compared: `6`
+  - directional recovery maximum absolute difference: `0`
+  - transition rows: `27`
+  - switcher rows: `96`
+  - SVG renders:
+    - `mode_sankey.K562a_to_THP1.svg` (`81,876` bytes)
+    - `mode_conservation.K562a_THP1.svg` (`41,084` bytes)
+
+- `K562a` to `K562_puro`
+  - top-k: `20`
+  - directional rows compared: `6`
+  - directional recovery maximum absolute difference: `0`
+  - transition rows: `26`
+  - switcher rows: `99`
+  - SVG render:
+    - `mode_sankey.K562a_to_K562_puro.svg` (`81,246` bytes)
+
+Gene-universe caveat:
+
+- These checks use the current fixed-sidecar `500` row universe.
+- The older extended `~6753` row universe remains an upstream fitted-gene
+  sidecar issue and was not reconstructed inside the conservation workflow.
+
+Sidecar status:
+
+- Migrated mode-conservation analysis does not require `gamList*.rds`,
+  `sce*.rds`, association CSVs, or significant-gene CSVs.
+- No sidecars were deleted.
+
+Documentation:
+
+- Added `docs/developer/mode_conservation_migration_mapping.md`.
+
+Testing:
+
+- Added `tests/test_mode_conservation.py`.
+- Full lightweight suite: `51 passed, 1 warning`.
+
+## GRN Inference Package Migration
+
+Status: complete for ChronoPack GRN inference. GRN benchmarking and C2C
+benchmarking remain intentionally outside the package.
+
+Public API introduced under `cp.tl.grn`:
+
+- `cp.tl.grn.rank_regulators(...)`
+  - package-backed OmniPath signed diffusion TF prioritization;
+  - returns `TFRankingResult`.
+- `cp.tl.grn.score_targets(...)`
+  - package-backed R/fdrtool target-gene LFDR recalibration;
+  - loads `grn_inference_helpers.R` through packaged resources;
+  - returns `TargetGeneScoreResult`.
+- `cp.tl.grn.infer(...)`
+  - builds standardized ChronoPack TF-target edge scores from target-gene
+    scores and TF priority scores;
+  - returns `GRNResult`.
+
+`GRNResult.edges` uses the standardized columns:
+
+- `method`
+- `regulator`
+- `target`
+- `score`
+- `rank`
+- `percentile`
+
+The full network is not stored in AnnData because TF-target edges are not
+aligned to either AnnData axis. `GRNResult` provides CSV/Parquet/JSON
+serialization and a `to_legacy_edges()` compatibility export.
+
+Compatibility retained temporarily:
+
+- `chronopack.grn_inference`
+- `chronopack.omnipath_tf`
+- `cp.tl.grn.build_chronopack_ranked_edges(...)`
+- `cp.tl.grn.write_chronopack_ranked_edges(...)`
+
+The compatibility wrapper can reproduce the old benchmark-era edge artifact
+when an explicit TRRUST/ENCODE-derived TF universe is supplied. This filtering
+is not part of the new clean public GRN inference notebook/API.
+
+Active notebooks converted to thin package clients:
+
+- `grn_inference/OmnipathTFPrioritization.ipynb`
+  - calls `cp.tl.grn.rank_regulators(...)`;
+  - writes OmniPath TF-rank CSVs.
+- `grn_inference/GeneScoreLfdrRecalibration.ipynb`
+  - calls `cp.tl.grn.score_targets(...)`;
+  - writes score, summary, and parameter CSVs.
+- `grn_inference/ChronoPackRegulatoryEdges.ipynb`
+  - calls `cp.tl.grn.infer(...)`;
+  - writes clean GRN result outputs under
+    `grn_inference/outputs/tables/chronopack_grn/`;
+  - no benchmark-specific TF-universe filtering is applied.
+
+Regression verification with fixed upstream inputs:
+
+- Target-gene recalibration outputs reproduced the existing local references
+  exactly:
+  - scores: `23718 x 13`, max numeric absolute difference `0`;
+  - summary: `16 x 11`, max numeric absolute difference `0`;
+  - params: `30 x 4`, max numeric absolute difference `0`.
+- Historical compatibility edge regression against
+  `regulator_prioritization_chronopack_ranked_edges.csv`:
+  - shape: `4334306 x 6`;
+  - no missing TF-target rows after alignment by `method + TF + target`;
+  - max `EdgeWeight` absolute difference:
+    `4.656612873077393e-10`;
+  - max rank absolute difference: `0`;
+  - max percentile absolute difference: `1.1102230246251565e-16`.
+- Clean public `cp.tl.grn.infer(...)` output without benchmark-era TF filtering:
+  - shape: `5009770 x 6`;
+  - regulators: `263`;
+  - targets: `13469`.
+
+Regression artifacts:
+
+- `verification_runs/grn_package_migration_20260918/`
+
+Documentation:
+
+- Added `docs/developer/grn_inference_migration_mapping.md`.
+- The documentation records that benchmarking is maintained as a separate
+  research workflow. ChronoPack provides inference outputs and standardized
+  result representations; benchmark datasets, gold standards, comparator
+  methods, benchmark-specific TF universes, and evaluation metrics are not
+  package APIs.
+
+Testing:
+
+- Added `tests/test_grn_inference.py`.
+- Focused GRN/OmniPath test slice: `7 passed`.
+
+## CellCommunication / C2C Package Migration
+
+Status: complete for core CellCommunication/C2C inference. C2C benchmarking
+remains intentionally outside ChronoPack.
+
+Public API introduced:
+
+- `cp.tl.c2c.infer(...)`
+  - package-backed temporal sender-to-receiver LR communication inference;
+  - returns `C2CResult`.
+- `cp.pl.c2c.interaction_scatter(...)`
+  - reusable LR pair score scatter from a precomputed `C2CResult`.
+- `cp.pl.c2c.pair_overlay(...)`
+  - reusable LR activity / receiver-response overlay from `C2CResult`
+    temporal profiles.
+- `cp.pl.c2c.plot_genes_over_time(...)`
+  - compatibility plotting helper for selected gene expression over time.
+
+`C2CResult` contains:
+
+- `interactions`;
+- `ligand_scores`;
+- `temporal_profiles`;
+- `candidate_interactions`;
+- sender/receiver detection vectors;
+- parameters and provenance.
+
+The communication network is not stored in AnnData because LR interactions are
+not naturally aligned to either AnnData axis.
+
+Preserved method:
+
+- CellChat-style secreted LR resource filtering;
+- ligand/receptor component parsing and expression eligibility;
+- ligand restriction to temporal association rows;
+- sender ligand and receiver receptor temporal series construction;
+- existing LR activity transform;
+- receiver response module series;
+- baseline-subtracted early-window mean activity over `0-45` minutes;
+- ligand `-log10(p + 1e-3)` significance;
+- ligand z-score composite ranking.
+
+Active notebook:
+
+- `c2c/CellCommunication.ipynb` is now a thin package-backed client.
+- It keeps paths, sender/receiver definitions, response genes, parameter
+  choices, output saving, and manuscript-specific TNF/selected-gene callouts.
+- Reusable inference lives in `cp.tl.c2c`; reusable result plots live in
+  `cp.pl.c2c`.
+
+Full-data regression with frozen upstream inputs:
+
+- pair scores:
+  - shape: `189 x 8`;
+  - no missing LR pair identities;
+  - max numeric absolute difference: `1.1102230246251565e-16`;
+  - nonnumeric columns identical.
+- pair scores with rank:
+  - shape: `189 x 8`;
+  - no missing LR pair identities;
+  - max numeric absolute difference: `4.440892098500626e-16`;
+  - nonnumeric columns identical.
+- ligand scores:
+  - shape: `73 x 11`;
+  - max numeric absolute difference: `1.7763568394002505e-15`;
+  - nonnumeric columns identical.
+
+`C2CResult` full-data payload:
+
+- candidate interactions: `189 x 14`;
+- interactions: `189 x 11`;
+- ligand scores: `73 x 11`;
+- temporal profiles: `2268 x 8`.
+
+Regression artifacts:
+
+- `verification_runs/c2c_package_migration_20260918/`
+
+Documentation:
+
+- Added `docs/developer/c2c_migration_mapping.md`.
+- C2C benchmarking scope is explicitly kept outside ChronoPack. No
+  `cp.tl.c2c.benchmark` API was added.
+
+Testing:
+
+- Updated `tests/test_c2c.py`.
+- Focused C2C test slice: `6 passed`.
+
+## Package-Wide Integration / Compatibility Audit
+
+Status: complete for the integration/audit pass. This was not a new scientific
+workflow migration.
+
+Major package-backed workflows now complete:
+
+- PreprocessDatasets;
+- GetTrajectories / fate;
+- gene dynamics / tradeSeq;
+- gene-trajectory characterization;
+- dynamic-mode clustering;
+- retained R plotting;
+- mode conservation / switching;
+- GRN inference;
+- CellCommunication / C2C.
+
+Added:
+
+- `docs/developer/package_integration_audit.md`
+
+The audit reviews:
+
+- public API inventory across `cp.io`, `cp.tl`, `cp.pl`, `cp.tl.grn`, and
+  `cp.tl.c2c`;
+- standardized AnnData/result-object schema;
+- representative end-to-end object compatibility using frozen artifacts;
+- legacy shims and generated sidecars;
+- active notebook thin-client status;
+- remaining deprecation candidates and release-hardening issues.
+
+Representative integration artifact:
+
+- `verification_runs/package_integration_audit_20260918/integration_report.json`
+
+Integration checks covered:
+
+- preprocessing AnnData contract and reloadability;
+- post-GetTrajectories/fate artifacts with `traj_clusters`, fate probabilities
+  in `obsm`, and square cell graphs in `obsp`;
+- gene-dynamics AnnData keys and h5ad round-trip;
+- gene trajectory plotting-data extraction;
+- mode-conservation result generation;
+- GRN serialized clean public edge table;
+- C2C serialized result tables.
+
+Clear compatibility issues found:
+
+- The frozen `gene_trajectory_clusters.h5ad` under
+  `verification_runs/dimred_package_migration_20260918/output_pkg3/` is stale
+  relative to the current plotting/mode-conservation contract. It lacks:
+  - `adata.varm["gene_trajectories_fit"]`;
+  - `adata.var["gene_trajectories_gene"]`;
+  - `adata.var["gene_trajectories_cell_type"]`.
+- The audit created an explicit migrated copy:
+  - `verification_runs/package_integration_audit_20260918/gene_trajectory_clusters.migrated_for_integration.h5ad`
+- `cp.pl` remains strict and does not silently reconstruct this state.
+
+Small fixes made:
+
+- Removed a stale variable reference in
+  `cp.tl.characterize_gene_trajectories(adata=None, ...)`.
+- Improved the missing-fit plotting error to direct users to regenerate or
+  explicitly migrate legacy artifacts.
+
+Notebook audit:
+
+- Active notebooks are thin clients overall.
+- Remaining local functions are path helpers, one-off cluster-label mappings,
+  manuscript/inspection selection helpers, or R workflow-client setup glue.
+
+Benchmarking scope remains unchanged:
+
+- GRN benchmarking and C2C benchmarking are outside ChronoPack.
+- No benchmark namespaces, metrics, gold standards, comparator methods, or
+  benchmark-specific workflows were added.
+
+## Release-Readiness Cleanup
+
+Status: in progress for the first public release candidate boundary.
+
+Scope:
+
+- No scientific methods were added or redesigned.
+- GRN and C2C benchmarking remain outside ChronoPack.
+- Compatibility modules are retained for the first release and now explicitly
+  warn users toward the modern API.
+
+Added:
+
+- `CHANGELOG.md`
+- `LICENSE`
+- `docs/user/installation.md`
+- `docs/user/quickstart.md`
+- `docs/developer/release_readiness_audit.md`
+
+Public API cleanup:
+
+- `cp.tl` now exports the main result classes:
+  `CellStateTrajectoryResult`, `GeneDynamicsResult`,
+  `GeneTrajectoryCharacterizationResult`,
+  `GeneTrajectoryClusteringResult`, and `ModeConservationResult`.
+- `cp.tl.grn.__all__` is limited to the clean public inference API and result
+  classes.
+- `cp.tl.c2c.__all__` is limited to `infer` and `C2CResult`; legacy helper
+  attributes remain importable for active notebooks.
+- `cp.io.__all__` now includes `annotate_qc_metrics`; legacy
+  `write_tradeseq_inputs` remains available but is not part of the recommended
+  public surface.
+
+Packaging cleanup:
+
+- Version source is centralized in `src/chronopack/__init__.py`.
+- Source distributions include docs, changelog, license, environment specs,
+  tests, and packaged R backend resources.
+- The proprietary placeholder license should be reviewed before any true public
+  distribution.
+
+Stale artifact policy:
+
+- The old `gene_trajectory_clusters.h5ad` missing current-contract fields is
+  documented as legacy.
+- Tests and plotting APIs should use a current-contract regenerated or
+  explicitly migrated artifact and should not silently reconstruct missing
+  fitted trajectory state.
+
+Release verification:
+
+- Source lightweight tests: `59 passed, 4 warnings`.
+- Built artifacts:
+  - `dist/chronopack-0.1.0-py3-none-any.whl`
+  - `dist/chronopack-0.1.0.tar.gz`
+- Wheel inspection confirmed bundled R resources:
+  `dimred_clustering_helpers.R`, `dimred_plotting_helpers.R`,
+  `grn_inference_helpers.R`, and `tradeseq_helpers.R`.
+- Clean non-editable wheel smoke test from outside the repository passed:
+  public namespace imports, installed-package R resource lookup, and rpy2
+  round-trip against R `4.4.3`.
+- Installed-wheel synthetic test subset: `44 passed, 4 warnings`.
+
+Known warnings:
+
+- Three `FutureWarning`s are intentional legacy-compatibility warnings for
+  `chronopack.c2c`, `chronopack.omnipath_tf`, and `chronopack.tradeseq`.
+- One `legacy_api_wrap` warning reports AnnData `X` conversion to `float64` in
+  the synthetic preprocessing test; retained as harmless/documented behavior.
+- Cluster-local pip cache warnings reflect the current NFS/cache permissions
+  and are not ChronoPack package warnings.

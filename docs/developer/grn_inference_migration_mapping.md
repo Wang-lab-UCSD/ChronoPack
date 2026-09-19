@@ -1,0 +1,182 @@
+# GRN Inference Migration Mapping
+
+Status: package-backed GRN inference slice complete.
+
+This pass migrated reusable ChronoPack GRN inference into `cp.tl.grn`. It did
+not migrate GRN benchmarking, comparator methods, gold standards, evaluation
+metrics, Perturb-seq/TRRUST/ENCODE benchmark logic, or C2C benchmarking.
+
+## Public API
+
+- `cp.tl.grn.rank_regulators(...)`
+  - Loads OmniPath and CellChat-style ligand-receptor resources.
+  - Builds the signed OmniPath TF graph.
+  - Ranks context-specific TFs with the existing signed absorbing diffusion
+    workflow.
+  - Returns `TFRankingResult`.
+
+- `cp.tl.grn.score_targets(...)`
+  - Runs the packaged R/fdrtool target-gene LFDR recalibration helper.
+  - Returns `TargetGeneScoreResult` with `scores`, `summary`, and `params`
+    DataFrames.
+
+- `cp.tl.grn.infer(...)`
+  - Builds ChronoPack TF-target edge scores from recalibrated target-gene
+    scores and TF priority scores.
+  - Returns `GRNResult`.
+  - Uses the existing core calculation:
+    `gene_score = 1 - lfdr_bum`,
+    `tf_score = priority_act / sum(priority_act)`,
+    `edge score = outer(tf_score, gene_score)`, followed by the historical
+    deterministic tie-breaking/ranking behavior.
+
+Compatibility:
+
+- `cp.tl.grn.build_chronopack_ranked_edges(...)`
+- `cp.tl.grn.write_chronopack_ranked_edges(...)`
+- top-level `chronopack.grn_inference`
+- top-level `chronopack.omnipath_tf`
+
+These preserve old imports while active notebooks migrate to the public
+`cp.tl.grn` namespace.
+
+## Result Objects
+
+`GRNResult` contains:
+
+- `edges`: standardized edge DataFrame with
+  `method`, `regulator`, `target`, `score`, `rank`, `percentile`;
+- `regulators`: regulator priority tables used by each method/context;
+- `target_scores`: target-gene scores used by each method/context;
+- `parameters`;
+- `provenance`.
+
+The full TF-target network is not stored in AnnData because it is not aligned
+to either AnnData axis. `GRNResult.write()` exports CSV and, when available,
+Parquet plus JSON metadata. `GRNResult.to_legacy_edges()` exports the
+historical `TF` / `EdgeWeight` schema for compatibility.
+
+`TargetGeneScoreResult` contains the fdrtool/BUM score, summary, and parameter
+tables. `TFRankingResult` contains one TF ranking table per context plus
+diffusion histories.
+
+## Current Workflow Mapping
+
+| Historical code / notebook block | Purpose | Package location | Public? |
+| --- | --- | --- | --- |
+| `load_omnipath_tf_resources()` | load OmniPath, transcriptional, LR, and TF resources | `cp.tl.grn` / legacy compatibility | public |
+| `build_omnipath_tf_graph()` | construct signed TF graph | `cp.tl.grn` / legacy compatibility | public |
+| `rank_omnipath_tfs()` / diffusion cells | context-specific TF prioritization | `cp.tl.grn.rank_regulators()` | public task API |
+| `calculate_lfdr_recalibration()` R helper | fdrtool/BUM target-gene scores | `cp.tl.grn.score_targets()` using packaged R resource | public task API |
+| `load_chronopack_beta_lfdr()` | TF-target outer-product scoring | `cp.tl.grn.infer()` internals | public task behavior |
+| `build_chronopack_ranked_edges()` | historical ranked edge CSV | compatibility wrapper | temporary compatibility |
+| TRRUST/ENCODE reference TF filter | benchmark-era TF-universe restriction | compatibility wrapper only | not public GRN inference API |
+| benchmark comparisons/evaluation | method benchmarking | outside ChronoPack | out of scope |
+
+## External Resources
+
+The package does not bundle large scientific resources. Active notebooks pass
+paths for:
+
+- human TF list;
+- CellChat ligand-receptor table;
+- protein-coding target-gene annotation;
+- upstream tradeSeq association tables;
+- generated OmniPath TF-priority tables;
+- generated target-gene score table.
+
+OmniPath, CellChat-style ligand-receptor resources, Taiji/CIS-BP/contact priors
+from older research workflows remain external resources unless explicitly
+packaged later.
+
+## Benchmark Boundary
+
+Benchmarking is intentionally maintained outside the ChronoPack package.
+ChronoPack provides inference outputs and standardized result representations;
+benchmark datasets, gold standards, comparator methods, TF universes, and
+evaluation metrics remain separate research workflows.
+
+This applies to both GRN benchmarking and CellCommunication/C2C benchmarking.
+No `cp.tl.grn.benchmark` or `cp.tl.c2c.benchmark` namespace was added.
+
+## Active Notebooks
+
+The active GRN notebooks are thin workflow clients:
+
+- `grn_inference/OmnipathTFPrioritization.ipynb`
+  - calls `cp.tl.grn.rank_regulators()`;
+  - writes `outputs/omnipath_tf_ranks/omnipath_ranks.{context}.csv`.
+
+- `grn_inference/GeneScoreLfdrRecalibration.ipynb`
+  - calls `cp.tl.grn.score_targets()`;
+  - writes local score, summary, and parameter CSVs.
+
+- `grn_inference/ChronoPackRegulatoryEdges.ipynb`
+  - calls `cp.tl.grn.infer()`;
+  - writes clean ChronoPack GRN outputs under
+    `outputs/tables/chronopack_grn/`;
+  - intentionally does not apply benchmark-specific TF-universe filtering.
+
+## Regression Verification
+
+Fixed upstream inputs were used; tradeSeq fits, gene clustering, mode
+conservation, and benchmark workflows were not rerun.
+
+Target-gene scoring through `cp.tl.grn.score_targets()` reproduced the existing
+local reference outputs exactly:
+
+- scores: `23718 x 13`, maximum numeric absolute difference `0`;
+- summary: `16 x 11`, maximum numeric absolute difference `0`;
+- params: `30 x 4`, maximum numeric absolute difference `0`.
+
+Historical compatibility edge regression used the old explicit TRRUST/ENCODE
+TF-universe filter only to compare against the pre-existing benchmark-era edge
+artifact:
+
+- shape: `4334306 x 6`;
+- no left-only or right-only TF-target rows after alignment by
+  `method + TF + target`;
+- maximum `EdgeWeight` absolute difference: `4.656612873077393e-10`;
+- maximum rank absolute difference: `0`;
+- maximum percentile absolute difference: `1.1102230246251565e-16`.
+
+The clean public `cp.tl.grn.infer()` output, without benchmark-era TF filtering,
+contains:
+
+- shape: `5009770 x 6`;
+- regulators: `263`;
+- targets: `13469`.
+
+Regression artifacts were written under:
+
+- `verification_runs/grn_package_migration_20260918/`
+
+## Sidecar Status
+
+Generated sidecars/intermediates still useful for active workflows:
+
+- OmniPath TF-rank CSVs;
+- target-gene recalibration CSVs;
+- clean GRN edge CSV/Parquet/metadata outputs;
+- historical compatibility edge CSV only for regression/legacy comparison.
+
+The migrated inference workflow does not require native backend objects in
+AnnData and does not write full networks to `adata.uns`.
+
+## Tests
+
+Added `tests/test_grn_inference.py`.
+
+Synthetic tests cover:
+
+- TF-target alignment;
+- invalid target removal;
+- self-edge removal;
+- explicit optional TF-universe filtering;
+- legacy edge-schema export;
+- CSV round-trip;
+- compatibility wrapper agreement on synthetic files;
+- packaged R resource discovery and `prepare_p()` smoke behavior.
+
+Together with the existing OmniPath diffusion tests, the focused GRN test slice
+passes: `7 passed`.

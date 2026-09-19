@@ -20,6 +20,14 @@ def __getattr__(name):
         from . import _gene_trajectory_plots
 
         return getattr(_gene_trajectory_plots, name)
+    if name in {"mode_conservation", "mode_sankey", "mode_chord"}:
+        from . import _mode_conservation_plots
+
+        return getattr(_mode_conservation_plots, name)
+    if name == "c2c":
+        import importlib
+
+        return importlib.import_module(f"{__name__}.c2c")
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -27,6 +35,10 @@ __all__ = [
     "RPlotResult",
     "cluster_trajectories",
     "gene_trajectory",
+    "mode_chord",
+    "mode_conservation",
+    "mode_sankey",
+    "c2c",
     "r_plotting_resource_path",
     "read_r_plotting_resource",
     "trajectory_features",

@@ -3,16 +3,39 @@
 __all__ = [
     "c2c",
     "grn",
+    "CellStateTrajectoryResult",
+    "GeneDynamicsResult",
+    "GeneTrajectoryCharacterizationResult",
+    "GeneTrajectoryClusteringResult",
+    "ModeConservationResult",
     "get_trajectories",
     "cluster_cell_state_trajectories",
     "compute_terminal_fate_probabilities",
     "fit_gene_dynamics",
     "characterize_gene_trajectories",
     "cluster_gene_trajectories",
+    "mode_conservation",
+    "mode_switchers",
 ]
 
 
 def __getattr__(name):
+    if name == "CellStateTrajectoryResult":
+        from ._trajectories import CellStateTrajectoryResult
+
+        return CellStateTrajectoryResult
+    if name == "GeneDynamicsResult":
+        from ._gene_dynamics import GeneDynamicsResult
+
+        return GeneDynamicsResult
+    if name in {"GeneTrajectoryCharacterizationResult", "GeneTrajectoryClusteringResult"}:
+        from . import _gene_clustering
+
+        return getattr(_gene_clustering, name)
+    if name == "ModeConservationResult":
+        from ._mode_conservation import ModeConservationResult
+
+        return ModeConservationResult
     if name == "fit_gene_dynamics":
         from ._gene_dynamics import fit_gene_dynamics
 
@@ -21,6 +44,10 @@ def __getattr__(name):
         from . import _gene_clustering
 
         return getattr(_gene_clustering, name)
+    if name in {"mode_conservation", "mode_switchers"}:
+        from . import _mode_conservation
+
+        return getattr(_mode_conservation, name)
     if name == "get_trajectories":
         from ._trajectories import get_trajectories
 

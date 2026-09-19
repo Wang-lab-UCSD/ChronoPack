@@ -242,10 +242,7 @@ def characterize_gene_trajectories(
     time_grid = pd.read_csv(paths["time_grid"])["time"].to_numpy(dtype=float)
     ddt = _read_matrix(paths["fit_ddt_z"])
 
-    source_adata = adata
-    if source_adata is None and characterization is not None:
-        source_adata = characterization.adata
-    target = _ensure_gene_adata(source_adata.copy() if copy and source_adata is not None else source_adata, pc_df.index)
+    target = _ensure_gene_adata(adata.copy() if copy and adata is not None else adata, pc_df.index)
     _write_characterization_to_adata(target, key_added=key_added, pc_df=pc_df, fit=fit, time_grid=time_grid, ddt=ddt)
 
     sidecars = {name: str(path) for name, path in paths.items() if path.exists()}

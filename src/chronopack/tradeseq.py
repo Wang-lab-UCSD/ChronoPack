@@ -1,5 +1,6 @@
 """Compatibility imports for migrated gene-dynamics helpers."""
 
+from chronopack._utils._deprecation import warn_legacy_module
 from chronopack.tl._gene_dynamics import (  # noqa: F401
     compute_smooth_correlations,
     load_negative_control_logcpm,
@@ -9,6 +10,8 @@ from chronopack.tl._gene_dynamics import (  # noqa: F401
     tag_bias_exclusion_genes,
     temporal_pseudobulk_from_anndata,
 )
+
+warn_legacy_module("chronopack.tradeseq", "chronopack.tl.fit_gene_dynamics")
 
 TemporalPseudobulkFromAnnData = temporal_pseudobulk_from_anndata
 ComputeSmoothCorrelations = compute_smooth_correlations

@@ -102,7 +102,7 @@ def test_missing_plot_key_raises_clear_error():
     adata = _synthetic_gene_trajectory_adata()
     del adata.varm[f"{GENE_TRAJECTORY_KEY}_fit"]
 
-    with pytest.raises(KeyError, match="standardized fitted trajectory matrix"):
+    with pytest.raises(KeyError, match="Regenerate this object"):
         cp.pl.gene_trajectory(adata, ["g0_A"])
 
 

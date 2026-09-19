@@ -4724,3 +4724,117 @@ chronopack_plot_trajectory_features_csv <- function(
 
   chronopack_save_ggplot(p, output, width = width, height = height)
 }
+
+chronopack_plot_mode_conservation_csv <- function(
+  data_path,
+  output,
+  width = 7,
+  height = 4,
+  title = ""
+) {
+  df <- utils::read.csv(data_path, check.names = FALSE, stringsAsFactors = FALSE)
+  required <- c("mode", "bidirectional_conservation")
+  missing <- setdiff(required, colnames(df))
+  if (length(missing) > 0) stop("Missing required columns: ", paste(missing, collapse = ", "))
+  df$mode <- as.character(df$mode)
+  title_value <- if (nzchar(title)) title else NULL
+  pal <- chronopack_mode_palette(df$mode)
+
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = mode, y = bidirectional_conservation, fill = mode)) +
+    ggplot2::geom_col(width = 0.72, color = "grey25", linewidth = 0.3) +
+    ggplot2::scale_fill_manual(values = pal) +
+    ggplot2::coord_cartesian(ylim = c(0, 1)) +
+    ggplot2::labs(
+      title = title_value,
+      x = NULL,
+      y = "Bidirectional conservation",
+      fill = NULL
+    ) +
+    ggplot2::theme_classic(base_size = 12) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(angle = 45, hjust = 1),
+      legend.position = "none"
+    )
+
+  chronopack_save_ggplot(p, output, width = width, height = height)
+}
+
+chronopack_plot_mode_sankey_csv <- function(
+  data_path,
+  output,
+  width = 7,
+  height = 5,
+  title = ""
+) {
+  df <- utils::read.csv(data_path, check.names = FALSE, stringsAsFactors = FALSE)
+  required <- c("source_mode", "target_mode", "n")
+  missing <- setdiff(required, colnames(df))
+  if (length(missing) > 0) stop("Missing required columns: ", paste(missing, collapse = ", "))
+  df$source_mode <- as.character(df$source_mode)
+  df$target_mode <- as.character(df$target_mode)
+  df$n <- as.numeric(df$n)
+  title_value <- if (nzchar(title)) title else NULL
+
+  modes <- unique(c(df$source_mode, df$target_mode))
+  pal <- chronopack_mode_palette(modes)
+  y_levels <- rev(sort(unique(modes)))
+  df$source_y <- match(df$source_mode, y_levels)
+  df$target_y <- match(df$target_mode, y_levels)
+  df$flow_id <- seq_len(nrow(df))
+
+  p <- ggplot2::ggplot(df) +
+    ggplot2::geom_segment(
+      ggplot2::aes(x = 1, xend = 2, y = source_y, yend = target_y, linewidth = n, color = source_mode),
+      alpha = 0.55,
+      lineend = "round"
+    ) +
+    ggplot2::geom_point(ggplot2::aes(x = 1, y = source_y, fill = source_mode), shape = 22, size = 6, color = "grey25") +
+    ggplot2::geom_point(ggplot2::aes(x = 2, y = target_y, fill = target_mode), shape = 22, size = 6, color = "grey25") +
+    ggplot2::scale_y_continuous(breaks = seq_along(y_levels), labels = y_levels) +
+    ggplot2::scale_x_continuous(breaks = c(1, 2), labels = c("Source", "Target"), limits = c(0.75, 2.25)) +
+    ggplot2::scale_color_manual(values = pal) +
+    ggplot2::scale_fill_manual(values = pal) +
+    ggplot2::scale_linewidth(range = c(0.4, 5), guide = "none") +
+    ggplot2::labs(title = title_value, x = NULL, y = NULL, color = "Source mode", fill = "Mode") +
+    ggplot2::theme_classic(base_size = 12) +
+    ggplot2::theme(axis.line.y = ggplot2::element_blank(), axis.ticks.y = ggplot2::element_blank())
+
+  chronopack_save_ggplot(p, output, width = width, height = height)
+}
+
+chronopack_plot_mode_chord_csv <- function(
+  data_path,
+  output,
+  width = 6,
+  height = 6,
+  title = ""
+) {
+  if (!requireNamespace("circlize", quietly = TRUE)) {
+    stop("mode_chord rendering requires the R package 'circlize'.")
+  }
+  df <- utils::read.csv(data_path, check.names = FALSE, stringsAsFactors = FALSE)
+  required <- c("source_mode", "target_mode", "n")
+  missing <- setdiff(required, colnames(df))
+  if (length(missing) > 0) stop("Missing required columns: ", paste(missing, collapse = ", "))
+  df$source_mode <- paste0("source::", as.character(df$source_mode))
+  df$target_mode <- paste0("target::", as.character(df$target_mode))
+  mat <- stats::xtabs(n ~ source_mode + target_mode, data = df)
+
+  output <- path.expand(output)
+  dir.create(dirname(output), recursive = TRUE, showWarnings = FALSE)
+  ext <- tolower(tools::file_ext(output))
+  if (ext == "pdf") {
+    grDevices::pdf(output, width = width, height = height)
+  } else if (ext == "svg") {
+    grDevices::svg(output, width = width, height = height)
+  } else if (ext == "png") {
+    grDevices::png(output, width = width, height = height, units = "in", res = 300)
+  } else {
+    stop("Unsupported plot output extension: ", ext, ". Use pdf, svg, or png.")
+  }
+  on.exit(grDevices::dev.off(), add = TRUE)
+  on.exit(circlize::circos.clear(), add = TRUE)
+  circlize::chordDiagram(mat, transparency = 0.35)
+  if (nzchar(title)) graphics::title(main = title)
+  invisible(output)
+}

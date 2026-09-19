@@ -16,6 +16,8 @@
 !env/*.lock
 !env/*.txt
 !env/*.sh
+!.github/**
+!.github/workflows/*.yml
 !jobs/*.slurm
 !r/chronopackR/DESCRIPTION
 !src/**

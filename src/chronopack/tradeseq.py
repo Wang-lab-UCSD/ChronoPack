@@ -3,6 +3,8 @@
 from chronopack._utils._deprecation import warn_legacy_module
 from chronopack.tl._gene_dynamics import (  # noqa: F401
     compute_smooth_correlations,
+    filter_tag_bias_candidates,
+    identify_tag_bias_candidates,
     load_negative_control_logcpm,
     prepare_tradeseq_inputs,
     refilter_tag_bias_candidates,
@@ -28,6 +30,8 @@ __all__ = [
     "TemporalPseudobulkFromAnnData",
     "WriteTradeSeqInputsFromAnnData",
     "compute_smooth_correlations",
+    "filter_tag_bias_candidates",
+    "identify_tag_bias_candidates",
     "load_negative_control_logcpm",
     "prepare_tradeseq_inputs",
     "refilter_tag_bias_candidates",

@@ -208,14 +208,14 @@ def compute_smooth_correlations(
             }
         )
     corr_df = pd.DataFrame(results).set_index("gene")
-    return refilter_tag_bias_candidates(
+    return filter_tag_bias_candidates(
         corr_df,
         local_r_threshold=local_r_threshold,
         local_fraction_threshold=local_fraction_threshold,
     )
 
 
-def refilter_tag_bias_candidates(
+def filter_tag_bias_candidates(
     corr,
     *,
     local_r_threshold=0.7,
@@ -241,6 +241,47 @@ def refilter_tag_bias_candidates(
         ["residual_explained_total_fraction", "diff_residual_explained_fraction"]
     ].max(axis=1, skipna=True)
     return corr.sort_values("max_r_local", ascending=False)
+
+
+def refilter_tag_bias_candidates(*args, **kwargs):
+    """Deprecated alias for :func:`filter_tag_bias_candidates`."""
+    import warnings
+
+    warnings.warn(
+        "refilter_tag_bias_candidates is deprecated; use filter_tag_bias_candidates.",
+        FutureWarning,
+        stacklevel=2,
+    )
+    return filter_tag_bias_candidates(*args, **kwargs)
+
+
+def identify_tag_bias_candidates(
+    adata,
+    negative_control_path,
+    *,
+    layer="counts",
+    time_key="time",
+    method="spline",
+    method_kwargs=None,
+    local_r_threshold=0.8,
+    local_fraction_threshold=0.5,
+):
+    """Identify candidate genes dominated by time-tag bias.
+
+    This combines the historical notebook sequence:
+    load negative-control logCPM, compute temporal pseudobulk from AnnData,
+    compute smoothed correlations, and apply the initial candidate threshold.
+    """
+    _, _, logcpm_ref = load_negative_control_logcpm(negative_control_path)
+    _, logcpm = temporal_pseudobulk_from_anndata(adata, layer=layer, time_key=time_key)
+    return compute_smooth_correlations(
+        logcpm,
+        logcpm_ref,
+        method=method,
+        method_kwargs=method_kwargs,
+        local_r_threshold=local_r_threshold,
+        local_fraction_threshold=local_fraction_threshold,
+    )
 
 
 def tag_bias_exclusion_genes(corr):
@@ -316,12 +357,28 @@ def prepare_tradeseq_inputs(
 
 def _read_tradeseq_outputs(result, input_dir):
     input_dir = Path(input_dir)
+    def _optional_path(name):
+        try:
+            value = str(result.rx2(name)[0])
+        except Exception:
+            return None
+        if value in {"NA", "NA_character_", "nan", "None"}:
+            return None
+        return value
+
     paths = {
         "association": str(result.rx2("association_path")[0]),
         "significant": str(result.rx2("significant_path")[0]),
         "sce": str(result.rx2("sce_path")[0]),
-        "gamList": str(result.rx2("gamlist_path")[0]),
     }
+    optional = {
+        "sce_screen": _optional_path("sce_screen_path"),
+        "sce_final": _optional_path("sce_final_path"),
+        "screen_genes": _optional_path("screen_genes_path"),
+        "session_info": _optional_path("session_info_path"),
+        "gamList": _optional_path("gamlist_path"),
+    }
+    paths.update({key: value for key, value in optional.items() if value})
     association = pd.read_csv(paths["association"], index_col=0)
     significant = pd.read_csv(paths["significant"], index_col=0)
     selected_genes = [str(x) for x in list(result.rx2("genes_keep"))]
@@ -359,10 +416,15 @@ def _run_tradeseq_backend(
         output_association=str(outputs["association"]),
         output_significant=str(outputs["significant"]),
         output_sce=str(outputs["sce"]),
-        output_gamlist=str(outputs["gamList"]),
+        output_sce_screen=str(outputs.get("sce_screen", "sce_screen.1trajectory.nknots4.rds")),
+        output_screen_genes=str(outputs.get("screen_genes", "screen_genes.1trajectory.nknots4.csv")),
+        output_session_info=str(outputs.get("session_info", "sessionInfo.tradeSeqFits.txt")),
+        output_gamlist=str(outputs.get("gamList", "")),
         association_aliases=StrVector(legacy_outputs.get("association", [])),
         significant_aliases=StrVector(legacy_outputs.get("significant", [])),
         sce_aliases=StrVector(legacy_outputs.get("sce", [])),
+        sce_screen_aliases=StrVector(legacy_outputs.get("sce_screen", [])),
+        screen_genes_aliases=StrVector(legacy_outputs.get("screen_genes", [])),
         gamlist_aliases=StrVector(legacy_outputs.get("gamList", [])),
         tag=str(tag),
         verbose=bool(verbose),
@@ -408,9 +470,9 @@ def fit_gene_dynamics(
 ):
     """Fit gene dynamics with the tradeSeq backend.
 
-    Native tradeSeq objects are retained as sidecar RDS files. Scalar
-    association-test outputs are written to ``adata.var`` when ``adata`` is
-    supplied.
+    tradeSeq SingleCellExperiment objects are retained as sidecar RDS files.
+    Scalar association-test outputs are written to ``adata.var`` when
+    ``adata`` is supplied.
     """
     if backend != "tradeseq":
         raise ValueError("Only backend='tradeseq' is currently implemented.")
@@ -423,15 +485,18 @@ def fit_gene_dynamics(
         outputs = {
             "association": "asso_df.1trajectory.nknots4.csv",
             "significant": "sig_df.1trajectory.nknots4.csv",
+            "sce_screen": "sce_screen.1trajectory.nknots4.rds",
             "sce": "sce.1trajectory.nknots8.rds",
-            "gamList": "gamList.1trajectory.nknots8.rds",
+            "screen_genes": "screen_genes.1trajectory.nknots4.csv",
+            "session_info": "sessionInfo.tradeSeqFits.txt",
         }
     if legacy_outputs is None:
         legacy_outputs = {
             "association": [],
             "significant": [],
+            "sce_screen": [],
             "sce": [],
-            "gamList": [],
+            "screen_genes": [],
         }
 
     if output_dir is not None and input_dir is None:
@@ -545,7 +610,9 @@ def fit_gene_dynamics(
 __all__ = [
     "GeneDynamicsResult",
     "compute_smooth_correlations",
+    "filter_tag_bias_candidates",
     "fit_gene_dynamics",
+    "identify_tag_bias_candidates",
     "load_negative_control_logcpm",
     "prepare_tradeseq_inputs",
     "refilter_tag_bias_candidates",

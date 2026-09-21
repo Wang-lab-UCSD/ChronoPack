@@ -77,7 +77,8 @@ def test_fit_gene_dynamics_writes_association_stats_with_mocked_backend(tmp_path
             "association": str(tmp_path / "asso.csv"),
             "significant": str(tmp_path / "sig.csv"),
             "sce": str(tmp_path / "sce.rds"),
-            "gamList": str(tmp_path / "gamList.rds"),
+            "sce_screen": str(tmp_path / "sce_screen.rds"),
+            "screen_genes": str(tmp_path / "screen_genes.csv"),
         }
 
     monkeypatch.setattr(_gene_dynamics, "_run_tradeseq_backend", fake_run_backend)
@@ -94,4 +95,5 @@ def test_fit_gene_dynamics_writes_association_stats_with_mocked_backend(tmp_path
     np.testing.assert_allclose(adata.var.loc[["g0", "g2"], "mock_fit_waldStat_1"], [10.0, 5.0])
     assert np.isnan(adata.var.loc["g1", "mock_fit_waldStat_1"])
     sidecars = adata.uns[CHRONOPACK_UNS_KEY]["mock_fit"]["result_keys"]["sidecar"]
-    assert sidecars["gamList"].endswith("gamList.rds")
+    assert sidecars["sce"].endswith("sce.rds")
+    assert sidecars["sce_screen"].endswith("sce_screen.rds")

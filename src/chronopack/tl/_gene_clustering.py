@@ -95,7 +95,7 @@ def _r_config(config):
                 "dir": str(entry["dir"]),
                 "asso": StrVector([str(x) for x in entry["asso"]]),
                 "sig": StrVector([str(x) for x in entry["sig"]]),
-                "gamList": StrVector([str(x) for x in entry["gamList"]]),
+                "gamList": StrVector([str(x) for x in entry.get("gamList", [])]),
                 "sce": StrVector([str(x) for x in entry["sce"]]),
             }
         )

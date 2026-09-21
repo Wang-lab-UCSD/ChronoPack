@@ -28,6 +28,10 @@ def __getattr__(name):
         import importlib
 
         return importlib.import_module(f"{__name__}.c2c")
+    if name == "cell_trajectories":
+        import importlib
+
+        return importlib.import_module(f"{__name__}.cell_trajectories")
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -39,6 +43,7 @@ __all__ = [
     "mode_conservation",
     "mode_sankey",
     "c2c",
+    "cell_trajectories",
     "r_plotting_resource_path",
     "read_r_plotting_resource",
     "trajectory_features",

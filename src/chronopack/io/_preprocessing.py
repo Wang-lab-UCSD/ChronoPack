@@ -22,7 +22,7 @@ from chronopack._core._schema import (
     TIME_TAG_KEY,
     map_time_to_group,
 )
-from chronopack._core._validation import ChronoPackError, validate_preprocessed_adata
+from chronopack._core._validation import ChronoPackError, validate_adata
 
 
 def _target(adata, copy: bool):
@@ -97,7 +97,7 @@ def read_time_tagged_dge(
         },
         result_keys={"obs": [DEFAULT_TIME_KEY, TIME_GROUP_KEY, sample_key]},
     )
-    validate_preprocessed_adata(adata, require_layers=(), require_qc=False, require_sample=True)
+    validate_adata(adata, time_key=DEFAULT_TIME_KEY, require_unique=True)
     return adata
 
 
@@ -308,23 +308,17 @@ def initialize_expression_layers(
     return out
 
 
-# Backward-compatible names used by active notebooks before the formal API.
+# Backward-compatible name used by active notebooks before the formal API.
 load_time_tagged_anndata = read_time_tagged_dge
-annotate_qc_flags = annotate_qc_metrics
 
 
 __all__ = [
     "TIME_GROUP_CATEGORIES",
     "add_time_metadata",
-    "annotate_qc_flags",
-    "annotate_qc_metrics",
-    "filter_cells_by_qc",
     "filter_low_count_genes",
     "filter_technical_genes",
-    "initialize_expression_layers",
     "load_time_tagged_anndata",
     "map_time_to_group",
     "read_time_tagged_dge",
     "score_cell_cycle",
-    "validate_preprocessed_adata",
 ]

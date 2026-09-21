@@ -33,7 +33,7 @@ independently.
 | Association test | bundled R backend | R backend | Internal | association DataFrame |
 | Dynamic-gene selection | bundled R backend | R backend | Internal | significant genes / `sig_df` |
 | Final SCE fit on significant genes | bundled R backend | R backend | Internal | native SCE sidecar RDS |
-| Final gamList fit on significant genes | bundled R backend | R backend | Internal | native gamList sidecar RDS |
+| Final gamList fit on significant genes | legacy/reference artifacts only | R backend | Compatibility only | historical gamList RDS, not produced by the active workflow |
 | Association/significant CSV writing | R backend through explicit output config | R backend | Internal side effect | CSV sidecars |
 | Native model serialization | R backend through explicit output config | R backend | Internal side effect | RDS sidecars |
 | Fitted-curve extraction | not currently performed in active TradeSeqFits notebooks | Later gene-characterization migration or optional result extraction | R backend / Python | Deferred | Deferred standardized `adata.varm` |
@@ -49,18 +49,22 @@ Common tradeSeq settings in the active notebooks:
 - significant-gene screen for the final fit: `pvalue_1 < 0.05`.
 - `sig_df` reported with `qval_1 < 0.05`, ordered by decreasing
   `waldStat_1` then `meanLogFC`.
-- final fit: `nknots = 8`.
-- final native outputs: SCE RDS and gamList RDS.
-- parallelization: `BiocParallel::MulticoreParam(workers = 4)`.
+- final fit: `nknots = 8`, fit once as an SCE.
+- active native outputs: screen SCE RDS, final SCE RDS, screen-gene CSV, and
+  session information.
+- legacy `gamList` RDS files are retained as reference/compatibility artifacts
+  but are not produced by the active SCE-only workflow.
+- parallelization: `parallel = TRUE` with
+  `BiocParallel::MulticoreParam(workers = 4)`.
 
 Per-experiment differences:
 
 | Experiment / fit | Input directory | `n_points` | Legacy aliases |
 | --- | --- | --- | --- |
-| K562 + TNFa | `sc-K562-1e4_to_tradeSeq.fixed` | 9 | old `asso_df.1trajectory.csv`, `sig_df.1trajectory.csv`, `gamList.1trajectory.csv`, plus the historical SCE alias |
+| K562 + TNFa | `sc-K562-1e4_to_tradeSeq.fixed` | 9 | old `asso_df.1trajectory.csv`, `sig_df.1trajectory.csv`, plus the historical SCE alias |
 | K562 + TNFa + puromycin | `sc-K562-1e6-to-tradeSeq.fixed` | 9 | none in the active notebook |
-| THP1 + K562 + LPS, K562 subset | `sc-K562_to_tradeSeq.fixed` | 6 | K562 expanded CSV aliases and `sce.knots8.rds` / `gamList.knots8.rds` |
-| THP1 + K562 + LPS, THP1 subset | `sc-THP1_to_tradeSeq.fixed` | 6 | THP1 expanded CSV aliases and `sce.knots8.rds` / `gamList.knots8.rds` |
+| THP1 + K562 + LPS, K562 subset | `sc-K562_to_tradeSeq.fixed` | 6 | K562 expanded CSV aliases and `sce.knots8.rds` |
+| THP1 + K562 + LPS, THP1 subset | `sc-THP1_to_tradeSeq.fixed` | 6 | THP1 expanded CSV aliases and `sce.knots8.rds` |
 
 ## Current Input/Output Contract
 
@@ -81,14 +85,16 @@ R-side fitting reads these files, aligns by cell IDs, constructs:
 - `sf`: `lib_full / mean(lib_full)`.
 - `PT`: single lineage pseudotime scaled to `[0, 1]`.
 - `CW`: one lineage with all weights equal to 1.
-- `offset_mat`: gene x cell matrix of `log(sf)`.
+- `offset_vec`: cell-level vector of `log(sf)`.
 
 R-side fitting writes:
 
 - `asso_df.1trajectory.nknots4.csv`
 - `sig_df.1trajectory.nknots4.csv`
+- `sce_screen.1trajectory.nknots4.rds`
 - `sce.1trajectory.nknots8.rds`
-- `gamList.1trajectory.nknots8.rds`
+- `screen_genes.1trajectory.nknots4.csv`
+- `sessionInfo.tradeSeqFits.txt`
 - configured legacy aliases where required for downstream compatibility.
 
 ## Proposed Public API
@@ -158,9 +164,10 @@ workflow.
 
 Native large objects should remain as explicit sidecar files:
 
-- SCE RDS;
-- gamList RDS;
-- optional screen SCE only if needed for debugging/regression.
+- screen SCE RDS;
+- final SCE RDS;
+- historical gamList RDS files only as compatibility/reference artifacts until
+  old notebooks and diagnostics no longer require them.
 
 ## R Backend Refactor Target
 

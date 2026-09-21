@@ -2475,3 +2475,96 @@ Scope note:
   preprocessing/GetTrajectories objects matched the expected downstream
   inputs; this pass did not rerun full manuscript-output regressions for all
   downstream workflows.
+
+## 2026-09-21 TradeSeq SCE-only refactor
+
+Status: active TradeSeqFits workflow refactored so the final 8-knot tradeSeq
+model is fit once as a `SingleCellExperiment`; the duplicate `sce = FALSE`
+`gamList` fit is no longer part of the active workflow.
+
+Preserved scientific behavior:
+
+- 4-knot permissive screen over the full candidate gene set;
+- `associationTest(global = FALSE, lineages = TRUE, inverse = "Chol")`;
+- raw `pvalue_1 < 0.05` gate for the second-stage fit;
+- 8-knot second-stage fit;
+- existing pseudotime, cell weights, size factors, and offsets.
+
+Implementation details:
+
+- active output sidecars are now:
+  - `sce_screen.1trajectory.nknots4.rds`
+  - `sce.1trajectory.nknots8.rds`
+  - `asso_df.1trajectory.nknots4.csv`
+  - `sig_df.1trajectory.nknots4.csv`
+  - `screen_genes.1trajectory.nknots4.csv`
+  - `sessionInfo.tradeSeqFits.txt`
+- the final fit still uses `counts_sub2 <- counts_sub[screen_genes, , drop = FALSE]`;
+  the alternative `counts = counts_sub, genes = screen_genes` has not been
+  adopted because tradeSeq has shown gene-universe sensitivity.
+- `offset_mat` was removed from the active single-lineage path and replaced by
+  the equivalent cell-level `offset_vec <- log(sf)`.
+- downstream fitted-trajectory extraction and retained R plotting now reconstruct
+  link-scale predictions and standard errors from the SCE-stored coefficients
+  and covariance matrices.
+
+Validation so far:
+
+- R backend source check: passed.
+- Tiny synthetic SCE-vs-gam representation parity under the verified manuscript
+  prefix: max link-scale differences `<= 4.44e-16`; max SE differences
+  `<= 5.56e-17`.
+- Targeted Python/R tests with proper manuscript-prefix activation:
+  `27 passed, 2 expected legacy FutureWarnings`.
+- Full historical paired-sidecar SCE-vs-gam parity was submitted as Slurm job
+  `926848`; outputs are written under
+  `verification_runs/tradeseq_sce_only_refactor_20260921/`.
+
+## 2026-09-21 Preprocess/GetTrajectories/PrepareForTradeSeq API cleanup
+
+Status: active first-level notebooks for the three experiment directories were
+updated to simplify the preprocessing and trajectory APIs without changing the
+intended scientific workflow.
+
+PreprocessDatasets changes:
+
+- removed notebook use of package wrappers for standard Scanpy work:
+  `cp.io.annotate_qc_metrics`, `cp.io.filter_cells_by_qc`,
+  `cp.io.initialize_expression_layers`, and
+  `cp.io.validate_preprocessed_adata`;
+- active notebooks now call `sc.pp.calculate_qc_metrics`,
+  explicit boolean QC masks, `sc.pp.normalize_total`, and `sc.pp.log1p`
+  directly;
+- those standard wrappers are no longer exported from `cp.io`.
+
+GetTrajectories changes:
+
+- renamed the public cell-state clustering entry point to
+  `cp.tl.cluster_cells_to_trajectories`;
+- kept `cluster_cell_state_trajectories` as a temporary warning alias;
+- changed the terminal-similarity graph key from
+  `W_terminal_cosine_topk` to `S`;
+- changed the OT UMAP key from `X_ot_umap` to `ot_umap`;
+- `get_trajectories` now preserves any existing Scanpy `X_umap` and stores
+  the OT embedding separately;
+- active visualization cells explicitly use `basis="ot_umap"`;
+- trajectory-cluster proportions and mass-retention visualization moved to
+  `cp.pl.cell_trajectories.proportions_over_time` and
+  `cp.pl.cell_trajectories.mass_retention`.
+
+PrepareForTradeSeq changes:
+
+- added `gd.identify_tag_bias_candidates(...)` to combine the historical
+  negative-control loading, temporal pseudobulk aggregation, and smooth
+  correlation scoring;
+- added `gd.filter_tag_bias_candidates(...)` for threshold-based user
+  selection of tag-bias candidates;
+- retained `gd.refilter_tag_bias_candidates(...)` as a temporary warning alias;
+- active notebooks now use the consolidated tag-bias API.
+
+Verification:
+
+- notebook JSON and code-cell syntax checks passed for all nine active
+  PreprocessDatasets/GetTrajectories/PrepareForTradeSeq notebooks;
+- focused tests: `16 passed, 3 warnings`;
+- full lightweight test suite: `57 passed, 4 warnings`.

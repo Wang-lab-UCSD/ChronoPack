@@ -9,7 +9,7 @@ __all__ = [
     "GeneTrajectoryClusteringResult",
     "ModeConservationResult",
     "get_trajectories",
-    "cluster_cell_state_trajectories",
+    "cluster_cells_to_trajectories",
     "compute_terminal_fate_probabilities",
     "fit_gene_dynamics",
     "characterize_gene_trajectories",
@@ -52,7 +52,7 @@ def __getattr__(name):
         from ._trajectories import get_trajectories
 
         return get_trajectories
-    if name in {"cluster_cell_state_trajectories", "compute_terminal_fate_probabilities"}:
+    if name in {"cluster_cells_to_trajectories", "cluster_cell_state_trajectories", "compute_terminal_fate_probabilities"}:
         from . import _trajectories
 
         return getattr(_trajectories, name)

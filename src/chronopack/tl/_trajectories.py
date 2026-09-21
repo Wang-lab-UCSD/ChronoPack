@@ -160,7 +160,7 @@ def run_wot_transport_workflow(
     use_unpruned_as_pruned=False,
     attach_graph=True,
     graph_key="ot_graph",
-    umap_key="X_ot_umap",
+    umap_key=OT_UMAP_KEY,
     umap_random_state=10,
     umap_kwargs=None,
 ):
@@ -200,8 +200,16 @@ def run_wot_transport_workflow(
         kwargs = dict(init_pos="spectral", copy=False, random_state=umap_random_state)
         if umap_kwargs:
             kwargs.update(umap_kwargs)
+        original_umap = adata.obsm["X_umap"].copy() if "X_umap" in adata.obsm else None
+        original_umap_uns = adata.uns["umap"].copy() if "umap" in adata.uns and hasattr(adata.uns["umap"], "copy") else adata.uns.get("umap")
         _scanpy().tl.umap(adata, neighbors_key=graph_key, **kwargs)
         adata.obsm[umap_key] = adata.obsm["X_umap"].copy()
+        if original_umap is not None:
+            adata.obsm["X_umap"] = original_umap
+        else:
+            del adata.obsm["X_umap"]
+        if original_umap_uns is not None:
+            adata.uns["umap"] = original_umap_uns
     return CellStateTrajectoryResult(
         tmaps=tmaps,
         transitions_long=transitions_long,
@@ -400,13 +408,13 @@ def cosine_topk_leiden_from_terminal_dist(adata, dist_key=TERMINAL_CELL_DIST_KEY
     Xn = normalize(X, norm="l2", axis=1, copy=True)
     nn = NearestNeighbors(n_neighbors=min(topk + 1, n), metric="cosine", algorithm="brute", n_jobs=-1)
     nn.fit(Xn)
-    W = nn.kneighbors_graph(Xn, mode="distance").tocsr()
-    W.data = (1.0 - W.data).astype(np.float32)
-    W.setdiag(0.0)
-    W.eliminate_zeros()
-    W_pruned = _topk_csr_rows(W.maximum(W.T).tocsr(), k=topk)
-    adata.obsp[TERMINAL_COSINE_GRAPH_KEY] = W_pruned
-    return W_pruned
+    S = nn.kneighbors_graph(Xn, mode="distance").tocsr()
+    S.data = (1.0 - S.data).astype(np.float32)
+    S.setdiag(0.0)
+    S.eliminate_zeros()
+    S = _topk_csr_rows(S.maximum(S.T).tocsr(), k=topk)
+    adata.obsp[TERMINAL_COSINE_GRAPH_KEY] = S
+    return S
 
 
 def terminal_fate_trajectory_clustering(
@@ -421,7 +429,7 @@ def terminal_fate_trajectory_clustering(
 ):
     """Compute terminal fate distributions and Leiden trajectory clusters."""
     CalculateTerminalFatesAcrossCells(adata, T, topk=terminal_topk)
-    W_pruned = cosine_topk_leiden_from_terminal_dist(
+    S = cosine_topk_leiden_from_terminal_dist(
         adata,
         dist_key=TERMINAL_CELL_DIST_KEY,
         topk=graph_topk,
@@ -429,19 +437,19 @@ def terminal_fate_trajectory_clustering(
     )
     _scanpy().tl.leiden(
         adata,
-        adjacency=W_pruned.tocsr(),
+        adjacency=S.tocsr(),
         directed=directed,
         use_weights=True,
         key_added=cluster_key,
         resolution=resolution,
         random_state=random_state,
     )
-    return W_pruned
+    return S
 
 
-def cluster_cell_state_trajectories(
+def cluster_cells_to_trajectories(
     adata,
-    T,
+    S=None,
     *,
     cluster_key=CELL_STATE_TRAJECTORY_CLUSTER_KEY,
     resolution=0.3,
@@ -450,10 +458,14 @@ def cluster_cell_state_trajectories(
     random_state=0,
     directed=False,
 ):
-    """Cluster cells by terminal fate distributions from a cell-state graph."""
+    """Cluster cells into cell-state trajectories from a square cell-state graph."""
+    if S is None:
+        if OT_GRAPH_KEY not in adata.obsp:
+            raise KeyError(f"Missing adata.obsp[{OT_GRAPH_KEY!r}]; pass S explicitly or run get_trajectories first.")
+        S = adata.obsp[OT_GRAPH_KEY]
     return terminal_fate_trajectory_clustering(
         adata,
-        T,
+        S,
         cluster_key=cluster_key,
         resolution=resolution,
         terminal_topk=terminal_topk,
@@ -461,6 +473,18 @@ def cluster_cell_state_trajectories(
         random_state=random_state,
         directed=directed,
     )
+
+
+def cluster_cell_state_trajectories(*args, **kwargs):
+    """Deprecated alias for :func:`cluster_cells_to_trajectories`."""
+    import warnings
+
+    warnings.warn(
+        "cluster_cell_state_trajectories is deprecated; use cluster_cells_to_trajectories.",
+        FutureWarning,
+        stacklevel=2,
+    )
+    return cluster_cells_to_trajectories(*args, **kwargs)
 
 
 def terminal_fates_from_terminal_clusters(
@@ -728,6 +752,7 @@ __all__ = [
     "PlotHardClusterMassProportionsOverTime",
     "build_transition_matrices",
     "cluster_cell_state_trajectories",
+    "cluster_cells_to_trajectories",
     "compute_terminal_fate_probabilities",
     "cosine_topk_leiden_from_terminal_dist",
     "embed_block",

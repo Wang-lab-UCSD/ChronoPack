@@ -485,13 +485,123 @@ feature_plot_pc_simple <- function(
   p
 }
 
+compute_tradeSeq_reference_offset <- function(sizeFactors, off_ref = NULL) {
+  if (!is.null(off_ref)) return(as.numeric(off_ref)[1])
+  sf_vec <- as.numeric(sizeFactors)
+  if (!length(sf_vec) || all(!is.finite(sf_vec))) {
+    stop("sizeFactors must contain at least one finite value.")
+  }
+  log(exp(mean(log(sf_vec), na.rm = TRUE)))
+}
+
+get_tradeSeq_sce_prediction_components <- function(sce, gene) {
+  rd_ts <- S4Vectors::metadata(SummarizedExperiment::rowData(sce))$tradeSeq
+  if (is.null(rd_ts)) {
+    rd_ts <- SummarizedExperiment::rowData(sce)$tradeSeq
+  }
+  cd_ts <- SummarizedExperiment::colData(sce)$tradeSeq
+  if (is.null(rd_ts) || is.null(cd_ts)) {
+    stop("SCE does not contain tradeSeq rowData/colData metadata.")
+  }
+
+  gene <- as.character(gene)[1]
+  gene_idx <- match(gene, rownames(sce))
+  if (is.na(gene_idx)) {
+    stop("Gene not present in SCE rownames: ", gene)
+  }
+
+  beta_tbl <- rd_ts$beta[[1]]
+  if (is.null(beta_tbl)) {
+    stop("Could not locate tradeSeq beta matrix in rowData(sce)$tradeSeq$beta[[1]].")
+  }
+  beta_mat <- as.matrix(beta_tbl)
+  beta_idx <- gene_idx
+  if (!is.null(rownames(beta_mat)) && gene %in% rownames(beta_mat)) {
+    beta_idx <- match(gene, rownames(beta_mat))
+  }
+  beta <- as.numeric(beta_mat[beta_idx, ])
+  names(beta) <- colnames(beta_mat)
+
+  Sigma <- rd_ts$Sigma[[gene_idx]]
+  if (is.null(Sigma)) {
+    stop("Could not locate tradeSeq covariance matrix for gene: ", gene)
+  }
+  Sigma <- as.matrix(Sigma)
+
+  list(beta = beta, Sigma = Sigma, dm = cd_ts$dm, X = cd_ts$X)
+}
+
+predict_tradeSeq_sce_with_se <- function(sce, gene, lineageId = 1, nPoints = 200,
+                                         off_ref = 0, se_factor = 1.96,
+                                         return_log1p = TRUE) {
+  comp <- get_tradeSeq_sce_prediction_components(sce, gene)
+  dm <- comp$dm
+  X <- comp$X
+  if (is.null(dm) || is.null(X)) {
+    stop("SCE is missing tradeSeq design matrix metadata.")
+  }
+
+  t_cols <- grep("^t[0-9]+$", colnames(dm), value = TRUE)
+  avail_lineages <- as.integer(sub("^t", "", t_cols))
+  if (!length(avail_lineages)) {
+    stop("Could not find t1/t2/... columns in tradeSeq design metadata.")
+  }
+  ell <- as.integer(lineageId)
+  if (!(ell %in% avail_lineages)) ell <- avail_lineages[1]
+
+  df_pred <- tradeSeq:::.getPredictRangeDf(dm, lineageId = ell, nPoints = nPoints)
+  slingshot_coldata <- SummarizedExperiment::colData(sce)$crv
+  if (!is.null(slingshot_coldata)) {
+    pseudotime <- slingshot_coldata[, grep(x = colnames(slingshot_coldata), pattern = "pseudotime"), drop = FALSE]
+  } else {
+    pseudotime <- as.matrix(dm[, t_cols, drop = FALSE])
+  }
+  X_pred <- tradeSeq:::predictGAM(lpmatrix = X, df = df_pred, pseudotime = pseudotime)
+
+  beta <- comp$beta
+  Sigma <- comp$Sigma
+  if (!is.null(names(beta)) && !is.null(colnames(X_pred)) && all(colnames(X_pred) %in% names(beta))) {
+    beta <- beta[colnames(X_pred)]
+  }
+  if (!is.null(rownames(Sigma)) && !is.null(colnames(X_pred)) && all(colnames(X_pred) %in% rownames(Sigma))) {
+    Sigma <- Sigma[colnames(X_pred), colnames(X_pred), drop = FALSE]
+  }
+  if (length(beta) != ncol(X_pred)) {
+    stop("Beta length does not match prediction design columns for gene: ", gene)
+  }
+  if (!all(dim(Sigma) == c(ncol(X_pred), ncol(X_pred)))) {
+    stop("Covariance dimensions do not match prediction design columns for gene: ", gene)
+  }
+
+  eta <- as.numeric(X_pred %*% beta + as.numeric(off_ref)[1])
+  se_eta <- sqrt(pmax(0, rowSums((X_pred %*% Sigma) * X_pred)))
+  out <- data.frame(
+    gene = as.character(gene)[1],
+    lineage = ell,
+    pt = df_pred[[paste0("t", ell)]],
+    fit = eta,
+    se.fit = se_eta,
+    stringsAsFactors = FALSE
+  )
+  if (isTRUE(return_log1p)) {
+    out$mu <- log1p(exp(eta))
+    out$lo <- log1p(exp(eta - se_factor * se_eta))
+    out$hi <- log1p(exp(eta + se_factor * se_eta))
+  } else {
+    out$mu <- exp(eta)
+    out$lo <- exp(eta - se_factor * se_eta)
+    out$hi <- exp(eta + se_factor * se_eta)
+  }
+  out
+}
+
 plot_tradeSeq_gene_multirun_pub <- function(
   gene,
-  gamList_ls, sce_ls, counts_sub_ls, PT_ls, sf_ls,
+  sce_ls, counts_sub_ls, PT_ls, sf_ls,
   CW_ls = NULL,                    # optional named list of cellWeights per run (nCells x 1 ok)
   q_by_gene = NULL,
 
-  keys = NULL,                     # which runs to include; default = names(gamList_ls)
+  keys = NULL,                     # which runs to include; default = names(sce_ls)
   key_labels = NULL,               # optional named vector/list mapping key -> legend label
 
   # time handling
@@ -533,20 +643,20 @@ plot_tradeSeq_gene_multirun_pub <- function(
 
   # colors per run
   colours = NULL,                  # named vector by key or recycled
-  ribbon_alpha_mult = 0.30         # fill alpha multiplier via adjustcolor
+  ribbon_alpha_mult = 0.30,        # fill alpha multiplier via adjustcolor
+  gamList_ls = NULL                # deprecated; ignored after SCE-only refactor
 ) {
 
   # -----------------------------
   # 0) keys + basic checks
   # -----------------------------
-  if (is.null(keys)) keys <- names(gamList_ls)
+  if (is.null(keys)) keys <- names(sce_ls)
 
   keys <- intersect(
     keys,
     Reduce(
       intersect,
       list(
-        names(gamList_ls),
         names(sce_ls),
         names(counts_sub_ls),
         names(PT_ls),
@@ -556,7 +666,7 @@ plot_tradeSeq_gene_multirun_pub <- function(
   )
 
   if (!length(keys)) {
-    stop("No overlapping keys across gamList_ls/sce_ls/counts_sub_ls/PT_ls/sf_ls.")
+    stop("No overlapping keys across sce_ls/counts_sub_ls/PT_ls/sf_ls.")
   }
 
   # keep only runs where gene exists
@@ -565,14 +675,14 @@ plot_tradeSeq_gene_multirun_pub <- function(
       keys,
       function(k) {
         gene %in% rownames(counts_sub_ls[[k]]) &&
-          !is.null(gamList_ls[[k]][[gene]])
+          gene %in% rownames(sce_ls[[k]])
       },
       logical(1)
     )
   ]
 
   if (!length(keys)) {
-    stop("Gene not found in counts_sub or gamList for any provided key.")
+    stop("Gene not found in counts_sub and SCE for any provided key.")
   }
 
   # labels
@@ -686,7 +796,6 @@ plot_tradeSeq_gene_multirun_pub <- function(
 
   for (k in keys) {
 
-    gm <- gamList_ls[[k]][[gene]]
     sce <- sce_ls[[k]]
     counts_sub <- counts_sub_ls[[k]]
     PT <- PT_ls[[k]]
@@ -727,23 +836,16 @@ plot_tradeSeq_gene_multirun_pub <- function(
     s_ref <- exp(mean(log(sf_vec), na.rm = TRUE))
     off_ref <- log(s_ref)
 
-    # fitted curve in PT space (0..1), then convert x to real time if desired
-    df_pred <- tradeSeq:::.getPredictRangeDf(
-      dm,
+    pr <- predict_tradeSeq_sce_with_se(
+      sce = sce,
+      gene = gene,
       lineageId = ell,
-      nPoints = nPoints
+      nPoints = nPoints,
+      off_ref = off_ref,
+      se_factor = se_factor,
+      return_log1p = TRUE
     )
-
-    t_col <- paste0("t", ell)
-    t_pt <- df_pred[[t_col]]
-
-    pr <- predict(
-      gm,
-      newdata = df_pred,
-      type = "link",
-      se.fit = TRUE,
-      offset = rep(off_ref, nrow(df_pred))
-    )
+    t_pt <- pr$pt
 
     tm <- get_time_max(k)
     off <- get_offset(k)
@@ -756,9 +858,9 @@ plot_tradeSeq_gene_multirun_pub <- function(
       ),
       pt = t_pt,
       x = pt_to_x(t_pt, tm, off),
-      mu = log1p(exp(pr$fit)),
-      lo = log1p(exp(pr$fit - se_factor * pr$se.fit)),
-      hi = log1p(exp(pr$fit + se_factor * pr$se.fit))
+      mu = pr$mu,
+      lo = pr$lo,
+      hi = pr$hi
     )
 
     fit_list[[k]] <- fit_df
@@ -2716,7 +2818,7 @@ plot_cluster_pair_representative_genes <- function(
   row_cell_type = "K562a",
   col_cell_type = "THP1",
   cluster_col = "cluster",
-  gamList_ls, sce_ls, counts_sub_ls, PT_ls, sf_ls,
+  sce_ls, counts_sub_ls, PT_ls, sf_ls,
   CW_ls = NULL,
   colours = c(THP1 = "#222021", K562a = "#386cb0"),
   cluster_palette = NULL,
@@ -2982,7 +3084,6 @@ plot_cluster_pair_representative_genes <- function(
       p <- suppressMessages(
         suppressWarnings(
           plot_tradeSeq_gene_multirun_pub(
-            gamList_ls = gamList_ls,
             sce_ls = sce_ls,
             counts_sub_ls = counts_sub_ls,
             PT_ls = PT_ls,

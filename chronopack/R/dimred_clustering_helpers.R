@@ -811,6 +811,194 @@ chronopack_dimred_config <- function(root_puro, root_k562a, root_lps) {
   )
 }
 
+compute_tradeSeq_reference_offset <- function(sizeFactors, off_ref = NULL) {
+  if (!is.null(off_ref)) return(as.numeric(off_ref)[1])
+  sf_vec <- as.numeric(sizeFactors)
+  if (!length(sf_vec) || all(!is.finite(sf_vec))) {
+    stop("sizeFactors must contain at least one finite value.")
+  }
+  log(exp(mean(log(sf_vec), na.rm = TRUE)))
+}
+
+get_tradeSeq_sce_prediction_components <- function(sce, gene) {
+  rd_ts <- S4Vectors::metadata(SummarizedExperiment::rowData(sce))$tradeSeq
+  if (is.null(rd_ts)) {
+    rd_ts <- SummarizedExperiment::rowData(sce)$tradeSeq
+  }
+  cd_ts <- SummarizedExperiment::colData(sce)$tradeSeq
+  if (is.null(rd_ts) || is.null(cd_ts)) {
+    stop("SCE does not contain tradeSeq rowData/colData metadata.")
+  }
+
+  gene <- as.character(gene)[1]
+  gene_idx <- match(gene, rownames(sce))
+  if (is.na(gene_idx)) {
+    stop("Gene not present in SCE rownames: ", gene)
+  }
+
+  beta_tbl <- rd_ts$beta[[1]]
+  if (is.null(beta_tbl)) {
+    stop("Could not locate tradeSeq beta matrix in rowData(sce)$tradeSeq$beta[[1]].")
+  }
+  beta_mat <- as.matrix(beta_tbl)
+  beta_idx <- gene_idx
+  if (!is.null(rownames(beta_mat)) && gene %in% rownames(beta_mat)) {
+    beta_idx <- match(gene, rownames(beta_mat))
+  }
+  beta <- as.numeric(beta_mat[beta_idx, ])
+  names(beta) <- colnames(beta_mat)
+
+  Sigma <- rd_ts$Sigma[[gene_idx]]
+  if (is.null(Sigma)) {
+    stop("Could not locate tradeSeq covariance matrix for gene: ", gene)
+  }
+  Sigma <- as.matrix(Sigma)
+
+  list(
+    beta = beta,
+    Sigma = Sigma,
+    dm = cd_ts$dm,
+    X = cd_ts$X
+  )
+}
+
+predict_tradeSeq_sce_with_se <- function(sce, gene, lineageId = 1, nPoints = 200,
+                                         off_ref = 0, se_factor = 1.96,
+                                         return_log1p = TRUE) {
+  comp <- get_tradeSeq_sce_prediction_components(sce, gene)
+  dm <- comp$dm
+  X <- comp$X
+  if (is.null(dm) || is.null(X)) {
+    stop("SCE is missing tradeSeq design matrix metadata.")
+  }
+
+  t_cols <- grep("^t[0-9]+$", colnames(dm), value = TRUE)
+  avail_lineages <- as.integer(sub("^t", "", t_cols))
+  if (!length(avail_lineages)) {
+    stop("Could not find t1/t2/... columns in tradeSeq design metadata.")
+  }
+  ell <- as.integer(lineageId)
+  if (!(ell %in% avail_lineages)) ell <- avail_lineages[1]
+
+  df_pred <- tradeSeq:::.getPredictRangeDf(dm, lineageId = ell, nPoints = nPoints)
+  slingshot_coldata <- SummarizedExperiment::colData(sce)$crv
+  if (!is.null(slingshot_coldata)) {
+    pseudotime <- slingshot_coldata[, grep(x = colnames(slingshot_coldata), pattern = "pseudotime"), drop = FALSE]
+  } else {
+    pseudotime <- as.matrix(dm[, t_cols, drop = FALSE])
+  }
+  X_pred <- tradeSeq:::predictGAM(lpmatrix = X, df = df_pred, pseudotime = pseudotime)
+
+  beta <- comp$beta
+  Sigma <- comp$Sigma
+  if (!is.null(names(beta)) && !is.null(colnames(X_pred)) && all(colnames(X_pred) %in% names(beta))) {
+    beta <- beta[colnames(X_pred)]
+  }
+  if (!is.null(rownames(Sigma)) && !is.null(colnames(X_pred)) && all(colnames(X_pred) %in% rownames(Sigma))) {
+    Sigma <- Sigma[colnames(X_pred), colnames(X_pred), drop = FALSE]
+  }
+  if (length(beta) != ncol(X_pred)) {
+    stop("Beta length does not match prediction design columns for gene: ", gene)
+  }
+  if (!all(dim(Sigma) == c(ncol(X_pred), ncol(X_pred)))) {
+    stop("Covariance dimensions do not match prediction design columns for gene: ", gene)
+  }
+
+  eta <- as.numeric(X_pred %*% beta + as.numeric(off_ref)[1])
+  se_eta <- sqrt(pmax(0, rowSums((X_pred %*% Sigma) * X_pred)))
+
+  out <- data.frame(
+    gene = as.character(gene)[1],
+    lineage = ell,
+    pt = df_pred[[paste0("t", ell)]],
+    fit = eta,
+    se.fit = se_eta,
+    stringsAsFactors = FALSE
+  )
+  if (isTRUE(return_log1p)) {
+    out$mu <- log1p(exp(eta))
+    out$lo <- log1p(exp(eta - se_factor * se_eta))
+    out$hi <- log1p(exp(eta + se_factor * se_eta))
+  } else {
+    out$mu <- exp(eta)
+    out$lo <- exp(eta - se_factor * se_eta)
+    out$hi <- exp(eta + se_factor * se_eta)
+  }
+  out$df_pred <- I(list(df_pred))
+  out
+}
+
+get_traj_from_tradeSeq_sce <- function(sce, features, nPoints = 200, lineage_pick = 1,
+                                       sizeFactors = NULL, off_ref = NULL,
+                                       return_log1p = TRUE, verbose = FALSE) {
+  features <- intersect(as.character(features), rownames(sce))
+  if (!length(features)) {
+    stop("No requested features are present in the supplied SCE.")
+  }
+
+  rd_ts <- S4Vectors::metadata(SummarizedExperiment::rowData(sce))$tradeSeq
+  if (is.null(rd_ts)) {
+    rd_ts <- SummarizedExperiment::rowData(sce)$tradeSeq
+  }
+  cd_ts <- SummarizedExperiment::colData(sce)$tradeSeq
+  if (is.null(rd_ts) || is.null(cd_ts)) {
+    stop("SCE does not contain tradeSeq rowData/colData metadata.")
+  }
+  beta_tbl <- rd_ts$beta[[1]]
+  if (is.null(beta_tbl)) {
+    stop("Could not locate tradeSeq beta matrix in rowData(sce)$tradeSeq$beta[[1]].")
+  }
+  beta_all <- as.matrix(beta_tbl)
+  beta_idx <- match(features, rownames(sce))
+  if (!is.null(rownames(beta_all)) && all(features %in% rownames(beta_all))) {
+    beta_idx <- match(features, rownames(beta_all))
+  }
+  if (any(is.na(beta_idx))) {
+    stop("Could not match all requested features to SCE beta rows.")
+  }
+  beta_mat <- beta_all[beta_idx, , drop = FALSE]
+  rownames(beta_mat) <- features
+
+  dm <- cd_ts$dm
+  X <- cd_ts$X
+  if (is.null(dm) || is.null(X)) {
+    stop("SCE is missing tradeSeq design matrix metadata.")
+  }
+  t_cols <- grep("^t[0-9]+$", colnames(dm), value = TRUE)
+  avail_lineages <- as.integer(sub("^t", "", t_cols))
+  if (!length(avail_lineages)) {
+    stop("Could not find t1/t2/... columns in tradeSeq design metadata.")
+  }
+  ell <- as.integer(lineage_pick)
+  if (!(ell %in% avail_lineages)) ell <- avail_lineages[1]
+  df_pred <- tradeSeq:::.getPredictRangeDf(dm, lineageId = ell, nPoints = nPoints)
+  slingshot_coldata <- SummarizedExperiment::colData(sce)$crv
+  if (!is.null(slingshot_coldata)) {
+    pseudotime <- slingshot_coldata[, grep(x = colnames(slingshot_coldata), pattern = "pseudotime"), drop = FALSE]
+  } else {
+    pseudotime <- as.matrix(dm[, t_cols, drop = FALSE])
+  }
+  X_pred <- tradeSeq:::predictGAM(lpmatrix = X, df = df_pred, pseudotime = pseudotime)
+  if (!is.null(colnames(X_pred)) && !is.null(colnames(beta_mat)) && all(colnames(X_pred) %in% colnames(beta_mat))) {
+    beta_mat <- beta_mat[, colnames(X_pred), drop = FALSE]
+  }
+  if (ncol(beta_mat) != ncol(X_pred)) {
+    stop("Beta matrix column count does not match prediction design columns.")
+  }
+
+  off_ref_use <- compute_tradeSeq_reference_offset(sizeFactors, off_ref = off_ref)
+  eta_mat <- beta_mat %*% t(X_pred)
+  eta_mat <- sweep(eta_mat, 2, rep(as.numeric(off_ref_use)[1], ncol(eta_mat)), "+")
+  traj_mat <- if (isTRUE(return_log1p)) log1p(exp(eta_mat)) else exp(eta_mat)
+  rownames(traj_mat) <- features
+  tt <- as.numeric(df_pred[[paste0("t", ell)]])
+  colnames(traj_mat) <- as.character(tt)
+  if (isTRUE(verbose)) {
+    message("Extracted ", nrow(traj_mat), " SCE-backed fitted trajectories.")
+  }
+  list(traj_mat = traj_mat, tt = tt)
+}
+
 first_existing <- function(...) {
   paths <- c(...)
   hit <- paths[file.exists(paths)]
@@ -855,19 +1043,28 @@ make_pt_cw_sf <- function(counts, dir) {
   list(PT = PT, CW = CW, sf = sf, time_vec = time_vec, lib_full = lib_full)
 }
 
-load_dimred_tradeSeq_dataset <- function(entry) {
+load_dimred_tradeSeq_dataset <- function(entry, load_gamList = FALSE) {
   dir <- normalizePath(entry$dir, mustWork = TRUE)
 
   asso_df <- read.csv(resolve_output(dir, entry$asso), row.names = 1, check.names = FALSE)
   asso_df <- asso_df[!is.na(asso_df$waldStat_1), , drop = FALSE]
   sig_df <- read.csv(resolve_output(dir, entry$sig), row.names = 1, check.names = FALSE)
-  gamList <- readRDS(resolve_output(dir, entry$gamList))
+  gamList <- NULL
+  if (isTRUE(load_gamList)) {
+    gamList_path <- tryCatch(resolve_output(dir, entry$gamList), error = function(e) NULL)
+    if (!is.null(gamList_path)) {
+      gamList <- readRDS(gamList_path)
+    }
+  }
   sce <- readRDS(resolve_output(dir, entry$sce))
 
   counts <- read_counts_matrix(first_existing(
     file.path(dir, "counts_genes_x_cells.csv.gz"),
     file.path(dir, "counts_genes_x_cells..csv.gz")
   ))
+  if (is.null(rownames(sce)) && nrow(sce) == nrow(counts)) {
+    rownames(sce) <- rownames(counts)
+  }
   meta <- make_pt_cw_sf(counts, dir)
 
   list(
@@ -884,10 +1081,10 @@ load_dimred_tradeSeq_dataset <- function(entry) {
   )
 }
 
-load_dimred_fixed_tradeSeq_outputs <- function(cfg) {
+load_dimred_fixed_tradeSeq_outputs <- function(cfg, load_gamList = FALSE) {
   out <- lapply(names(cfg), function(key) {
     message("Loading fixed tradeSeq objects: ", key)
-    load_dimred_tradeSeq_dataset(cfg[[key]])
+    load_dimred_tradeSeq_dataset(cfg[[key]], load_gamList = load_gamList)
   })
   names(out) <- names(cfg)
 
@@ -903,38 +1100,57 @@ load_dimred_fixed_tradeSeq_outputs <- function(cfg) {
   )
 }
 
-select_dimred_features <- function(asso_df.ls, gamList.ls, keys, pvalue_threshold = 0.05) {
+select_dimred_features <- function(asso_df.ls, sce.ls, counts_sub.ls = NULL, keys, pvalue_threshold = 0.05) {
   features.ls <- list()
   avail_genes.ls <- list()
+  usable_features.ls <- list()
 
   for (key in keys) {
     tmp <- asso_df.ls[[key]]
-    avail_genes.ls[[key]] <- names(gamList.ls[[key]])
+    avail <- character(0)
+    if (!is.null(counts_sub.ls) && !is.null(counts_sub.ls[[key]])) {
+      avail <- rownames(counts_sub.ls[[key]])
+    }
+    sce_names <- rownames(sce.ls[[key]])
+    if (!is.null(sce_names) && length(sce_names)) {
+      avail <- if (length(avail)) intersect(avail, sce_names) else sce_names
+    }
+    avail_genes.ls[[key]] <- avail
     tmp <- tmp[tmp$pvalue_1 < pvalue_threshold, , drop = FALSE]
     features.ls[[key]] <- rownames(tmp)
+    usable_features.ls[[key]] <- intersect(features.ls[[key]], avail_genes.ls[[key]])
   }
+  names(features.ls) <- keys
+  names(avail_genes.ls) <- keys
+  names(usable_features.ls) <- keys
 
   features <- Reduce(union, features.ls[keys])
-  avail_genes <- Reduce(intersect, avail_genes.ls[keys])
+  avail_genes <- Reduce(union, avail_genes.ls[keys])
+  usable_features <- Reduce(union, usable_features.ls[keys])
 
   list(
     features = features,
     avail_genes = avail_genes,
-    usable_features = intersect(features, avail_genes),
+    usable_features = usable_features,
     features.ls = features.ls,
-    avail_genes.ls = avail_genes.ls
+    avail_genes.ls = avail_genes.ls,
+    usable_features.ls = usable_features.ls
   )
 }
 
-extract_dimred_smooth_trajectories <- function(gamList.ls, sce.ls, sf.ls, PT.ls, features,
+extract_dimred_smooth_trajectories <- function(sce.ls, sf.ls, PT.ls, features,
                                                 keys, t_interval_map, lineage_pick = 1) {
   traj.ls <- list()
 
   for (key in keys) {
+    features_key <- if (is.list(features)) features[[key]] else features
+    if (is.null(features_key)) {
+      stop("No feature vector supplied for key: ", key)
+    }
     nPoints <- 1 + ((length(unique(PT.ls[[key]])) - 1) * t_interval_map[[key]])
-    tmp <- .get_traj_from_predictSmooth(
-      gamList.ls[[key]], features, nPoints = nPoints, lineage_pick = lineage_pick,
-      sce = sce.ls[[key]], sizeFactors = sf.ls[[key]]
+    tmp <- get_traj_from_tradeSeq_sce(
+      sce.ls[[key]], features_key, nPoints = nPoints, lineage_pick = lineage_pick,
+      sizeFactors = sf.ls[[key]]
     )
     traj.ls[[key]] <- tmp
     rm(tmp)
@@ -1011,9 +1227,9 @@ align_rescale_dimred_trajectories <- function(traj.ls, time_map, offset_map, sca
 
     mat_obs <- mat[, keep, drop = FALSE]
     t_obs <- t_aligned[keep]
-    t_grid <- seq(from = ceiling(min(t_obs) - 1e-9), to = floor(max(t_obs) + 1e-9), by = 1)
+    t_grid <- seq(from = max(1, ceiling(min(t_obs) - 1e-9)), to = floor(max(t_obs) + 1e-9), by = 1)
     if (!length(t_grid)) {
-      stop(sprintf("[%s] no integer-minute grid remains after rescaling/offset.", k))
+      stop(sprintf("[%s] no positive integer-minute grid remains after rescaling/offset.", k))
     }
 
     traj_rescaled[[k]] <- .interpolate_dimred_rows(mat_obs, x = t_obs, xout = t_grid)
@@ -1031,7 +1247,7 @@ align_rescale_dimred_trajectories <- function(traj.ls, time_map, offset_map, sca
   traj_trunc <- lapply(keys_use, function(k) {
     m <- traj_rescaled[[k]]
     t <- as.numeric(colnames(m))
-    keep <- which(is.finite(t) & t >= 0 & t <= t_end)
+    keep <- which(is.finite(t) & t >= 1 & t <= t_end)
     m2 <- m[, keep, drop = FALSE]
     colnames(m2) <- as.character(round(as.numeric(colnames(m2))))
     m2
@@ -1298,8 +1514,8 @@ chronopack_characterize_gene_trajectories <- function(
   output_dir,
   keys = c("K562a", "K562_puro", "K562b", "THP1"),
   t_interval_map = c(K562a = 10, K562_puro = 10, K562b = 15, THP1 = 15),
-  time_map = c(K562a = 12, K562_puro = 12, K562b = 12, THP1 = 12),
-  offset_map = c(K562a = 0, K562_puro = 0, K562b = 0, THP1 = 0),
+  time_map = c(K562a = 110, K562_puro = 110, K562b = 165, THP1 = 165),
+  offset_map = c(K562a = 0, K562_puro = 0, K562b = -68, THP1 = -10),
   scale_map = c(THP1 = 0.65),
   pvalue_threshold = 0.05,
   descriptor_args = NULL,
@@ -1312,17 +1528,17 @@ chronopack_characterize_gene_trajectories <- function(
   loaded <- load_dimred_fixed_tradeSeq_outputs(cfg)
   feature_info <- select_dimred_features(
     asso_df.ls = loaded$asso_df.ls,
-    gamList.ls = loaded$gamList.ls,
+    sce.ls = loaded$sce.ls,
+    counts_sub.ls = loaded$counts_sub.ls,
     keys = keys,
     pvalue_threshold = pvalue_threshold
   )
 
   traj.ls <- extract_dimred_smooth_trajectories(
-    gamList.ls = loaded$gamList.ls,
     sce.ls = loaded$sce.ls,
     sf.ls = loaded$sf.ls,
     PT.ls = loaded$PT.ls,
-    features = feature_info$usable_features,
+    features = feature_info$usable_features.ls,
     keys = keys,
     t_interval_map = t_interval_map,
     lineage_pick = lineage_pick

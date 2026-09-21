@@ -71,9 +71,13 @@ def test_preprocess_notebooks_use_loader_and_qc_helper():
     ]:
         joined = "\n".join(_code_sources(path))
         assert "cp.io.read_time_tagged_dge" in joined, path
-        assert "cp.io.filter_cells_by_qc" in joined, path
-        assert "cp.io.validate_preprocessed_adata" in joined, path
-        assert "sc.pp.filter_cells" not in joined, path
+        assert "sc.pp.calculate_qc_metrics" in joined, path
+        assert "sc.pp.normalize_total" in joined, path
+        assert "sc.pp.log1p" in joined, path
+        assert "cp.io.annotate_qc_metrics" not in joined, path
+        assert "cp.io.filter_cells_by_qc" not in joined, path
+        assert "cp.io.initialize_expression_layers" not in joined, path
+        assert "cp.io.validate_preprocessed_adata" not in joined, path
 
 
 def test_wot_notebooks_use_workflow_helper():
@@ -84,8 +88,11 @@ def test_wot_notebooks_use_workflow_helper():
     ]:
         joined = "\n".join(_code_sources(path))
         assert "cp.tl.get_trajectories" in joined, path
-        assert "cp.tl.cluster_cell_state_trajectories" in joined, path
+        assert "cp.tl.cluster_cells_to_trajectories" in joined, path
         assert "cp.tl.compute_terminal_fate_probabilities" in joined, path
+        assert "cp.pl.cell_trajectories.proportions_over_time" in joined, path
+        assert "cp.pl.cell_trajectories.mass_retention" in joined, path
+        assert "cluster_cell_state_trajectories" not in joined, path
         assert "from chronopack.trajectories import" not in joined, path
 
 
@@ -122,7 +129,9 @@ def test_prepare_tradeseq_notebooks_use_gene_dynamics_backend():
     ]:
         joined = "\n".join(_code_sources(path))
         assert "cp.tl.fit_gene_dynamics" in joined, path
-        assert "gd.compute_smooth_correlations" in joined, path
-        assert "gd.refilter_tag_bias_candidates" in joined, path
+        assert "gd.identify_tag_bias_candidates" in joined, path
+        assert "gd.filter_tag_bias_candidates" in joined, path
         assert "gd.tag_bias_exclusion_genes" in joined, path
+        assert "gd.compute_smooth_correlations" not in joined, path
+        assert "gd.refilter_tag_bias_candidates" not in joined, path
         assert "WriteTradeSeqInputsFromAnnData" not in joined, path

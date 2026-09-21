@@ -25,21 +25,24 @@ traj.ls <- extract_dimred_smooth_trajectories(
   sce.ls = loaded$sce.ls,
   sf.ls = loaded$sf.ls,
   PT.ls = loaded$PT.ls,
-  features = feature_info$usable_features,
+  features = feature_info$usable_features.ls,
   keys = keys_dimred,
   t_interval_map = t_interval_map
 )
 
 align_res <- align_rescale_dimred_trajectories(
   traj.ls = traj.ls,
-  time_map = c(K562a = 12, K562_puro = 12, K562b = 12, THP1 = 12),
-  offset_map = c(K562a = 0, K562_puro = 0, K562b = 0, THP1 = 0),
+  time_map = c(K562a = 110, K562_puro = 110, K562b = 165, THP1 = 165),
+  offset_map = c(K562a = 0, K562_puro = 0, K562b = -68, THP1 = -10),
   scale_map = c(THP1 = 0.65)
 )
 
 traj_res <- construct_dimred_traj_matrix(align_res$traj_trunc_rescaled.ls)
 traj_mat <- traj_res$traj_mat
 tt <- traj_res$tt
+if (ncol(traj_mat) != 97L) {
+  stop("Expected 97 one-minute trajectory timepoints, got ", ncol(traj_mat), ".")
+}
 
 pc_df <- build_dimred_pc_df(
   traj_mat = traj_mat,

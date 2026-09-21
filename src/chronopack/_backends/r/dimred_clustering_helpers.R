@@ -906,23 +906,27 @@ load_dimred_fixed_tradeSeq_outputs <- function(cfg) {
 select_dimred_features <- function(asso_df.ls, gamList.ls, keys, pvalue_threshold = 0.05) {
   features.ls <- list()
   avail_genes.ls <- list()
+  usable_features.ls <- list()
 
   for (key in keys) {
     tmp <- asso_df.ls[[key]]
     avail_genes.ls[[key]] <- names(gamList.ls[[key]])
     tmp <- tmp[tmp$pvalue_1 < pvalue_threshold, , drop = FALSE]
     features.ls[[key]] <- rownames(tmp)
+    usable_features.ls[[key]] <- intersect(features.ls[[key]], avail_genes.ls[[key]])
   }
 
   features <- Reduce(union, features.ls[keys])
-  avail_genes <- Reduce(intersect, avail_genes.ls[keys])
+  avail_genes <- Reduce(union, avail_genes.ls[keys])
+  usable_features <- Reduce(union, usable_features.ls[keys])
 
   list(
     features = features,
     avail_genes = avail_genes,
-    usable_features = intersect(features, avail_genes),
+    usable_features = usable_features,
     features.ls = features.ls,
-    avail_genes.ls = avail_genes.ls
+    avail_genes.ls = avail_genes.ls,
+    usable_features.ls = usable_features.ls
   )
 }
 
@@ -931,9 +935,13 @@ extract_dimred_smooth_trajectories <- function(gamList.ls, sce.ls, sf.ls, PT.ls,
   traj.ls <- list()
 
   for (key in keys) {
+    features_key <- if (is.list(features)) features[[key]] else features
+    if (is.null(features_key)) {
+      stop("No feature vector supplied for key: ", key)
+    }
     nPoints <- 1 + ((length(unique(PT.ls[[key]])) - 1) * t_interval_map[[key]])
     tmp <- .get_traj_from_predictSmooth(
-      gamList.ls[[key]], features, nPoints = nPoints, lineage_pick = lineage_pick,
+      gamList.ls[[key]], features_key, nPoints = nPoints, lineage_pick = lineage_pick,
       sce = sce.ls[[key]], sizeFactors = sf.ls[[key]]
     )
     traj.ls[[key]] <- tmp
@@ -1011,9 +1019,9 @@ align_rescale_dimred_trajectories <- function(traj.ls, time_map, offset_map, sca
 
     mat_obs <- mat[, keep, drop = FALSE]
     t_obs <- t_aligned[keep]
-    t_grid <- seq(from = ceiling(min(t_obs) - 1e-9), to = floor(max(t_obs) + 1e-9), by = 1)
+    t_grid <- seq(from = max(1, ceiling(min(t_obs) - 1e-9)), to = floor(max(t_obs) + 1e-9), by = 1)
     if (!length(t_grid)) {
-      stop(sprintf("[%s] no integer-minute grid remains after rescaling/offset.", k))
+      stop(sprintf("[%s] no positive integer-minute grid remains after rescaling/offset.", k))
     }
 
     traj_rescaled[[k]] <- .interpolate_dimred_rows(mat_obs, x = t_obs, xout = t_grid)
@@ -1031,7 +1039,7 @@ align_rescale_dimred_trajectories <- function(traj.ls, time_map, offset_map, sca
   traj_trunc <- lapply(keys_use, function(k) {
     m <- traj_rescaled[[k]]
     t <- as.numeric(colnames(m))
-    keep <- which(is.finite(t) & t >= 0 & t <= t_end)
+    keep <- which(is.finite(t) & t >= 1 & t <= t_end)
     m2 <- m[, keep, drop = FALSE]
     colnames(m2) <- as.character(round(as.numeric(colnames(m2))))
     m2
@@ -1322,7 +1330,7 @@ chronopack_characterize_gene_trajectories <- function(
     sce.ls = loaded$sce.ls,
     sf.ls = loaded$sf.ls,
     PT.ls = loaded$PT.ls,
-    features = feature_info$usable_features,
+    features = feature_info$usable_features.ls,
     keys = keys,
     t_interval_map = t_interval_map,
     lineage_pick = lineage_pick

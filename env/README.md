@@ -16,6 +16,21 @@ These files, not any one installed prefix, define the reference environment.
 The temporary validation prefix `/tmp/chronopack-ref-20260918113425` was used
 only to prove the unified stack works.
 
+## Manuscript Reproduction Environment
+
+The manuscript-reproduction profile is maintained separately from the default
+ChronoPack development runtime:
+
+- `env/manuscript-reproduction.yml`
+- `env/manuscript-pip-overrides.txt`
+- `env/manuscript-conda-linux-64.lock`
+- `env/manuscript-pip-freeze.txt`
+
+This profile preserves historical version-sensitive behavior from `wot2` and
+the tradeSeq R runtime. It intentionally includes a post-install no-deps pip
+override step for packages whose historical import-time versions conflict with
+modern dependency metadata. See `docs/user/manuscript_reproduction.md`.
+
 ## HPC Deployment Model
 
 On this cluster, `/new-stg/home/...` is persistent shared NFS, while `/scratch`

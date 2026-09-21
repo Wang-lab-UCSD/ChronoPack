@@ -2393,3 +2393,85 @@ Known warnings:
   the synthetic preprocessing test; retained as harmless/documented behavior.
 - Cluster-local pip cache warnings reflect the current NFS/cache permissions
   and are not ChronoPack package warnings.
+
+## Manuscript Reproduction Runtime
+
+Status: manuscript preprocessing runtime established and the known
+version-sensitive puromycin preprocessing boundary verified.
+
+Added:
+
+- `env/manuscript-reproduction.yml`
+- `env/manuscript-pip-overrides.txt`
+- `env/manuscript-conda-linux-64.lock`
+- `env/manuscript-pip-freeze.txt`
+- `docs/user/manuscript_reproduction.md`
+
+Recovered historical Python/WOT stack:
+
+- Python `3.13.2`
+- Scanpy `1.11.1`
+- AnnData `0.11.4`
+- NumPy `2.2.6`
+- SciPy `1.15.3`
+- pandas `2.2.3`
+- scikit-image `0.25.2`
+- scikit-learn import-time version `1.7.1`
+- python-igraph / igraph `1.0.0`
+- leidenalg `0.10.2`
+- texttable `1.7.0`
+- networkx `3.4.2`
+- WaddingtonOT `1.0.8.post2`
+- umap-learn `0.5.7`
+- numba `0.61.2`
+- llvmlite `0.44.0`
+- pynndescent `0.5.13`
+
+Recovered R/tradeSeq stack:
+
+- R `4.4.3`
+- tradeSeq `1.20.0`
+- SingleCellExperiment `1.28.0`
+- BiocParallel `1.40.0`
+- mgcv `1.9.3`
+- fdrtool `1.2.18`
+- mclust `6.1.3`
+
+Important packaging caveat:
+
+- Historical `wot2` contains metadata/import mismatches. In particular,
+  `import sklearn` reports `1.7.1`, while package metadata reports
+  `1.5.2`; `scanpy==1.11.1` declares `scikit-learn<1.6`.
+- The manuscript environment therefore uses a resolver-compatible base install
+  followed by `pip install --no-deps -r env/manuscript-pip-overrides.txt`.
+- Editable ChronoPack installs in this profile should use `pip install -e .
+  --no-deps`, or the overrides must be reapplied afterward.
+
+Verification:
+
+- ChronoPack lightweight tests under the manuscript runtime:
+  `59 passed, 4 warnings`.
+- Initial manuscript attempt before aligning `numba`, `llvmlite`, and
+  `pynndescent` reproduced the gene universe but not the manual-QC cell set:
+  `4052` cells versus historical `4034`.
+- After aligning `numba=0.61.2`, `llvmlite=0.44.0`, and
+  `pynndescent=0.5.13`, the package-backed puromycin preprocessing output
+  matched the historical reference:
+  - `adata_full.chk0.h5ad`: `4034 x 18833`
+  - `adata_hvg.chk0.h5ad`: `4034 x 3000`
+  - cell/gene IDs and order: exact match
+  - `X` and shared layers: exact match
+  - common metadata exact except `doublet_score`
+  - `doublet_score` max absolute difference:
+    `0.015541014255667104`
+  - `predicted_doublet`: exact match
+
+Scope note:
+
+- The confirmed package-version discrepancy was demonstrated for the
+  puromycin preprocessing/manual-QC workflow, which was the known failing
+  boundary.
+- Earlier package-backed checks under `wot2` showed all three experiments'
+  preprocessing/GetTrajectories objects matched the expected downstream
+  inputs; this pass did not rerun full manuscript-output regressions for all
+  downstream workflows.

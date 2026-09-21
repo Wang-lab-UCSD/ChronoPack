@@ -219,8 +219,8 @@ def characterize_gene_trajectories(
         r_config = _r_config(config)
 
     t_interval_map = t_interval_map or {"K562a": 10, "K562_puro": 10, "K562b": 15, "THP1": 15}
-    time_map = time_map or {"K562a": 12, "K562_puro": 12, "K562b": 12, "THP1": 12}
-    offset_map = offset_map or {"K562a": 0, "K562_puro": 0, "K562b": 0, "THP1": 0}
+    time_map = time_map or {"K562a": 110, "K562_puro": 110, "K562b": 165, "THP1": 165}
+    offset_map = offset_map or {"K562a": 0, "K562_puro": 0, "K562b": -68, "THP1": -10}
     scale_map = scale_map or {"THP1": 0.65}
 
     backend_result = r["chronopack_characterize_gene_trajectories"](
@@ -242,6 +242,8 @@ def characterize_gene_trajectories(
     time_grid = pd.read_csv(paths["time_grid"])["time"].to_numpy(dtype=float)
     ddt = _read_matrix(paths["fit_ddt_z"])
 
+    if adata is None and characterization is not None:
+        adata = characterization.adata
     target = _ensure_gene_adata(adata.copy() if copy and adata is not None else adata, pc_df.index)
     _write_characterization_to_adata(target, key_added=key_added, pc_df=pc_df, fit=fit, time_grid=time_grid, ddt=ddt)
 

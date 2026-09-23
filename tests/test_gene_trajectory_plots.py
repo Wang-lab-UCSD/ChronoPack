@@ -2,59 +2,42 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from chronopack._core._keys import (
-    CHRONOPACK_UNS_KEY,
-    GENE_TRAJECTORY_CLUSTERING_KEY,
-    GENE_TRAJECTORY_KEY,
-)
-
 
 def _synthetic_gene_trajectory_adata():
     ad = pytest.importorskip("anndata")
 
     rows = ["g0_A", "g1_A", "g2_B", "g3_B"]
     adata = ad.AnnData(
-        X=np.zeros((0, len(rows)), dtype=np.float32),
-        var=pd.DataFrame(index=pd.Index(rows, name="row_id")),
+        X=np.array(
+            [
+                [0.0, 1.0, 2.0],
+                [0.0, 0.5, 1.5],
+                [2.0, 1.0, 0.0],
+                [1.5, 0.5, -0.5],
+            ]
+        ),
+        obs=pd.DataFrame(index=pd.Index(rows, name="row_id")),
+        var=pd.DataFrame({"time": [0.0, 10.0, 20.0]}, index=["t0", "t1", "t2"]),
     )
-    fit_key = GENE_TRAJECTORY_KEY
-    cluster_key = GENE_TRAJECTORY_CLUSTERING_KEY
-    adata.var[f"{fit_key}_gene"] = ["g0", "g1", "g2", "g3"]
-    adata.var[f"{fit_key}_cell_type"] = ["A", "A", "B", "B"]
-    adata.var[f"{fit_key}_waldStat_1"] = [9.0, 8.0, 7.0, 6.0]
-    adata.var[f"{fit_key}_peak_log2fc"] = [2.0, 1.2, -1.1, -2.0]
-    adata.var[f"{fit_key}_t_peak"] = [20.0, 30.0, 40.0, 50.0]
-    adata.var[f"{cluster_key}_broad_cluster"] = [
+    adata.obs["gene"] = ["g0", "g1", "g2", "g3"]
+    adata.obs["cell_type"] = ["A", "A", "B", "B"]
+    adata.obs["waldStat_1"] = [9.0, 8.0, 7.0, 6.0]
+    adata.obs["peak_log2fc"] = [2.0, 1.2, -1.1, -2.0]
+    adata.obs["t_peak"] = [20.0, 30.0, 40.0, 50.0]
+    adata.obs["broad_cluster"] = [
         "trend-up",
         "trend-up",
         "trend-down_1",
         "trend-down_1",
     ]
-    adata.var[f"{cluster_key}_cluster_fine_induced"] = ["1", "1", "-1", "-1"]
-    adata.var[f"{cluster_key}_cluster_fine_repressed"] = ["-1", "-1", "2", "2"]
-    adata.varm[f"{fit_key}_fit"] = np.array(
-        [
-            [0.0, 1.0, 2.0],
-            [0.0, 0.5, 1.5],
-            [2.0, 1.0, 0.0],
-            [1.5, 0.5, -0.5],
-        ]
-    )
-    adata.varm[f"{cluster_key}_X_pca"] = np.array(
-        [
-            [1.0, 0.0],
-            [0.8, 0.1],
-            [-1.0, 0.0],
-            [-0.9, -0.2],
-        ]
-    )
-    adata.uns[CHRONOPACK_UNS_KEY] = {
-        fit_key: {"parameters": {"time_grid": [0.0, 10.0, 20.0]}}
-    }
+    adata.obs["cluster_fine_induced"] = ["1", "1", "-1", "-1"]
+    adata.obs["cluster_fine_repressed"] = ["-1", "-1", "2", "2"]
+    adata.obs["PC1"] = [1.0, 0.8, -1.0, -0.9]
+    adata.obs["PC2"] = [0.0, 0.1, 0.0, -0.2]
     return adata
 
 
-def test_gene_trajectory_plot_data_uses_standardized_adata():
+def test_gene_trajectory_plot_data_uses_trajectory_anndata():
     import chronopack as cp
 
     adata = _synthetic_gene_trajectory_adata()
@@ -80,7 +63,7 @@ def test_cluster_trajectory_plot_data_matches_median_iqr_logic():
     assert trend_up["q75"].tolist() == [0.0, 0.875, 1.875]
 
 
-def test_trajectory_features_can_read_pca_and_descriptor_columns():
+def test_trajectory_features_reads_obs_columns():
     import chronopack as cp
 
     adata = _synthetic_gene_trajectory_adata()
@@ -96,14 +79,35 @@ def test_trajectory_features_can_read_pca_and_descriptor_columns():
     ]
 
 
+def test_clustering_metrics_plot_marks_recommended_k():
+    import chronopack as cp
+    from chronopack.tl import GeneTrajectoryClusteringResult
+
+    result = GeneTrajectoryClusteringResult(
+        metrics=pd.DataFrame(
+            {
+                "k": [3, 4, 5],
+                "WSS": [10.0, 7.0, 6.0],
+                "p90_centroid_distance": [1.0, 0.8, 0.7],
+                "resolution": [0.0, 0.75, 1.0],
+                "mean_silhouette": [0.2, 0.5, 0.4],
+                "elbow_score": [0.0, 0.25, 0.0],
+            }
+        ),
+        assignments={},
+    )
+
+    plot = cp.pl.clustering_metrics(result)
+    assert plot.figure is not None
+    assert plot.data["k"].tolist() == [3, 4, 5]
+
+
 def test_missing_plot_key_raises_clear_error():
     import chronopack as cp
 
     adata = _synthetic_gene_trajectory_adata()
-    del adata.varm[f"{GENE_TRAJECTORY_KEY}_fit"]
-
-    with pytest.raises(KeyError, match="Regenerate this object"):
-        cp.pl.gene_trajectory(adata, ["g0_A"])
+    with pytest.raises(KeyError, match="Trajectory observation column"):
+        cp.pl.trajectory_features(adata, color="missing_column")
 
 
 def test_r_backed_plot_rendering_smoke(tmp_path):

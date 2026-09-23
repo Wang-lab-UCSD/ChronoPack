@@ -193,6 +193,28 @@ association_df_single <- function(sce, n_points = 9) {
   asso_df
 }
 
+annotate_sce_association <- function(sce, asso_df,
+                                     fields = c("waldStat_1", "meanLogFC", "pvalue_1", "qval_1")) {
+  if (is.null(asso_df) || !nrow(asso_df)) {
+    return(sce)
+  }
+  if (is.null(rownames(asso_df))) {
+    stop("Association dataframe must have gene rownames.")
+  }
+  rd <- SummarizedExperiment::rowData(sce)
+  gene_names <- rownames(sce)
+  for (field in fields) {
+    rd[[field]] <- NA_real_
+    if (field %in% colnames(asso_df)) {
+      idx <- match(gene_names, rownames(asso_df))
+      ok <- !is.na(idx)
+      rd[[field]][ok] <- as.numeric(asso_df[[field]][idx[ok]])
+    }
+  }
+  SummarizedExperiment::rowData(sce) <- rd
+  sce
+}
+
 association_df_multilineage <- function(sce, n_points = 9) {
   asso_res <- tradeSeq::associationTest(
     sce,
@@ -301,14 +323,14 @@ run_tradeseq_single_lineage <- function(input_dir,
     workers = workers,
     verbose = verbose
   )
+  asso_df <- association_df_single(sce_screen, n_points = n_points)
+  asso_df <- asso_df[!is.na(asso_df$waldStat_1), , drop = FALSE]
+  sce_screen <- annotate_sce_association(sce_screen, asso_df)
   sce_screen_paths <- save_rds_with_aliases(
     sce_screen,
     output_sce_screen,
     sce_screen_aliases
   )
-
-  asso_df <- association_df_single(sce_screen, n_points = n_points)
-  asso_df <- asso_df[!is.na(asso_df$waldStat_1), , drop = FALSE]
 
   fdr_sig_df <- asso_df[!is.na(asso_df$qval_1) & asso_df$qval_1 < 0.05, , drop = FALSE]
   fdr_sig_df <- fdr_sig_df[order(-fdr_sig_df$waldStat_1, -fdr_sig_df$meanLogFC), , drop = FALSE]
@@ -347,6 +369,7 @@ run_tradeseq_single_lineage <- function(input_dir,
     workers = workers,
     verbose = verbose
   )
+  sce_final <- annotate_sce_association(sce_final, asso_df)
   sce_paths <- save_rds_with_aliases(
     sce_final,
     output_sce,

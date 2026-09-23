@@ -743,6 +743,77 @@ load_dimred_fixed_tradeSeq_outputs <- function(cfg) {
   )
 }
 
+dimred_association_fields <- c("waldStat_1", "meanLogFC", "pvalue_1", "qval_1")
+
+annotate_sce_association <- function(sce, asso_df, fields = dimred_association_fields) {
+  if (is.null(asso_df) || !nrow(asso_df)) {
+    return(sce)
+  }
+  if (is.null(rownames(asso_df))) {
+    stop("Association dataframe must have gene rownames.")
+  }
+  rd <- SummarizedExperiment::rowData(sce)
+  gene_names <- rownames(sce)
+  for (field in fields) {
+    rd[[field]] <- NA_real_
+    if (field %in% colnames(asso_df)) {
+      idx <- match(gene_names, rownames(asso_df))
+      ok <- !is.na(idx)
+      rd[[field]][ok] <- as.numeric(asso_df[[field]][idx[ok]])
+    }
+  }
+  SummarizedExperiment::rowData(sce) <- rd
+  sce
+}
+
+association_from_sce <- function(sce, key = NULL, asso_df = NULL,
+                                 fields = dimred_association_fields) {
+  rd <- as.data.frame(SummarizedExperiment::rowData(sce))
+  missing <- setdiff(fields, colnames(rd))
+  if (length(missing)) {
+    if (!is.null(asso_df)) {
+      sce <- annotate_sce_association(sce, asso_df, fields = fields)
+      rd <- as.data.frame(SummarizedExperiment::rowData(sce))
+      missing <- setdiff(fields, colnames(rd))
+    }
+  }
+  if (length(missing)) {
+    label <- if (is.null(key)) "" else paste0(" for key ", key)
+    stop("SCE rowData", label, " is missing association fields: ", paste(missing, collapse = ", "))
+  }
+  out <- data.frame(gene = rownames(sce), stringsAsFactors = FALSE, row.names = rownames(sce))
+  for (field in fields) {
+    out[[field]] <- as.numeric(rd[rownames(sce), field])
+  }
+  out
+}
+
+load_sce_dict_for_dimred <- function(sce_dict, association_paths = NULL, keys = names(sce_dict)) {
+  if (is.null(names(sce_dict)) || any(!nzchar(names(sce_dict)))) {
+    stop("sce_dict must be a named list or named character vector.")
+  }
+  out <- lapply(keys, function(key) {
+    obj <- sce_dict[[key]]
+    sce <- if (is.character(obj) && length(obj) == 1) readRDS(obj) else obj
+    asso_df <- NULL
+    if (!is.null(association_paths) && key %in% names(association_paths)) {
+      asso_path <- association_paths[[key]]
+      if (!is.null(asso_path) && nzchar(asso_path) && file.exists(asso_path)) {
+        asso_df <- read.csv(asso_path, row.names = 1, check.names = FALSE)
+      }
+    }
+    list(
+      sce = sce,
+      association = association_from_sce(sce, key = key, asso_df = asso_df)
+    )
+  })
+  names(out) <- keys
+  list(
+    sce.ls = lapply(out, `[[`, "sce"),
+    asso_df.ls = lapply(out, `[[`, "association")
+  )
+}
+
 select_dimred_features <- function(asso_df.ls, sce.ls, keys, pvalue_threshold = 0.05) {
   features.ls <- list()
   avail_genes.ls <- list()
@@ -1216,6 +1287,237 @@ finalize_dimred_pc_df <- function(pc_df, cell_type_order = c("K562a", "K562b", "
 write_matrix_csv <- function(x, path) {
   write.csv(as.data.frame(x, check.names = FALSE), path, row.names = TRUE)
   invisible(normalizePath(path, mustWork = FALSE))
+}
+
+chronopack_align_sce_trajectories_to_files <- function(
+  sce_dict,
+  output_dir,
+  keys = names(sce_dict),
+  time_map = c(K562a = 110, K562_puro = 110, K562b = 165, THP1 = 165),
+  offset_map = c(K562a = 0, K562_puro = 0, K562b = -68, THP1 = -10),
+  scale_map = c(THP1 = 0.65),
+  association_paths = NULL,
+  lineage_pick = 1,
+  write_raw = TRUE
+) {
+  output_dir <- normalizePath(output_dir, mustWork = FALSE)
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+  loaded <- load_sce_dict_for_dimred(
+    sce_dict = sce_dict,
+    association_paths = association_paths,
+    keys = keys
+  )
+
+  features.ls <- lapply(keys, function(key) rownames(loaded$sce.ls[[key]]))
+  names(features.ls) <- keys
+  npoints_map <- stats::setNames(as.integer(round(as.numeric(time_map[keys]))) + 1L, keys)
+  traj.ls <- extract_dimred_smooth_trajectories(
+    sce.ls = loaded$sce.ls,
+    features = features.ls,
+    keys = keys,
+    npoints_map = npoints_map,
+    lineage_pick = lineage_pick
+  )
+
+  align_res <- align_rescale_dimred_trajectories(
+    traj.ls = traj.ls,
+    time_map = time_map,
+    offset_map = offset_map,
+    scale_map = scale_map
+  )
+  traj_res <- construct_dimred_traj_matrix(align_res$traj_trunc_rescaled.ls)
+  traj_mat <- traj_res$traj_mat
+  tt <- traj_res$tt
+  obs <- build_dimred_base_pc_df(traj_mat = traj_mat, asso_df.ls = loaded$asso_df.ls)
+
+  paths <- list(
+    traj_mat = file.path(output_dir, "trajectory_aligned_fit.csv"),
+    time_grid = file.path(output_dir, "trajectory_time_grid.csv"),
+    obs = file.path(output_dir, "trajectory_obs.csv")
+  )
+  write_matrix_csv(traj_mat, paths$traj_mat)
+  write.csv(data.frame(time = tt), paths$time_grid, row.names = FALSE)
+  write.csv(obs, paths$obs)
+
+  raw_paths <- list()
+  raw_meta <- data.frame(
+    key = character(),
+    n_rows = integer(),
+    n_cols = integer(),
+    size_bytes = numeric(),
+    stringsAsFactors = FALSE
+  )
+  if (isTRUE(write_raw)) {
+    raw_dir <- file.path(output_dir, "raw_fitted_trajectories")
+    dir.create(raw_dir, recursive = TRUE, showWarnings = FALSE)
+    for (key in keys) {
+      raw_mat_path <- file.path(raw_dir, paste0(key, ".fit.csv"))
+      raw_time_path <- file.path(raw_dir, paste0(key, ".time.csv"))
+      write_matrix_csv(traj.ls[[key]]$traj_mat, raw_mat_path)
+      write.csv(data.frame(time = traj.ls[[key]]$tt), raw_time_path, row.names = FALSE)
+      raw_paths[[key]] <- list(fit = raw_mat_path, time = raw_time_path)
+      raw_meta <- rbind(
+        raw_meta,
+        data.frame(
+          key = key,
+          n_rows = nrow(traj.ls[[key]]$traj_mat),
+          n_cols = ncol(traj.ls[[key]]$traj_mat),
+          size_bytes = as.numeric(object.size(traj.ls[[key]]$traj_mat)) + as.numeric(object.size(traj.ls[[key]]$tt)),
+          stringsAsFactors = FALSE
+        )
+      )
+    }
+  }
+  paths$raw <- raw_paths
+  paths$raw_meta <- file.path(output_dir, "raw_fitted_trajectories.meta.csv")
+  write.csv(raw_meta, paths$raw_meta, row.names = FALSE)
+
+  list(
+    paths = paths,
+    raw_meta = raw_meta,
+    parameters = list(
+      keys = keys,
+      time_map = time_map,
+      offset_map = offset_map,
+      scale_map = scale_map,
+      scale_map_use = align_res$scale_map_use,
+      lineage_pick = lineage_pick,
+      shared_minutes = align_res$shared_minutes
+    )
+  )
+}
+
+chronopack_compute_descriptors_from_files <- function(
+  traj_mat_path,
+  time_grid_path,
+  output_path,
+  scale_map_use = NULL,
+  descriptor_args = NULL
+) {
+  traj_mat <- as.matrix(read.csv(traj_mat_path, row.names = 1, check.names = FALSE))
+  tt <- read.csv(time_grid_path, check.names = FALSE)$time
+  if (is.null(descriptor_args)) {
+    descriptor_args <- list(
+      N_minutes = 10 / length(tt),
+      z_diff_threshold = 0.2,
+      require_consecutive = 30,
+      onset_mode = "horizontal",
+      pseudocount = 0
+    )
+  }
+  desc <- do.call(get_descriptors, c(list(traj_mat = traj_mat, tt = tt), descriptor_args))
+  rownames(desc) <- desc$gene_celltype
+  if (is.null(scale_map_use)) {
+    descriptor_scale <- rep(length(tt), nrow(desc))
+  } else {
+    descriptor_key <- sub("^[^_]+_", "", desc$gene_celltype)
+    descriptor_scale <- length(tt) / as.numeric(scale_map_use[descriptor_key])
+    descriptor_scale[!is.finite(descriptor_scale)] <- length(tt)
+  }
+  desc$t_onset <- desc$t_onset * descriptor_scale
+  desc$t_peak <- desc$t_peak * descriptor_scale
+  desc <- dplyr::select(desc, -gene_celltype)
+  write.csv(desc, output_path)
+  normalizePath(output_path, mustWork = FALSE)
+}
+
+chronopack_cluster_trajectory_matrix_to_files <- function(
+  traj_mat_path,
+  time_grid_path,
+  output_dir,
+  alpha,
+  K_grid = 2:100,
+  wss_fraction = 0.95,
+  variance_threshold = 0.99,
+  pca_columns = 4,
+  reference_traj_mat_path = NULL
+) {
+  output_dir <- normalizePath(output_dir, mustWork = FALSE)
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  if (missing(alpha) || is.null(alpha) || !is.finite(alpha) || alpha < 0 || alpha > 1) {
+    stop("`alpha` must be explicitly supplied as a finite value between 0 and 1.")
+  }
+
+  traj_mat <- as.matrix(read.csv(traj_mat_path, row.names = 1, check.names = FALSE))
+  tt <- read.csv(time_grid_path, check.names = FALSE)$time
+  ref_mat <- traj_mat
+  if (!is.null(reference_traj_mat_path) && nzchar(reference_traj_mat_path)) {
+    ref_mat <- as.matrix(read.csv(reference_traj_mat_path, row.names = 1, check.names = FALSE))
+    if (ncol(ref_mat) != ncol(traj_mat)) {
+      stop("reference_traj_mat_path has a different number of timepoints than traj_mat_path.")
+    }
+    if (!all(rownames(traj_mat) %in% rownames(ref_mat))) {
+      stop("All rows in traj_mat_path must be present in reference_traj_mat_path.")
+    }
+  }
+
+  X_ref <- z_row(ref_mat)
+  dt <- diff(tt)
+  Xd_ref <- ref_mat[, -1, drop = FALSE] - ref_mat[, -ncol(ref_mat), drop = FALSE]
+  Xd_ref <- sweep(Xd_ref, 2, dt, "/")
+  Xd_ref <- z_row(Xd_ref)
+  X_mat <- X_ref[rownames(traj_mat), , drop = FALSE]
+  Xd_mat <- Xd_ref[rownames(traj_mat), , drop = FALSE]
+
+  pca_res <- compute_dimred_pca(
+    X_mat = X_ref,
+    Xd_mat = Xd_ref,
+    variance_threshold = variance_threshold
+  )
+  clustering_inputs <- prepare_dimred_clustering_inputs(X_ref, Xd_ref)
+  X_joint <- cbind(
+    sqrt(1 - alpha) * clustering_inputs$X_n,
+    sqrt(alpha) * clustering_inputs$Xd_n
+  )[rownames(traj_mat), , drop = FALSE]
+  D_joint <- dist(X_joint, method = "euclidean")
+  hc <- hclust(D_joint, method = "ward.D2")
+  clust_eval <- calculate_trajectory_clustering_metrics(
+    X_mat = X_joint,
+    D = D_joint,
+    hc = hc,
+    K_grid = K_grid,
+    wss_fraction = wss_fraction,
+    select_k_by = "elbow"
+  )
+
+  assignments <- do.call(cbind, lapply(K_grid, function(K) cutree(hc, k = as.integer(K))))
+  colnames(assignments) <- paste0("k", as.integer(K_grid))
+  rownames(assignments) <- rownames(traj_mat)
+
+  centroid_distances <- do.call(cbind, lapply(K_grid, function(K) {
+    cl <- assignments[, paste0("k", as.integer(K))]
+    df <- cluster_centroid_distances(X_joint, cl)
+    df$centroid_dist[match(rownames(traj_mat), df$gene)]
+  }))
+  colnames(centroid_distances) <- colnames(assignments)
+  rownames(centroid_distances) <- rownames(traj_mat)
+
+  paths <- list(
+    metrics = file.path(output_dir, "cluster_metrics.csv"),
+    assignments = file.path(output_dir, "cluster_assignments.csv"),
+    centroid_distances = file.path(output_dir, "cluster_centroid_distances.csv"),
+    pca_X = file.path(output_dir, "gene_trajectory_X_pca.csv"),
+    pca_Xd = file.path(output_dir, "gene_trajectory_Xd_pca.csv")
+  )
+  write.csv(clust_eval$metrics, paths$metrics, row.names = FALSE)
+  write_matrix_csv(assignments, paths$assignments)
+  write_matrix_csv(centroid_distances, paths$centroid_distances)
+  write_matrix_csv(pca_res$pca_X$x, paths$pca_X)
+  write_matrix_csv(pca_res$pca_Xd$x, paths$pca_Xd)
+
+  list(
+    paths = paths,
+    selection = clust_eval$selection,
+    parameters = list(
+      alpha = alpha,
+      K_grid = K_grid,
+      wss_fraction = wss_fraction,
+      variance_threshold = variance_threshold,
+      pca_columns = pca_columns,
+      reference_traj_mat_path = reference_traj_mat_path
+    )
+  )
 }
 
 dimred_log <- function(...) {

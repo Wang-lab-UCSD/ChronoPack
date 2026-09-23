@@ -1,9 +1,10 @@
-"""Gene-expression trajectory characterization and dynamic-mode clustering."""
+"""Gene-expression trajectory AnnData construction and clustering."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import numpy as np
@@ -12,83 +13,26 @@ import pandas as pd
 from chronopack._backends.r._bridge import source_r_resource
 from chronopack._core import record_provenance, validate_adata
 from chronopack._core._keys import (
+    CHRONOPACK_UNS_KEY,
     GENE_TRAJECTORY_CLUSTERING_KEY,
     GENE_TRAJECTORY_KEY,
 )
 
 
 @dataclass
-class GeneTrajectoryAlignmentResult:
-    """Result for aligned fitted trajectories and standardized matrices."""
-
-    key_added: str
-    metadata: dict[str, Any] = field(default_factory=dict)
-    adata: Any | None = None
-    pc_df: pd.DataFrame | None = None
-    time_grid: np.ndarray | None = None
-    sidecar_paths: dict[str, str] = field(default_factory=dict)
-    backend_result: Any | None = None
-
-
-@dataclass
-class GeneTrajectoryCharacterizationResult:
-    """Lightweight result for standardized fitted gene-expression trajectories."""
-
-    key_added: str
-    metadata: dict[str, Any] = field(default_factory=dict)
-    adata: Any | None = None
-    pc_df: pd.DataFrame | None = None
-    time_grid: np.ndarray | None = None
-    sidecar_paths: dict[str, str] = field(default_factory=dict)
-    backend_result: Any | None = None
-
-
-@dataclass
 class GeneTrajectoryClusteringResult:
-    """Lightweight result metadata for dynamic-mode clustering."""
+    """Candidate clustering solutions and diagnostics for one trajectory subset."""
 
-    key_added: str
+    metrics: pd.DataFrame
+    assignments: dict[int, pd.Series]
+    centroid_distances: dict[int, pd.Series] = field(default_factory=dict)
+    pca: pd.DataFrame | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    adata: Any | None = None
-    pc_df: pd.DataFrame | None = None
-    metrics: dict[str, pd.DataFrame] = field(default_factory=dict)
-    selected_k: dict[str, dict[str, Any]] = field(default_factory=dict)
-    sidecar_paths: dict[str, str] = field(default_factory=dict)
-    backend_result: Any | None = None
-
-
-@dataclass
-class GeneTrajectoryFinalizedClusteringResult:
-    """Combined induced/repressed cluster assignments."""
-
-    key_added: str
-    metadata: dict[str, Any] = field(default_factory=dict)
-    adata: Any | None = None
-    pc_df: pd.DataFrame | None = None
-    sidecar_paths: dict[str, str] = field(default_factory=dict)
-    backend_result: Any | None = None
+    key_added: str = GENE_TRAJECTORY_CLUSTERING_KEY
 
 
 def _read_matrix(path: str | Path) -> pd.DataFrame:
     return pd.read_csv(path, index_col=0)
-
-
-def _ensure_gene_adata(adata, var_names):
-    import anndata as ad
-
-    var_names = pd.Index(var_names.astype(str) if hasattr(var_names, "astype") else list(map(str, var_names)))
-    if adata is None:
-        return ad.AnnData(
-            X=np.zeros((0, len(var_names)), dtype=np.float32),
-            var=pd.DataFrame(index=var_names),
-        )
-    validate_adata(adata)
-    if list(map(str, adata.var_names)) != var_names.tolist():
-        current = pd.Index(map(str, adata.var_names))
-        if current.is_unique and var_names.is_unique and set(current) == set(var_names):
-            return adata[:, var_names].copy()
-        raise ValueError("adata.var_names must match the gene-trajectory row order.")
-    return adata
 
 
 def _r_named_vector(values: dict[str, Any], *, numeric=True):
@@ -131,20 +75,40 @@ def _r_scalar_list(values: dict[str, Any]):
     return ListVector(out)
 
 
-def _r_config(config):
+def _r_sce_dict(sce_dict: dict[str, Any]):
     from rpy2.robjects import ListVector, StrVector
 
     out = {}
-    for key, entry in config.items():
-        out[str(key)] = ListVector(
-            {
-                "dir": str(entry["dir"]),
-                "asso": StrVector([str(x) for x in entry["asso"]]),
-                "sig": StrVector([str(x) for x in entry["sig"]]),
-                "sce": StrVector([str(x) for x in entry["sce"]]),
-            }
-        )
+    for key, value in sce_dict.items():
+        if isinstance(value, (str, Path)):
+            out[str(key)] = StrVector([str(value)])
+        else:
+            out[str(key)] = value
     return ListVector(out)
+
+
+def _r_optional_path_dict(values: dict[str, Any] | None):
+    if values is None:
+        return None
+    from rpy2.robjects import ListVector, StrVector
+
+    return ListVector({str(k): StrVector([str(v)]) for k, v in values.items() if v is not None})
+
+
+def _default_dimred_paths(output_dir):
+    output_dir = Path(output_dir)
+    return {
+        "fit": output_dir / "gene_trajectory_fit.csv",
+        "time_grid": output_dir / "gene_trajectory_time_grid.csv",
+        "pc_df": output_dir / "pc_df.new.csv",
+        "pc_df_rds": output_dir / "pc_df.new.rds",
+        "fit_z": output_dir / "gene_trajectory_fit_z.csv",
+        "fit_ddt_z": output_dir / "gene_trajectory_fit_ddt_z.csv",
+        "x_pca": output_dir / "gene_trajectory_X_pca.csv",
+        "xd_pca": output_dir / "gene_trajectory_Xd_pca.csv",
+        "induced_metrics": output_dir / "cluster_metrics.induced.csv",
+        "repressed_metrics": output_dir / "cluster_metrics.repressed.csv",
+    }
 
 
 def dimred_config(root_puro, root_k562a, root_lps):
@@ -155,443 +119,365 @@ def dimred_config(root_puro, root_k562a, root_lps):
     return r["chronopack_dimred_config"](str(root_puro), str(root_k562a), str(root_lps))
 
 
-def _default_outputs(output_dir):
-    output_dir = Path(output_dir)
-    return {
-        "fit": output_dir / "gene_trajectory_fit.csv",
-        "time_grid": output_dir / "gene_trajectory_time_grid.csv",
-        "pc_df_aligned": output_dir / "pc_df.aligned.csv",
-        "pc_df_characterized": output_dir / "pc_df.characterized.csv",
-        "fit_z": output_dir / "gene_trajectory_fit_z.csv",
-        "fit_ddt_z": output_dir / "gene_trajectory_fit_ddt_z.csv",
-        "fit_significant_z": output_dir / "gene_trajectory_fit_significant_z.csv",
-        "fit_ddt_significant_z": output_dir / "gene_trajectory_fit_ddt_significant_z.csv",
-        "pc_df": output_dir / "pc_df.new.csv",
-        "pc_df_rds": output_dir / "pc_df.new.rds",
-        "x_pca": output_dir / "gene_trajectory_X_pca.csv",
-        "xd_pca": output_dir / "gene_trajectory_Xd_pca.csv",
-        "induced_metrics": output_dir / "cluster_metrics.induced.csv",
-        "repressed_metrics": output_dir / "cluster_metrics.repressed.csv",
+def sce_paths_from_dimred_roots(root_puro, root_k562a, root_lps) -> dict[str, str]:
+    """Resolve the fitted tradeSeq SCE files used by the DimensionalityReduction notebook."""
+    cfg = dimred_config(root_puro, root_k562a, root_lps)
+    out: dict[str, str] = {}
+    for key in cfg.names:
+        entry = cfg.rx2(key)
+        root = Path(str(entry.rx2("dir")[0]))
+        for candidate in entry.rx2("sce"):
+            path = root / str(candidate)
+            if path.exists():
+                out[str(key)] = str(path)
+                break
+        else:
+            raise FileNotFoundError(f"Could not find fitted SCE for {key} under {root}.")
+    return out
+
+
+def association_paths_from_dimred_roots(root_puro, root_k562a, root_lps) -> dict[str, str]:
+    """Resolve legacy association CSVs for one-time SCE rowData migration."""
+    cfg = dimred_config(root_puro, root_k562a, root_lps)
+    out: dict[str, str] = {}
+    for key in cfg.names:
+        entry = cfg.rx2(key)
+        root = Path(str(entry.rx2("dir")[0]))
+        for candidate in entry.rx2("asso"):
+            path = root / str(candidate)
+            if path.exists():
+                out[str(key)] = str(path)
+                break
+    return out
+
+
+def _make_traj_adata(
+    *,
+    fit: pd.DataFrame,
+    obs: pd.DataFrame,
+    time_grid: np.ndarray,
+    raw_payload: dict[str, dict[str, Any]],
+    raw_size_bytes: int,
+    raw_embedded: bool,
+    metadata: dict[str, Any],
+    key_added: str,
+):
+    import anndata as ad
+
+    obs = obs.loc[fit.index].copy()
+    obs.index = obs.index.astype(str)
+    var = pd.DataFrame({"time": time_grid}, index=[f"t{i}" for i in range(fit.shape[1])])
+    traj = ad.AnnData(X=fit.to_numpy(dtype=float), obs=obs, var=var)
+    if CHRONOPACK_UNS_KEY not in traj.uns:
+        traj.uns[CHRONOPACK_UNS_KEY] = {}
+    traj.uns[CHRONOPACK_UNS_KEY]["alignment"] = {
+        **metadata,
+        "raw_trajectory_size_bytes": int(raw_size_bytes),
+        "raw_trajectories_embedded": bool(raw_embedded),
     }
-
-
-def _write_characterization_to_adata(adata, *, key_added, pc_df, fit, time_grid, ddt=None):
-    for col in pc_df.columns:
-        adata.var[f"{key_added}_{col}"] = pc_df[col].to_numpy()
-    adata.varm[f"{key_added}_fit"] = fit.loc[adata.var_names].to_numpy()
-    if ddt is not None:
-        adata.varm[f"{key_added}_fit_ddt"] = ddt.loc[adata.var_names].to_numpy()
+    if raw_embedded:
+        traj.uns[CHRONOPACK_UNS_KEY]["raw_trajectories"] = raw_payload
     record_provenance(
-        adata,
+        traj,
         key_added,
-        analysis="gene_expression_trajectory_characterization",
-        parameters={"time_grid": [float(x) for x in time_grid]},
-        result_keys={
-            "var": [f"{key_added}_{col}" for col in pc_df.columns],
-            "varm": [f"{key_added}_fit"] + ([f"{key_added}_fit_ddt"] if ddt is not None else []),
-        },
+        analysis="gene_expression_trajectory_alignment",
+        backend="R/tradeSeq",
+        parameters=metadata,
+        result_keys={"X": "aligned fitted expression", "obs": list(obs.columns), "var": ["time"]},
     )
-
-
-def _write_clustering_to_adata(adata, *, key_added, pc_df, x_pca=None):
-    for col in pc_df.columns:
-        if col not in adata.var:
-            adata.var[f"{key_added}_{col}"] = pc_df[col].to_numpy()
-    if x_pca is not None:
-        adata.varm[f"{key_added}_X_pca"] = x_pca.loc[adata.var_names].to_numpy()
-    cluster_cols = [
-        col
-        for col in [
-            "cluster_broad_induced",
-            "cluster_broad_repressed",
-            "cluster_fine_induced",
-            "cluster_fine_repressed",
-            "broad_cluster",
-            "cluster_dist_broad",
-            "cluster_dist_fine",
-        ]
-        if col in pc_df.columns
-    ]
-    record_provenance(
-        adata,
-        key_added,
-        analysis="gene_expression_trajectory_clustering",
-        parameters={},
-        result_keys={
-            "var": [f"{key_added}_{col}" for col in cluster_cols if f"{key_added}_{col}" in adata.var],
-            "varm": [f"{key_added}_X_pca"] if x_pca is not None else [],
-        },
-    )
+    return traj
 
 
 def align_gene_trajectories(
-    adata=None,
+    sce_dict: dict[str, Any] | None = None,
     *,
-    config=None,
-    root_puro=None,
-    root_k562a=None,
-    root_lps=None,
-    output_dir,
-    key_added=GENE_TRAJECTORY_KEY,
+    output_dir: str | Path | None = None,
+    key_added: str = GENE_TRAJECTORY_KEY,
     keys=("K562a", "K562_puro", "K562b", "THP1"),
-    t_interval_map=None,
     time_map=None,
     offset_map=None,
     scale_map=None,
-    pvalue_threshold=0.05,
-    lineage_pick=1,
-    copy=False,
-    return_model=True,
+    association_paths: dict[str, Any] | None = None,
+    root_puro=None,
+    root_k562a=None,
+    root_lps=None,
+    lineage_pick: int = 1,
+    embed_raw_max_bytes: int = 100_000_000,
 ):
-    """Align fitted trajectories across experiments and compute standardized matrices."""
+    """Build a gene-context x aligned-time AnnData object from fitted tradeSeq SCEs."""
     try:
         from rpy2.robjects import r
     except ImportError as exc:
         raise ImportError("Gene-trajectory alignment requires optional dependency 'rpy2'.") from exc
 
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    source_r_resource("dimred_clustering_helpers.R")
-
-    if config is None:
+    if sce_dict is None:
         if root_puro is None or root_k562a is None or root_lps is None:
-            raise ValueError("Provide either config or root_puro/root_k562a/root_lps.")
-        r_config = r["chronopack_dimred_config"](str(root_puro), str(root_k562a), str(root_lps))
-    else:
-        r_config = _r_config(config)
+            raise ValueError("Provide sce_dict or root_puro/root_k562a/root_lps.")
+        sce_dict = sce_paths_from_dimred_roots(root_puro, root_k562a, root_lps)
+        if association_paths is None:
+            association_paths = association_paths_from_dimred_roots(root_puro, root_k562a, root_lps)
 
-    t_interval_map = t_interval_map or {"K562a": 10, "K562_puro": 10, "K562b": 15, "THP1": 15}
     time_map = time_map or {"K562a": 110, "K562_puro": 110, "K562b": 165, "THP1": 165}
     offset_map = offset_map or {"K562a": 0, "K562_puro": 0, "K562b": -68, "THP1": -10}
     scale_map = scale_map or {"THP1": 0.65}
+    keys = tuple(k for k in keys if k in sce_dict)
+    if not keys:
+        raise ValueError("No requested keys are present in sce_dict.")
 
-    backend_result = r["chronopack_align_gene_trajectories"](
-        r_config,
-        str(output_dir),
-        keys=_r_character_vector(keys),
-        t_interval_map=_r_named_vector(t_interval_map),
-        time_map=_r_named_vector(time_map),
-        offset_map=_r_named_vector(offset_map),
-        scale_map=_r_named_vector(scale_map),
-        pvalue_threshold=float(pvalue_threshold),
-        lineage_pick=int(lineage_pick),
-        write_outputs=True,
-    )
+    source_r_resource("dimred_clustering_helpers.R")
+    if output_dir is None:
+        tmp_ctx = TemporaryDirectory()
+        work_dir = Path(tmp_ctx.name)
+    else:
+        tmp_ctx = None
+        work_dir = Path(output_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        r["chronopack_align_sce_trajectories_to_files"](
+            _r_sce_dict({k: sce_dict[k] for k in keys}),
+            str(work_dir),
+            keys=_r_character_vector(keys),
+            time_map=_r_named_vector({k: time_map[k] for k in keys}),
+            offset_map=_r_named_vector({k: offset_map[k] for k in keys}),
+            scale_map=_r_named_vector(scale_map),
+            association_paths=_r_optional_path_dict(association_paths),
+            lineage_pick=int(lineage_pick),
+            write_raw=True,
+        )
+        fit = _read_matrix(work_dir / "trajectory_aligned_fit.csv")
+        obs = pd.read_csv(work_dir / "trajectory_obs.csv", index_col=0)
+        time_grid = pd.read_csv(work_dir / "trajectory_time_grid.csv")["time"].to_numpy(dtype=float)
 
-    paths = _default_outputs(output_dir)
-    fit = _read_matrix(paths["fit"])
-    pc_df = pd.read_csv(paths["pc_df_aligned"], index_col=0)
-    time_grid = pd.read_csv(paths["time_grid"])["time"].to_numpy(dtype=float)
-    ddt = _read_matrix(paths["fit_ddt_z"])
+        raw_payload: dict[str, dict[str, Any]] = {}
+        raw_size_bytes = 0
+        raw_meta_path = work_dir / "raw_fitted_trajectories.meta.csv"
+        if raw_meta_path.exists():
+            raw_meta = pd.read_csv(raw_meta_path)
+            raw_size_bytes = int(raw_meta["size_bytes"].sum()) if "size_bytes" in raw_meta else 0
+        raw_embedded = raw_size_bytes <= int(embed_raw_max_bytes)
+        if raw_embedded:
+            raw_dir = work_dir / "raw_fitted_trajectories"
+            for key in keys:
+                raw_fit = _read_matrix(raw_dir / f"{key}.fit.csv")
+                raw_time = pd.read_csv(raw_dir / f"{key}.time.csv")["time"].to_numpy(dtype=float)
+                raw_payload[key] = {
+                    "fit": raw_fit.to_numpy(dtype=float),
+                    "time": raw_time,
+                    "obs_names": raw_fit.index.astype(str).to_numpy(),
+                    "gene": raw_fit.index.astype(str).to_numpy(),
+                    "context": key,
+                }
 
-    target = _ensure_gene_adata(adata.copy() if copy and adata is not None else adata, pc_df.index)
-    _write_characterization_to_adata(target, key_added=key_added, pc_df=pc_df, fit=fit, time_grid=time_grid, ddt=ddt)
-
-    sidecars = {name: str(path) for name, path in paths.items() if path.exists()}
-    metadata = {
-        "output_dir": str(output_dir),
-        "keys": list(keys),
-        "t_interval_map": dict(t_interval_map),
-        "time_map": dict(time_map),
-        "offset_map": dict(offset_map),
-        "scale_map": dict(scale_map),
-        "pvalue_threshold": pvalue_threshold,
-        "lineage_pick": lineage_pick,
-        "time_grid": [float(x) for x in time_grid],
-    }
-    result = GeneTrajectoryAlignmentResult(
-        key_added=key_added,
-        metadata=metadata,
-        adata=target,
-        pc_df=pc_df,
-        time_grid=time_grid,
-        sidecar_paths=sidecars,
-        backend_result=backend_result,
-    )
-    if copy:
-        return (target, result) if return_model else target
-    return result if return_model else None
+        metadata = {
+            "keys": list(keys),
+            "time_map": {str(k): float(time_map[k]) for k in keys},
+            "offset_map": {str(k): float(offset_map[k]) for k in keys},
+            "scale_map": {str(k): float(v) for k, v in dict(scale_map).items()},
+            "scale_map_use": {
+                str(k): float(dict(scale_map).get(k, 1.0))
+                for k in keys
+            },
+            "source_sce": {str(k): str(sce_dict[k]) for k in keys if isinstance(sce_dict[k], (str, Path))},
+            "association_paths_used_for_migration": {
+                str(k): str(v) for k, v in dict(association_paths or {}).items()
+            },
+            "lineage_pick": int(lineage_pick),
+            "aligned_time_grid": [float(x) for x in time_grid],
+        }
+        traj = _make_traj_adata(
+            fit=fit,
+            obs=obs,
+            time_grid=time_grid,
+            raw_payload=raw_payload,
+            raw_size_bytes=raw_size_bytes,
+            raw_embedded=raw_embedded,
+            metadata=metadata,
+            key_added=key_added,
+        )
+    finally:
+        if tmp_ctx is not None:
+            tmp_ctx.cleanup()
+    return traj
 
 
 def compute_gene_trajectory_descriptors(
-    adata=None,
+    traj,
     *,
-    alignment,
-    output_dir,
-    key_added=GENE_TRAJECTORY_KEY,
-    pvalue_threshold=None,
-    descriptor_args=None,
-    copy=False,
-    return_model=True,
+    inplace: bool = True,
+    output_dir: str | Path | None = None,
+    descriptor_args: dict[str, Any] | None = None,
+    key_added: str = GENE_TRAJECTORY_KEY,
 ):
-    """Compute trajectory descriptors from an aligned trajectory result."""
+    """Compute trajectory descriptors from ``traj.X`` and append them to ``traj.obs``."""
     try:
         from rpy2.robjects import r
     except ImportError as exc:
         raise ImportError("Gene-trajectory descriptor calculation requires optional dependency 'rpy2'.") from exc
 
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    validate_adata(traj)
+    target = traj if inplace else traj.copy()
+    time_grid = np.asarray(target.var["time"], dtype=float)
     source_r_resource("dimred_clustering_helpers.R")
 
-    kwargs = {
-        "alignment": alignment.backend_result,
-        "output_dir": str(output_dir),
-        "write_outputs": True,
-    }
-    if pvalue_threshold is not None:
-        kwargs["pvalue_threshold"] = float(pvalue_threshold)
-    if descriptor_args is not None:
-        kwargs["descriptor_args"] = _r_scalar_list(descriptor_args)
+    if output_dir is None:
+        tmp_ctx = TemporaryDirectory()
+        work_dir = Path(tmp_ctx.name)
+    else:
+        tmp_ctx = None
+        work_dir = Path(output_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        traj_path = work_dir / "descriptor_input_fit.csv"
+        time_path = work_dir / "descriptor_input_time.csv"
+        desc_path = work_dir / "trajectory_descriptors.csv"
+        pd.DataFrame(target.X, index=target.obs_names, columns=target.var_names).to_csv(traj_path)
+        pd.DataFrame({"time": time_grid}).to_csv(time_path, index=False)
+        alignment_meta = target.uns.get(CHRONOPACK_UNS_KEY, {}).get("alignment", {})
+        scale_map = alignment_meta.get("scale_map_use", alignment_meta.get("scale_map", {}))
+        if descriptor_args is None:
+            descriptor_args = {
+                "N_minutes": 10 / len(time_grid),
+                "z_diff_threshold": 0.2,
+                "require_consecutive": 30,
+                "onset_mode": "horizontal",
+                "pseudocount": 0,
+            }
+        r_kwargs = {}
+        if scale_map:
+            r_kwargs["scale_map_use"] = _r_named_vector(scale_map)
+        if descriptor_args:
+            r_kwargs["descriptor_args"] = _r_scalar_list(descriptor_args)
+        r["chronopack_compute_descriptors_from_files"](
+            str(traj_path),
+            str(time_path),
+            str(desc_path),
+            **r_kwargs,
+        )
+        desc = pd.read_csv(desc_path, index_col=0)
+        desc = desc.loc[target.obs_names]
+    finally:
+        if tmp_ctx is not None:
+            tmp_ctx.cleanup()
 
-    backend_result = r["chronopack_compute_gene_trajectory_descriptors"](**kwargs)
-
-    paths = _default_outputs(output_dir)
-    fit = _read_matrix(paths["fit"])
-    pc_df = pd.read_csv(paths["pc_df_characterized"], index_col=0)
-    time_grid = pd.read_csv(paths["time_grid"])["time"].to_numpy(dtype=float)
-    ddt = _read_matrix(paths["fit_ddt_z"])
-
-    base_adata = adata if adata is not None else alignment.adata
-    target = _ensure_gene_adata(base_adata.copy() if copy and base_adata is not None else base_adata, pc_df.index)
-    _write_characterization_to_adata(target, key_added=key_added, pc_df=pc_df, fit=fit, time_grid=time_grid, ddt=ddt)
-
-    sidecars = {name: str(path) for name, path in paths.items() if path.exists()}
-    metadata = dict(alignment.metadata)
-    metadata.update(
-        {
-            "output_dir": str(output_dir),
-            "pvalue_threshold": pvalue_threshold if pvalue_threshold is not None else alignment.metadata.get("pvalue_threshold"),
-            "time_grid": [float(x) for x in time_grid],
-        }
+    for col in desc.columns:
+        target.obs[col] = desc[col].to_numpy()
+    record_provenance(
+        target,
+        f"{key_added}_descriptors",
+        analysis="gene_expression_trajectory_descriptors",
+        backend="R",
+        parameters={"descriptor_args": descriptor_args or {}},
+        result_keys={"obs": list(desc.columns)},
     )
-    result = GeneTrajectoryCharacterizationResult(
-        key_added=key_added,
-        metadata=metadata,
-        adata=target,
-        pc_df=pc_df,
-        time_grid=time_grid,
-        sidecar_paths=sidecars,
-        backend_result=backend_result,
-    )
-    if copy:
-        return (target, result) if return_model else target
-    return result if return_model else None
+    return None if inplace else target
 
 
-def characterize_gene_trajectories(
-    adata=None,
-    *,
-    config=None,
-    root_puro=None,
-    root_k562a=None,
-    root_lps=None,
-    output_dir,
-    key_added=GENE_TRAJECTORY_KEY,
-    keys=("K562a", "K562_puro", "K562b", "THP1"),
-    t_interval_map=None,
-    time_map=None,
-    offset_map=None,
-    scale_map=None,
-    pvalue_threshold=0.05,
-    lineage_pick=1,
-    copy=False,
-    return_model=True,
-):
-    """Compatibility wrapper: align trajectories, then compute descriptors."""
-    alignment = align_gene_trajectories(
-        adata=adata,
-        config=config,
-        root_puro=root_puro,
-        root_k562a=root_k562a,
-        root_lps=root_lps,
-        output_dir=output_dir,
-        key_added=key_added,
-        keys=keys,
-        t_interval_map=t_interval_map,
-        time_map=time_map,
-        offset_map=offset_map,
-        scale_map=scale_map,
-        pvalue_threshold=pvalue_threshold,
-        lineage_pick=lineage_pick,
-        copy=copy,
-        return_model=True,
-    )
-    return compute_gene_trajectory_descriptors(
-        adata=alignment.adata,
-        alignment=alignment,
-        output_dir=output_dir,
-        key_added=key_added,
-        pvalue_threshold=pvalue_threshold,
-        copy=copy,
-        return_model=return_model,
-    )
+def _write_subset_matrix(traj, work_dir: Path, basename: str) -> tuple[Path, Path]:
+    fit_path = work_dir / f"{basename}.fit.csv"
+    time_path = work_dir / f"{basename}.time.csv"
+    pd.DataFrame(traj.X, index=traj.obs_names, columns=traj.var_names).to_csv(fit_path)
+    pd.DataFrame({"time": np.asarray(traj.var["time"], dtype=float)}).to_csv(time_path, index=False)
+    return fit_path, time_path
 
 
 def cluster_gene_trajectories(
-    adata=None,
+    traj,
     *,
-    characterization=None,
-    characterization_output_dir=None,
-    output_dir,
-    rows,
-    cluster_name,
-    key_added=GENE_TRAJECTORY_CLUSTERING_KEY,
-    alpha=None,
-    k_broad=None,
-    k_fine=None,
-    k_grid=range(2, 101),
-    wss_fraction=0.95,
-    variance_threshold=0.99,
-    pca_columns=4,
-    copy=False,
-    return_model=True,
+    k=range(3, 20),
+    alpha: float,
+    reference=None,
+    output_dir: str | Path | None = None,
+    key_added: str = GENE_TRAJECTORY_CLUSTERING_KEY,
+    wss_fraction: float = 0.95,
+    variance_threshold: float = 0.99,
+    pca_columns: int = 4,
 ):
-    """Cluster an explicitly supplied subset of standardized gene trajectories."""
+    """Compute candidate clustering labels and metrics for every requested k once."""
     try:
         from rpy2.robjects import r
     except ImportError as exc:
         raise ImportError("Gene-trajectory clustering requires optional dependency 'rpy2'.") from exc
 
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    source_r_resource("dimred_clustering_helpers.R")
+    validate_adata(traj)
     if alpha is None:
         raise ValueError("Pass alpha explicitly.")
+    k_grid = [int(x) for x in k]
+    if not k_grid:
+        raise ValueError("At least one candidate k is required.")
 
-    if characterization is None:
-        if characterization_output_dir is None:
-            raise ValueError("Provide characterization result or characterization_output_dir.")
-        # Reconstruct the small R characterization object from standardized sidecars.
-        # This path is intended for notebook restarts and regression scripts.
-        raise ValueError("Restarting clustering from sidecar-only characterization is not implemented yet.")
+    source_r_resource("dimred_clustering_helpers.R")
+    if output_dir is None:
+        tmp_ctx = TemporaryDirectory()
+        work_dir = Path(tmp_ctx.name)
+    else:
+        tmp_ctx = None
+        work_dir = Path(output_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        fit_path, time_path = _write_subset_matrix(traj, work_dir, "cluster_input")
+        reference_path = None
+        if reference is not None:
+            if list(map(str, reference.var_names)) != list(map(str, traj.var_names)):
+                raise ValueError("reference.var_names must match traj.var_names for clustering.")
+            reference_path, _ = _write_subset_matrix(reference, work_dir, "cluster_reference")
+        r["chronopack_cluster_trajectory_matrix_to_files"](
+            str(fit_path),
+            str(time_path),
+            str(work_dir),
+            alpha=float(alpha),
+            K_grid=_r_int_vector(k_grid),
+            wss_fraction=float(wss_fraction),
+            variance_threshold=float(variance_threshold),
+            pca_columns=int(pca_columns),
+            **({"reference_traj_mat_path": str(reference_path)} if reference_path is not None else {}),
+        )
+        metrics = pd.read_csv(work_dir / "cluster_metrics.csv")
+        if "K" in metrics.columns and "k" not in metrics.columns:
+            metrics.insert(0, "k", metrics["K"].astype(int))
+        assignments_df = _read_matrix(work_dir / "cluster_assignments.csv")
+        distances_df = _read_matrix(work_dir / "cluster_centroid_distances.csv")
+        pca = _read_matrix(work_dir / "gene_trajectory_X_pca.csv")
+    finally:
+        if tmp_ctx is not None:
+            tmp_ctx.cleanup()
 
-    backend_kwargs = {
-        "row_ids": _r_character_vector(rows),
-        "cluster_name": str(cluster_name),
+    expected_index = pd.Index(traj.obs_names.astype(str))
+    assignments: dict[int, pd.Series] = {}
+    centroid_distances: dict[int, pd.Series] = {}
+    for kk in k_grid:
+        col = f"k{kk}"
+        labels = pd.Series(assignments_df.loc[expected_index, col].astype(int).to_numpy(), index=expected_index, name=col)
+        dists = pd.Series(distances_df.loc[expected_index, col].astype(float).to_numpy(), index=expected_index, name=col)
+        if not labels.index.equals(expected_index):
+            raise RuntimeError(f"Assignment index for k={kk} does not match traj.obs_names.")
+        assignments[kk] = labels
+        centroid_distances[kk] = dists
+
+    metadata = {
         "alpha": float(alpha),
-        "K_grid": _r_int_vector(k_grid),
+        "k_grid": k_grid,
         "wss_fraction": float(wss_fraction),
         "variance_threshold": float(variance_threshold),
         "pca_columns": int(pca_columns),
-        "write_outputs": True,
+        "n_trajectories": int(traj.n_obs),
+        "reference_n_trajectories": None if reference is None else int(reference.n_obs),
     }
-    if k_broad is not None or k_fine is not None:
-        if k_broad is None or k_fine is None:
-            raise ValueError("Pass both k_broad and k_fine, or omit both to evaluate metrics only.")
-        backend_kwargs["k_broad"] = int(k_broad)
-        backend_kwargs["k_fine"] = int(k_fine)
-
-    backend_result = r["chronopack_cluster_gene_trajectories"](
-        characterization.backend_result,
-        str(output_dir),
-        **backend_kwargs,
-    )
-
-    paths = _default_outputs(output_dir)
-    cluster_pc_df_path = output_dir / f"pc_df.{cluster_name}.csv"
-    pc_df = pd.read_csv(cluster_pc_df_path, index_col=0)
-    x_pca = _read_matrix(paths["x_pca"]) if paths["x_pca"].exists() else None
-    metrics = {}
-    metrics_path = output_dir / f"cluster_metrics.{cluster_name}.csv"
-    if metrics_path.exists():
-        metrics[str(cluster_name)] = pd.read_csv(metrics_path)
-
-    target = _ensure_gene_adata(adata.copy() if copy and adata is not None else adata, pc_df.index)
-    _write_clustering_to_adata(target, key_added=key_added, pc_df=pc_df, x_pca=x_pca)
-
-    sidecars = {name: str(path) for name, path in paths.items() if path.exists()}
-    metadata = {
-        "output_dir": str(output_dir),
-        "cluster_name": str(cluster_name),
-        "alpha": alpha,
-        "rows": list(map(str, rows)),
-        "k_broad": None if k_broad is None else int(k_broad),
-        "k_fine": None if k_fine is None else int(k_fine),
-        "k_grid": list(map(int, k_grid)),
-        "wss_fraction": wss_fraction,
-        "variance_threshold": variance_threshold,
-        "pca_columns": pca_columns,
-    }
-    result = GeneTrajectoryClusteringResult(
-        key_added=key_added,
-        metadata=metadata,
-        adata=target,
-        pc_df=pc_df,
+    return GeneTrajectoryClusteringResult(
         metrics=metrics,
-        sidecar_paths=sidecars,
-        backend_result=backend_result,
-    )
-    if copy:
-        return (target, result) if return_model else target
-    return result if return_model else None
-
-
-def finalize_gene_trajectory_clusters(
-    adata=None,
-    *,
-    characterization,
-    clusterings,
-    output_dir,
-    key_added=GENE_TRAJECTORY_CLUSTERING_KEY,
-    cell_type_order=("K562a", "K562b", "K562_puro", "THP1"),
-    copy=False,
-    return_model=True,
-):
-    """Combine explicitly computed trajectory cluster assignments."""
-    try:
-        from rpy2.robjects import ListVector, r
-    except ImportError as exc:
-        raise ImportError("Gene-trajectory clustering requires optional dependency 'rpy2'.") from exc
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    source_r_resource("dimred_clustering_helpers.R")
-
-    r_clusterings = ListVector({res.metadata["cluster_name"]: res.backend_result for res in clusterings})
-    backend_result = r["chronopack_finalize_gene_trajectory_clusters"](
-        characterization.backend_result,
-        r_clusterings,
-        str(output_dir),
-        cell_type_order=_r_character_vector(cell_type_order),
-        write_outputs=True,
-    )
-
-    paths = _default_outputs(output_dir)
-    pc_df = pd.read_csv(paths["pc_df"], index_col=0)
-    x_pca = _read_matrix(paths["x_pca"]) if paths["x_pca"].exists() else None
-    base_adata = adata if adata is not None else characterization.adata
-    target = _ensure_gene_adata(base_adata.copy() if copy and base_adata is not None else base_adata, pc_df.index)
-    _write_clustering_to_adata(target, key_added=key_added, pc_df=pc_df, x_pca=x_pca)
-
-    sidecars = {name: str(path) for name, path in paths.items() if path.exists()}
-    metadata = {
-        "output_dir": str(output_dir),
-        "cluster_names": [res.metadata["cluster_name"] for res in clusterings],
-        "cell_type_order": list(cell_type_order),
-    }
-    result = GeneTrajectoryFinalizedClusteringResult(
-        key_added=key_added,
+        assignments=assignments,
+        centroid_distances=centroid_distances,
+        pca=pca,
         metadata=metadata,
-        adata=target,
-        pc_df=pc_df,
-        sidecar_paths=sidecars,
-        backend_result=backend_result,
+        key_added=key_added,
     )
-    if copy:
-        return (target, result) if return_model else target
-    return result if return_model else None
 
 
 __all__ = [
-    "GeneTrajectoryAlignmentResult",
-    "GeneTrajectoryCharacterizationResult",
     "GeneTrajectoryClusteringResult",
-    "GeneTrajectoryFinalizedClusteringResult",
     "align_gene_trajectories",
-    "compute_gene_trajectory_descriptors",
-    "characterize_gene_trajectories",
+    "association_paths_from_dimred_roots",
     "cluster_gene_trajectories",
-    "finalize_gene_trajectory_clusters",
+    "compute_gene_trajectory_descriptors",
     "dimred_config",
+    "sce_paths_from_dimred_roots",
 ]

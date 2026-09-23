@@ -5,20 +5,17 @@ __all__ = [
     "grn",
     "CellStateTrajectoryResult",
     "GeneDynamicsResult",
-    "GeneTrajectoryAlignmentResult",
-    "GeneTrajectoryCharacterizationResult",
     "GeneTrajectoryClusteringResult",
-    "GeneTrajectoryFinalizedClusteringResult",
     "ModeConservationResult",
     "get_trajectories",
     "cluster_cells_to_trajectories",
     "compute_terminal_fate_probabilities",
     "fit_gene_dynamics",
     "align_gene_trajectories",
+    "association_paths_from_dimred_roots",
     "compute_gene_trajectory_descriptors",
-    "characterize_gene_trajectories",
     "cluster_gene_trajectories",
-    "finalize_gene_trajectory_clusters",
+    "sce_paths_from_dimred_roots",
     "mode_conservation",
     "mode_switchers",
 ]
@@ -33,12 +30,7 @@ def __getattr__(name):
         from ._gene_dynamics import GeneDynamicsResult
 
         return GeneDynamicsResult
-    if name in {
-        "GeneTrajectoryAlignmentResult",
-        "GeneTrajectoryCharacterizationResult",
-        "GeneTrajectoryClusteringResult",
-        "GeneTrajectoryFinalizedClusteringResult",
-    }:
+    if name == "GeneTrajectoryClusteringResult":
         from . import _gene_clustering
 
         return getattr(_gene_clustering, name)
@@ -52,10 +44,10 @@ def __getattr__(name):
         return fit_gene_dynamics
     if name in {
         "align_gene_trajectories",
+        "association_paths_from_dimred_roots",
         "compute_gene_trajectory_descriptors",
-        "characterize_gene_trajectories",
         "cluster_gene_trajectories",
-        "finalize_gene_trajectory_clusters",
+        "sce_paths_from_dimred_roots",
     }:
         from . import _gene_clustering
 

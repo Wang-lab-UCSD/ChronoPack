@@ -56,8 +56,10 @@ def test_checkpoint_reads_from_old_dimensionality_notebooks_are_not_active_input
 
 def test_all_four_datasets_are_loaded_from_primary_tradeseq_configs():
     active = _active_code()
-    assert "cp.tl.characterize_gene_trajectories(" in active
+    assert "cp.tl.align_gene_trajectories(" in active
+    assert "cp.tl.compute_gene_trajectory_descriptors(" in active
     assert "cp.tl.cluster_gene_trajectories(" in active
+    assert "cp.pl.clustering_metrics(" in active
     for key in ["root_puro", "root_k562a", "root_lps"]:
         assert key in active
 
@@ -67,6 +69,7 @@ def test_dimred_notebook_uses_public_chronopack_api():
     assert "import chronopack as cp" in active
     assert "run_dimred_signed_clustering(" not in active
     assert "prepare_dimred_clustering_inputs(" not in active
+    assert "finalize_gene_trajectory_clusters(" not in active
     assert "cl_repressed_renamed" not in active
 
 

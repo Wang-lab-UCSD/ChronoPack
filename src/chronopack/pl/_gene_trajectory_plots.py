@@ -1,4 +1,4 @@
-"""Plotting wrappers for standardized gene-expression trajectory outputs."""
+"""Plotting wrappers for gene-expression trajectory AnnData outputs."""
 
 from __future__ import annotations
 
@@ -11,87 +11,64 @@ import numpy as np
 import pandas as pd
 
 from chronopack._backends.r._bridge import source_r_resource
-from chronopack._core._keys import (
-    CHRONOPACK_UNS_KEY,
-    GENE_TRAJECTORY_CLUSTERING_KEY,
-    GENE_TRAJECTORY_KEY,
-)
+from chronopack._core._keys import GENE_TRAJECTORY_CLUSTERING_KEY, GENE_TRAJECTORY_KEY
 
 
 @dataclass
 class RPlotResult:
-    """Small result object for R-backed ChronoPack plots."""
+    """Small result object for ChronoPack plots."""
 
     plot_type: str
     data: pd.DataFrame
     output: str | None = None
     backend: str = "R/ggplot2"
     metadata: dict[str, Any] | None = None
+    figure: Any | None = None
 
 
-def _prefixed_var_col(adata, key: str, col: str) -> str:
-    candidates = [f"{key}_{col}", col]
-    for candidate in candidates:
-        if candidate in adata.var.columns:
-            return candidate
-    raise KeyError(f"Could not find AnnData var column '{key}_{col}' or '{col}'.")
+def _trajectory_matrix(adata) -> np.ndarray:
+    return np.asarray(adata.X, dtype=float)
 
 
-def _fit_matrix(adata, fit_key: str) -> np.ndarray:
-    key = f"{fit_key}_fit"
-    if key not in adata.varm:
-        raise KeyError(
-            f"Missing standardized fitted trajectory matrix adata.varm['{key}']. "
-            "Regenerate this object with cp.tl.characterize_gene_trajectories() and "
-            "cp.tl.cluster_gene_trajectories(), or migrate the legacy artifact by "
-            "adding the standardized fitted-trajectory matrix before plotting."
-        )
-    fit = np.asarray(adata.varm[key], dtype=float)
-    if fit.shape[0] != adata.n_vars:
-        raise ValueError(f"adata.varm['{key}'] has {fit.shape[0]} rows but adata has {adata.n_vars} genes.")
-    return fit
-
-
-def _time_grid(adata, fit_key: str, n_timepoints: int) -> np.ndarray:
-    entry = adata.uns.get(CHRONOPACK_UNS_KEY, {}).get(fit_key, {})
-    params = entry.get("parameters", {}) if isinstance(entry, dict) else {}
-    values = params.get("time_grid")
-    if values is None:
-        return np.arange(n_timepoints, dtype=float)
-    out = np.asarray(values, dtype=float)
+def _time_grid(adata, n_timepoints: int) -> np.ndarray:
+    if "time" in adata.var:
+        out = np.asarray(adata.var["time"], dtype=float)
+    else:
+        out = np.arange(n_timepoints, dtype=float)
     if out.shape[0] != n_timepoints:
-        raise ValueError(
-            f"Stored time grid for '{fit_key}' has length {out.shape[0]}, expected {n_timepoints}."
-        )
+        raise ValueError(f"Stored time grid has length {out.shape[0]}, expected {n_timepoints}.")
     return out
 
 
-def _gene_labels(adata, fit_key: str) -> pd.DataFrame:
-    gene_col = _prefixed_var_col(adata, fit_key, "gene") if f"{fit_key}_gene" in adata.var else None
-    cell_type_col = _prefixed_var_col(adata, fit_key, "cell_type") if f"{fit_key}_cell_type" in adata.var else None
-    labels = pd.DataFrame(index=adata.var_names.astype(str))
+def _gene_labels(adata) -> pd.DataFrame:
+    labels = pd.DataFrame(index=adata.obs_names.astype(str))
     labels["row_id"] = labels.index
-    labels["gene"] = adata.var[gene_col].astype(str).to_numpy() if gene_col else labels["row_id"].str.replace(r"_(?=[^_]+$).*", "", regex=True)
-    labels["cell_type"] = adata.var[cell_type_col].astype(str).to_numpy() if cell_type_col else ""
+    labels["gene"] = (
+        adata.obs["gene"].astype(str).to_numpy()
+        if "gene" in adata.obs
+        else labels["row_id"].str.replace(r"_(?=[^_]+$).*", "", regex=True)
+    )
+    labels["cell_type"] = adata.obs["cell_type"].astype(str).to_numpy() if "cell_type" in adata.obs else ""
     return labels
 
 
-def _select_rows(adata, *, fit_key: str, genes=None) -> pd.Index:
-    var_names = pd.Index(adata.var_names.astype(str))
+def _select_rows(adata, *, genes=None) -> pd.Index:
+    obs_names = pd.Index(adata.obs_names.astype(str))
     if genes is None:
-        return var_names
+        return obs_names
     requested = pd.Index([str(g) for g in genes])
-    direct = requested[requested.isin(var_names)]
-    remaining = requested.difference(direct)
+    direct = requested[requested.isin(obs_names)]
     selected = list(direct)
+    remaining = requested.difference(direct)
     if len(remaining):
-        labels = _gene_labels(adata, fit_key)
-        gene_matches = labels.index[labels["gene"].isin(remaining)].tolist()
-        selected.extend(gene_matches)
-    missing = requested.difference(pd.Index(selected).union(pd.Index(labels["gene"] if "labels" in locals() else [])))
-    if len(selected) == 0 or len(missing) > 0:
+        labels = _gene_labels(adata)
+        selected.extend(labels.index[labels["gene"].isin(remaining)].tolist())
+    selected_idx = pd.Index(selected).drop_duplicates()
+    found_genes = pd.Index(_gene_labels(adata).loc[selected_idx, "gene"]) if len(selected_idx) else pd.Index([])
+    missing = requested.difference(selected_idx.union(found_genes))
+    if len(selected_idx) == 0 or len(missing) > 0:
         raise KeyError(f"Could not find requested genes/rows: {', '.join(missing.astype(str))}")
-    return pd.Index(selected).drop_duplicates()
+    return selected_idx
 
 
 def _z_row(matrix: np.ndarray) -> np.ndarray:
@@ -101,35 +78,19 @@ def _z_row(matrix: np.ndarray) -> np.ndarray:
     return (matrix - mu) / sd
 
 
-def _trajectory_long(
-    adata,
-    *,
-    fit_key: str,
-    clustering_key: str | None,
-    rows: pd.Index,
-    normalize: bool,
-) -> pd.DataFrame:
-    fit = _fit_matrix(adata, fit_key)
-    row_lookup = pd.Series(np.arange(adata.n_vars), index=adata.var_names.astype(str))
+def _trajectory_long(adata, *, rows: pd.Index, normalize: bool) -> pd.DataFrame:
+    fit = _trajectory_matrix(adata)
+    row_lookup = pd.Series(np.arange(adata.n_obs), index=adata.obs_names.astype(str))
     idx = row_lookup.loc[rows].to_numpy()
     values = fit[idx, :]
     if normalize:
         values = _z_row(values)
-    time = _time_grid(adata, fit_key, values.shape[1])
+    time = _time_grid(adata, values.shape[1])
 
-    labels = _gene_labels(adata, fit_key).loc[rows].reset_index(drop=True)
-    meta = labels.copy()
-    for col in ["waldStat_1", "peak_log2fc", "t_onset", "t_peak"]:
-        try:
-            meta[col] = adata.var.loc[rows, _prefixed_var_col(adata, fit_key, col)].to_numpy()
-        except KeyError:
-            pass
-    if clustering_key is not None:
-        for col in ["broad_cluster", "cluster_fine_induced", "cluster_fine_repressed"]:
-            try:
-                meta[col] = adata.var.loc[rows, _prefixed_var_col(adata, clustering_key, col)].astype(str).to_numpy()
-            except KeyError:
-                pass
+    meta = _gene_labels(adata).loc[rows].reset_index(drop=True)
+    for col in ["waldStat_1", "peak_log2fc", "t_onset", "t_peak", "broad_cluster", "cluster_fine_induced", "cluster_fine_repressed"]:
+        if col in adata.obs:
+            meta[col] = adata.obs.loc[rows, col].to_numpy()
 
     out = pd.DataFrame(values, index=rows, columns=[f"t{i}" for i in range(values.shape[1])])
     out.insert(0, "row_id", rows.astype(str))
@@ -168,9 +129,10 @@ def gene_trajectory(
     height: float = 6,
     title: str | None = None,
 ) -> RPlotResult:
-    """Plot standardized fitted trajectories for selected genes or gene-context rows."""
-    rows = _select_rows(adata, fit_key=fit_key, genes=genes)
-    data = _trajectory_long(adata, fit_key=fit_key, clustering_key=clustering_key, rows=rows, normalize=normalize)
+    """Plot fitted trajectories for selected genes or gene-context rows."""
+    del fit_key, clustering_key
+    rows = _select_rows(adata, genes=genes)
+    data = _trajectory_long(adata, rows=rows, normalize=normalize)
     rendered = _render(
         "chronopack_plot_gene_trajectory_csv",
         data,
@@ -180,7 +142,7 @@ def gene_trajectory(
         title="" if title is None else str(title),
         normalize=bool(normalize),
     )
-    return RPlotResult("gene_trajectory", data=data, output=rendered, metadata={"fit_key": fit_key})
+    return RPlotResult("gene_trajectory", data=data, output=rendered, metadata={"normalize": normalize})
 
 
 def cluster_trajectories(
@@ -196,9 +158,10 @@ def cluster_trajectories(
     height: float = 5,
     title: str | None = None,
 ) -> RPlotResult:
-    """Plot median +/- IQR fitted trajectories for gene dynamic-mode groups."""
-    selected = pd.Index(adata.var_names.astype(str)) if rows is None else pd.Index([str(x) for x in rows])
-    long_df = _trajectory_long(adata, fit_key=fit_key, clustering_key=clustering_key, rows=selected, normalize=normalize)
+    """Plot median +/- IQR fitted trajectories for dynamic-mode groups."""
+    del fit_key, clustering_key
+    selected = pd.Index(adata.obs_names.astype(str)) if rows is None else pd.Index([str(x) for x in rows])
+    long_df = _trajectory_long(adata, rows=selected, normalize=normalize)
     if groupby not in long_df.columns:
         raise KeyError(f"Grouping column '{groupby}' is not available in the trajectory plot data.")
     data = (
@@ -222,12 +185,7 @@ def cluster_trajectories(
         title="" if title is None else str(title),
         normalize=bool(normalize),
     )
-    return RPlotResult(
-        "cluster_trajectories",
-        data=data,
-        output=rendered,
-        metadata={"fit_key": fit_key, "clustering_key": clustering_key, "groupby": groupby},
-    )
+    return RPlotResult("cluster_trajectories", data=data, output=rendered, metadata={"groupby": groupby})
 
 
 def trajectory_features(
@@ -243,24 +201,13 @@ def trajectory_features(
     height: float = 5,
     title: str | None = None,
 ) -> RPlotResult:
-    """Plot gene trajectory features, descriptors, or PCA coordinates."""
-    data = _gene_labels(adata, fit_key).reset_index(drop=True)
-
-    def add_feature(name: str) -> None:
-        pca_key = f"{clustering_key}_X_pca"
-        if name.startswith("PC") and pca_key in adata.varm:
-            pos = int(name[2:]) - 1
-            data[name] = np.asarray(adata.varm[pca_key])[:, pos]
-            return
-        try:
-            col = _prefixed_var_col(adata, clustering_key, name)
-        except KeyError:
-            col = _prefixed_var_col(adata, fit_key, name)
-        data[name] = adata.var[col].to_numpy()
-
+    """Plot gene trajectory descriptors or PCA coordinates stored in ``traj.obs``."""
+    del clustering_key, fit_key
+    data = _gene_labels(adata).reset_index(drop=True)
     for name in dict.fromkeys([x, y, color]):
-        add_feature(name)
-
+        if name not in adata.obs:
+            raise KeyError(f"Trajectory observation column '{name}' is not available.")
+        data[name] = adata.obs[name].to_numpy()
     rendered = _render(
         "chronopack_plot_trajectory_features_csv",
         data,
@@ -272,12 +219,45 @@ def trajectory_features(
         y=str(y),
         color=str(color),
     )
-    return RPlotResult(
-        "trajectory_features",
-        data=data,
-        output=rendered,
-        metadata={"fit_key": fit_key, "clustering_key": clustering_key, "x": x, "y": y, "color": color},
-    )
+    return RPlotResult("trajectory_features", data=data, output=rendered, metadata={"x": x, "y": y, "color": color})
 
 
-__all__ = ["RPlotResult", "gene_trajectory", "cluster_trajectories", "trajectory_features"]
+def clustering_metrics(
+    clustering_result,
+    *,
+    output: str | Path | None = None,
+    metrics=("WSS", "p90_centroid_distance", "resolution", "mean_silhouette"),
+    show=("k_elbow", "k_silhouette"),
+    width: float = 9,
+    height: float = 6,
+) -> RPlotResult:
+    """Plot candidate-k clustering diagnostics without selecting k."""
+    import matplotlib.pyplot as plt
+
+    data = clustering_result.metrics.copy()
+    if "k" not in data and "K" in data:
+        data["k"] = data["K"]
+    fig, axes = plt.subplots(len(metrics), 1, figsize=(width, height), sharex=True)
+    axes = np.atleast_1d(axes)
+    for ax, metric in zip(axes, metrics):
+        ax.plot(data["k"], data[metric], marker="o", linewidth=1.2, markersize=3)
+        if "k_elbow" in show and metric == "elbow_score" or ("k_elbow" in show and metric in {"WSS", "resolution"}):
+            k_elbow = int(data.loc[data["elbow_score"].idxmax(), "k"])
+            ax.axvline(k_elbow, color="#D55E00", linestyle="--", linewidth=1)
+        if "k_silhouette" in show and metric == "mean_silhouette":
+            k_sil = int(data.loc[data["mean_silhouette"].idxmax(), "k"])
+            ax.scatter([k_sil], [data.loc[data["mean_silhouette"].idxmax(), metric]], color="#0072B2", s=42, zorder=3)
+        ax.set_ylabel(metric)
+        ax.grid(True, alpha=0.25)
+    axes[-1].set_xlabel("k")
+    fig.tight_layout()
+    rendered = None
+    if output is not None:
+        output = str(Path(output))
+        Path(output).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output, dpi=150, bbox_inches="tight")
+        rendered = output
+    return RPlotResult("clustering_metrics", data=data, output=rendered, backend="matplotlib", figure=fig)
+
+
+__all__ = ["RPlotResult", "gene_trajectory", "cluster_trajectories", "trajectory_features", "clustering_metrics"]

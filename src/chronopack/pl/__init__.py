@@ -16,7 +16,7 @@ def read_r_plotting_resource(name="dimred_plotting_helpers.R"):
 
 
 def __getattr__(name):
-    if name in {"RPlotResult", "gene_trajectory", "cluster_trajectories", "trajectory_features"}:
+    if name in {"RPlotResult", "gene_trajectory", "cluster_trajectories", "trajectory_features", "clustering_metrics"}:
         from . import _gene_trajectory_plots
 
         return getattr(_gene_trajectory_plots, name)
@@ -38,6 +38,7 @@ def __getattr__(name):
 __all__ = [
     "RPlotResult",
     "cluster_trajectories",
+    "clustering_metrics",
     "gene_trajectory",
     "mode_chord",
     "mode_conservation",

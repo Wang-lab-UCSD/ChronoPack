@@ -1,313 +1,6 @@
 # ChronoPack dimensionality reduction and clustering helpers.
 # Extracted from the consolidated puromycin DimensionalityReduction&Clustering notebook.
 
-.get_traj_from_predictSmooth <- function(
-  gamList,
-  features,
-  nPoints = 200,
-  lineage_pick = 1,
-  verbose = TRUE,
-  sce = NULL,
-  sizeFactors = NULL,
-  # optional override (rarely needed): directly provide reference offset
-  off_ref = NULL,
-  return_log1p = TRUE,
-  # if TRUE and sce is provided, try to compute curves via predict(gam, ...) using dm + offset
-  prefer_predict_gam = TRUE
-) {
-  features <- as.character(features)
-
-  # -------------------------------
-  # helper: parse col/row names like "lineage2_17" or "lineage2.17" or "t2_17"
-  # -------------------------------
-  .parse_lin_idx <- function(nms) {
-    if (is.null(nms)) return(NULL)
-    nms <- as.character(nms)
-    m <- regexec("^(?:lineage|lin|l|t)([0-9]+)[_.]([0-9]+)$", nms, perl = TRUE)
-    mm <- regmatches(nms, m)
-    ok <- lengths(mm) == 3
-    if (!any(ok)) return(NULL)
-    data.frame(
-      name = nms[ok],
-      lin  = as.integer(vapply(mm[ok], `[[`, "", 2)),
-      idx  = as.integer(vapply(mm[ok], `[[`, "", 3)),
-      stringsAsFactors = FALSE
-    )
-  }
-
-  # -------------------------------
-  # 0) Reference offset logic (matches)
-  # -------------------------------
-  .compute_off_ref <- function(sizeFactors, off_ref) {
-    if (!is.null(off_ref)) return(as.numeric(off_ref)[1])
-    if (is.null(sizeFactors)) return(NULL)
-    sf_vec <- as.numeric(sizeFactors)
-    if (!length(sf_vec) || all(!is.finite(sf_vec))) return(NULL)
-    s_ref <- exp(mean(log(sf_vec), na.rm = TRUE))
-    log(s_ref)
-  }
-  off_ref_use <- .compute_off_ref(sizeFactors = sizeFactors, off_ref = off_ref)
-
-  # -------------------------------
-  #     predict(gam, newdata=.getPredictRangeDf(dm,...), offset=off_ref)
-  #     -> mu = log1p(exp(eta)) or exp(eta) depending on return_log1p
-  # -------------------------------
-  if (isTRUE(prefer_predict_gam) && !is.null(sce) && is.finite(off_ref_use)) {
-    dm <- tryCatch(SummarizedExperiment::colData(sce)$tradeSeq$dm, error = function(e) NULL)
-    if (!is.null(dm)) {
-      t_cols <- grep("^t[0-9]+$", colnames(dm), value = TRUE)
-      avail_lineages <- as.integer(sub("^t", "", t_cols))
-      if (length(avail_lineages) > 0L) {
-        ell <- as.integer(lineage_pick)
-        if (!(ell %in% avail_lineages)) ell <- avail_lineages[1]
-        if (verbose) message("Using lineage = ", ell, " (predict(gam,...) w/ reference offset)")
-
-        # build t-grid
-        df_grid <- tradeSeq:::.getPredictRangeDf(dm, lineageId = ell, nPoints = nPoints)
-        tcol <- paste0("t", ell)
-        tt <- df_grid[[tcol]]
-
-        traj_mat <- matrix(NA_real_, nrow = 0, ncol = length(tt))
-        rownames(traj_mat) <- character(0)
-        colnames(traj_mat) <- as.character(tt)
-
-        for (g in features) {
-          if (!g %in% names(gamList)) next
-          gm <- gamList[[g]]
-          pr <- tryCatch(
-            predict(gm, newdata = df_grid, type = "link", se.fit = FALSE,
-                    offset = rep(off_ref_use, nrow(df_grid))),
-            error = function(e) NULL
-          )
-          if (is.null(pr)) next
-
-          # pr might be numeric vector or list; standardize to eta
-          eta <- if (is.list(pr) && !is.null(pr$fit)) pr$fit else as.numeric(pr)
-
-          mu <- exp(eta)                # mean on count scale at reference offset
-          y  <- if (isTRUE(return_log1p)) log1p(mu) else mu
-
-          traj_mat <- rbind(traj_mat, y)
-          rownames(traj_mat)[nrow(traj_mat)] <- g
-        }
-
-        if (nrow(traj_mat) > 0) {
-          return(list(traj_mat = traj_mat, tt = as.numeric(tt)))
-        }
-        # if this path fails to produce anything, fall through to predictSmooth with correction below
-      }
-    }
-  }
-
-  # -------------------------------
-  # 1) try tidy interface (predictSmooth) and then re-anchor to reference offset
-  # -------------------------------
-  pr <- tryCatch({
-    as.data.frame(
-      tradeSeq::predictSmooth(gamList, gene = features, nPoints = nPoints, tidy = TRUE),
-      stringsAsFactors = FALSE
-    )
-  }, error = function(e) NULL)
-
-  if (!is.null(pr) && nrow(pr) > 0) {
-    gene_col <- intersect(c("gene","Gene","feature","Feature"), names(pr))[1]
-    time_col <- intersect(c("t","time","pseudotime","T"), names(pr))[1]
-    y_col    <- intersect(c("yhat","y","fit","fitted"), names(pr))[1]
-    lin_col  <- intersect(c("lineage","Lineage","l","curve"), names(pr))[1]
-
-    if (any(is.na(c(gene_col, time_col, y_col))))
-      stop("Tidy predictSmooth output missing required columns. Columns: ", paste(names(pr), collapse = ", "))
-
-    if (!is.na(lin_col)) {
-      lin_levels <- sort(unique(pr[[lin_col]]))
-      lp <- if (any(lin_levels %in% c(lineage_pick, as.character(lineage_pick))))
-        lin_levels[lin_levels %in% c(lineage_pick, as.character(lineage_pick))][1]
-      else lin_levels[1]
-      pr <- pr[pr[[lin_col]] == lp, , drop = FALSE]
-      if (verbose) message("Using lineage = ", lp, " (tidy predictSmooth)")
-    }
-
-    tt <- sort(unique(pr[[time_col]]))
-
-    traj_df <- data.frame(
-      feature = as.character(pr[[gene_col]]),
-      t       = pr[[time_col]],
-      y       = as.numeric(pr[[y_col]]),
-      stringsAsFactors = FALSE
-    )
-    traj_df <- traj_df[order(traj_df$feature, traj_df$t), , drop = FALSE]
-
-    # keep only genes that have all timepoints
-    tab <- table(traj_df$feature)
-    keep <- names(tab)[tab == length(tt)]
-    traj_df <- traj_df[traj_df$feature %in% keep, , drop = FALSE]
-
-    # pivot (base R)
-    wide <- reshape(traj_df, idvar = "feature", timevar = "t", direction = "wide")
-    rn <- wide$feature
-    wide$feature <- NULL
-    colnames(wide) <- sub("^y\\.", "", colnames(wide))
-    traj_mat <- as.matrix(wide)
-    rownames(traj_mat) <- rn
-
-    # --- re-anchor to reference offset ---
-    # predictSmooth uses an implicit offset (often the first cell). If we can get the
-    # original offset used by tradeSeq, we can adjust: mu_ref = mu_ps * exp(off_ref - off_used)
-    if (is.finite(off_ref_use) && !is.null(sce)) {
-      dm <- tryCatch(SummarizedExperiment::colData(sce)$tradeSeq$dm, error = function(e) NULL)
-      off_used <- if (!is.null(dm) && "offset" %in% colnames(dm)) as.numeric(dm$offset[1]) else NA_real_
-
-      if (is.finite(off_used)) {
-        if (verbose) message(sprintf("Re-anchoring predictSmooth using exp(off_ref - off_used) = exp(%.4f - %.4f)",
-                                     off_ref_use, off_used))
-        # traj_mat is on count scale (mu); rescale to reference offset
-        traj_mat <- traj_mat * exp(off_ref_use - off_used)
-      } else if (verbose) {
-        message("Could not find dm$offset[1]; returning predictSmooth scale unchanged.")
-      }
-    } else if (verbose) {
-      message("No reference offset available (need sizeFactors/off_ref and sce); returning predictSmooth scale unchanged.")
-    }
-
-    if (isTRUE(return_log1p)) traj_mat <- log1p(traj_mat)
-
-    tt_num <- suppressWarnings(as.numeric(colnames(traj_mat)))
-    if (any(!is.finite(tt_num))) tt_num <- seq(0, 1, length.out = ncol(traj_mat))
-    return(list(traj_mat = traj_mat, tt = tt_num))
-  }
-
-  # -------------------------------
-  # 2) fallback interface (many versions / shapes) from predictSmooth, then re-anchor if possible
-  # -------------------------------
-  ps_raw <- tryCatch(
-    tradeSeq::predictSmooth(gamList, gene = features, nPoints = nPoints),
-    error = function(e) e
-  )
-  if (inherits(ps_raw, "error")) stop("predictSmooth() failed: ", ps_raw$message)
-
-  ps <- ps_raw
-  if (is.list(ps) && !is.null(ps$yhat)) ps <- ps$yhat
-  if (is.list(ps) && length(ps) == 1) ps <- ps[[1]]
-
-  # helper to apply offset correction + scale
-  .postprocess_mat <- function(mat_gene_time, tt) {
-    # re-anchor if possible
-    if (is.finite(off_ref_use) && !is.null(sce)) {
-      dm <- tryCatch(SummarizedExperiment::colData(sce)$tradeSeq$dm, error = function(e) NULL)
-      off_used <- if (!is.null(dm) && "offset" %in% colnames(dm)) as.numeric(dm$offset[1]) else NA_real_
-      if (is.finite(off_used)) {
-        if (verbose) message(sprintf("Re-anchoring predictSmooth using exp(off_ref - off_used) = exp(%.4f - %.4f)",
-                                     off_ref_use, off_used))
-        mat_gene_time <- mat_gene_time * exp(off_ref_use - off_used)
-      } else if (verbose) {
-        message("Could not find dm$offset[1]; returning predictSmooth scale unchanged.")
-      }
-    } else if (verbose) {
-      message("No reference offset available (need sizeFactors/off_ref and sce); returning predictSmooth scale unchanged.")
-    }
-
-    if (isTRUE(return_log1p)) mat_gene_time <- log1p(mat_gene_time)
-
-    list(traj_mat = mat_gene_time, tt = tt)
-  }
-
-  # -------------------------------
-  # case A: 3D array: time x gene x lineage  OR gene x time x lineage
-  # -------------------------------
-  if (is.array(ps) && length(dim(ps)) == 3) {
-    d <- dim(ps)
-    lin <- min(lineage_pick, d[3])
-    ps2 <- ps[, , lin, drop = TRUE]
-    if (verbose) message("Using lineage slice = ", lin, " (3D array)")
-
-    rn <- rownames(ps2); cn <- colnames(ps2)
-    ov_r <- if (!is.null(rn)) sum(rn %in% features) else 0
-    ov_c <- if (!is.null(cn)) sum(cn %in% features) else 0
-    mat_gene_time <- if (ov_r >= ov_c) ps2 else t(ps2)
-
-    keep <- intersect(features, rownames(mat_gene_time))
-    if (!length(keep)) {
-      if (verbose) message("Diagnostics rownames: ", paste(head(rownames(mat_gene_time), 10), collapse = ", "))
-      stop("No matching genes after slicing 3D array output. Likely ID mismatch.")
-    }
-    mat_gene_time <- mat_gene_time[keep, , drop = FALSE]
-
-    tt <- attr(ps_raw, "t")
-    if (is.null(tt) || length(tt) != ncol(mat_gene_time)) {
-      tt <- if (ncol(mat_gene_time) > 1) (0:(ncol(mat_gene_time)-1)) / (ncol(mat_gene_time)-1) else 0
-    }
-    return(.postprocess_mat(mat_gene_time, tt))
-  }
-
-  # -------------------------------
-  # case B: list of lineage-specific matrices
-  # -------------------------------
-  if (is.list(ps) && length(ps) >= 1 &&
-      all(vapply(ps, function(x) is.matrix(x) || (is.array(x) && length(dim(x))==2), TRUE))) {
-    lin <- min(lineage_pick, length(ps))
-    if (verbose) message("Using element ", lin, " from list predictSmooth output (list-of-matrices).")
-    ps <- ps[[lin]]
-  }
-
-  if (!(is.matrix(ps) || (is.array(ps) && length(dim(ps)) == 2))) {
-    stop("Unsupported predictSmooth() output type. Class: ", paste(class(ps), collapse = ", "),
-         " dim: ", paste(dim(ps), collapse = "x"))
-  }
-  ps <- as.matrix(ps)
-
-  rn <- rownames(ps); cn <- colnames(ps)
-  ov_r <- if (!is.null(rn)) sum(rn %in% features) else 0
-  ov_c <- if (!is.null(cn)) sum(cn %in% features) else 0
-  mat_gene_timeish <- if (ov_r >= ov_c) ps else t(ps)
-
-  # concatenated multi-lineage columns like "lineage1_1"
-  info <- .parse_lin_idx(colnames(mat_gene_timeish))
-  if (!is.null(info)) {
-    lin_max <- suppressWarnings(max(info$lin, na.rm = TRUE))
-    lp <- min(as.integer(lineage_pick), as.integer(lin_max))
-    sel <- info$name[info$lin == lp]
-    ord <- sel[order(info$idx[info$lin == lp])]
-
-    if (!length(ord)) {
-      stop("Detected lineage-coded columns but found 0 columns for lineage_pick=", lineage_pick)
-    }
-    if (verbose) message("Using lineage = ", lp, " (concat columns like lineage", lp, "_k).")
-
-    mat_gene_timeish <- mat_gene_timeish[, ord, drop = FALSE]
-
-    idx <- info$idx[info$lin == lp]
-    idx <- idx[order(idx)]
-    if (length(idx) == ncol(mat_gene_timeish) && all(is.finite(idx)) && length(unique(idx)) > 1) {
-      tt <- (idx - min(idx)) / (max(idx) - min(idx))
-    } else {
-      tt <- if (ncol(mat_gene_timeish) > 1) (0:(ncol(mat_gene_timeish)-1)) / (ncol(mat_gene_timeish)-1) else 0
-    }
-
-    keep <- intersect(features, rownames(mat_gene_timeish))
-    if (!length(keep)) {
-      if (verbose) message("Diagnostics rownames (after lineage slicing): ",
-                           paste(head(rownames(mat_gene_timeish), 10), collapse = ", "))
-      stop("After lineage slicing, 0 matching genes. Likely ID mismatch (symbols vs Ensembl, etc.).")
-    }
-    mat_gene_timeish <- mat_gene_timeish[keep, , drop = FALSE]
-    return(.postprocess_mat(mat_gene_timeish, tt))
-  }
-
-  # Otherwise: assume genes x time
-  keep <- intersect(features, rownames(mat_gene_timeish))
-  if (!length(keep)) {
-    if (verbose) message("Diagnostics rownames: ", paste(head(rownames(mat_gene_timeish), 10), collapse = ", "))
-    stop("Fallback predictSmooth produced 0 matching genes. Likely ID mismatch.")
-  }
-  mat_gene_timeish <- mat_gene_timeish[keep, , drop = FALSE]
-
-  tt <- attr(ps_raw, "t")
-  if (is.null(tt) || length(tt) != ncol(mat_gene_timeish)) {
-    tt <- if (ncol(mat_gene_timeish) > 1) (0:(ncol(mat_gene_timeish)-1)) / (ncol(mat_gene_timeish)-1) else 0
-  }
-  return(.postprocess_mat(mat_gene_timeish, tt))
-}
-
 get_descriptors <- function(
   traj_mat, tt,
   pseudocount = 1e-5,
@@ -678,30 +371,25 @@ calculate_trajectory_clustering_metrics <- function(
 
   if (max(K_grid) >= n) stop("max(K_grid) must be smaller than the number of genes.")
 
-  silhouette_widths_from_dist <- function(cl, D) {
+  Dm <- as.matrix(D)
+
+  silhouette_widths_from_dist_matrix <- function(cl, Dm) {
     cl <- as.factor(cl)
-    Dm <- as.matrix(D)
     n <- length(cl)
-    out <- numeric(n)
-    levels_cl <- levels(cl)
-    for (i in seq_len(n)) {
-      same <- which(cl == cl[i])
-      same <- same[same != i]
-      if (!length(same)) {
-        out[i] <- 0
-        next
-      }
-      a <- mean(Dm[i, same], na.rm = TRUE)
-      other_levels <- setdiff(levels_cl, as.character(cl[i]))
-      b_vals <- vapply(other_levels, function(k) {
-        idx <- which(cl == k)
-        if (!length(idx)) return(Inf)
-        mean(Dm[i, idx], na.rm = TRUE)
-      }, numeric(1))
-      b <- min(b_vals, na.rm = TRUE)
-      denom <- max(a, b)
-      out[i] <- if (is.finite(denom) && denom > 0) (b - a) / denom else 0
-    }
+    cl_idx <- as.integer(cl)
+    cluster_sizes <- as.vector(tabulate(cl_idx, nbins = nlevels(cl)))
+
+    dist_sums <- t(rowsum(t(Dm), group = cl_idx))
+    dist_means <- sweep(dist_sums, 2, cluster_sizes, "/")
+
+    own_sum <- dist_sums[cbind(seq_len(n), cl_idx)]
+    own_size <- cluster_sizes[cl_idx]
+    a <- ifelse(own_size > 1, own_sum / (own_size - 1), 0)
+
+    dist_means[cbind(seq_len(n), cl_idx)] <- Inf
+    b <- apply(dist_means, 1, min, na.rm = TRUE)
+    denom <- pmax(a, b)
+    out <- ifelse(is.finite(denom) & denom > 0, (b - a) / denom, 0)
     out
   }
 
@@ -725,7 +413,7 @@ calculate_trajectory_clustering_metrics <- function(
     }
 
     d_to_centroid <- sqrt(rowSums((X_mat - gene_centroids)^2))
-    sil_width <- silhouette_widths_from_dist(cl, D)
+    sil_width <- silhouette_widths_from_dist_matrix(cl, Dm)
 
     data.frame(
       K = K,
@@ -784,38 +472,52 @@ chronopack_dimred_config <- function(root_puro, root_k562a, root_lps) {
       dir = file.path(root_puro, "intmd", "sc-K562-1e6-to-tradeSeq.fixed"),
       asso = c("asso_df.1trajectory.nknots4.csv"),
       sig = c("sig_df.1trajectory.nknots4.csv"),
-      gamList = c("gamList.1trajectory.nknots8.rds"),
       sce = c("sce.1trajectory.nknots8.rds")
     ),
     K562a = list(
       dir = file.path(root_k562a, "intmd", "sc-K562-1e4_to_tradeSeq.fixed"),
       asso = c("asso_df.1trajectory.nknots4.csv", "asso_df.1trajectory.csv"),
       sig = c("sig_df.1trajectory.nknots4.csv", "sig_df.1trajectory.csv"),
-      gamList = c("gamList.1trajectory.nknots8.rds", "gamList.1trajectory.csv", "gamList.1trajectory.rds"),
       sce = c("sce.1trajectory.nknots8.rds", "sce.1trajectory.nknots8.csv")
     ),
     K562b = list(
       dir = file.path(root_lps, "intmd", "sc-K562_to_tradeSeq.fixed"),
       asso = c("asso_df.1trajectory.nknots4.csv", "asso_df.k562.1trajectory.nknots4.expanded.csv"),
       sig = c("sig_df.1trajectory.nknots4.csv", "sig_df.k562.1trajectory.nknots4.expanded.csv"),
-      gamList = c("gamList.1trajectory.nknots8.rds", "gamList.knots8.rds"),
       sce = c("sce.1trajectory.nknots8.rds", "sce.knots8.rds")
     ),
     THP1 = list(
       dir = file.path(root_lps, "intmd", "sc-THP1_to_tradeSeq.fixed"),
       asso = c("asso_df.1trajectory.nknots4.csv", "asso_df.thp1.1trajectory.nknots4.expanded.csv"),
       sig = c("sig_df.1trajectory.nknots4.csv", "sig_df.thp1.1trajectory.nknots4.expanded.csv"),
-      gamList = c("gamList.1trajectory.nknots8.rds", "gamList.knots8.rds"),
       sce = c("sce.1trajectory.nknots8.rds", "sce.knots8.rds")
     )
   )
 }
 
-compute_tradeSeq_reference_offset <- function(sizeFactors, off_ref = NULL) {
+compute_tradeSeq_reference_offset <- function(sizeFactors = NULL, off_ref = NULL, dm = NULL, X = NULL) {
   if (!is.null(off_ref)) return(as.numeric(off_ref)[1])
+  if (!is.null(dm)) {
+    offset_col <- grep("offset", colnames(dm), value = TRUE)[1]
+    if (!is.na(offset_col)) {
+      offset_vec <- as.numeric(dm[[offset_col]])
+      if (length(offset_vec) && any(is.finite(offset_vec))) {
+        return(mean(offset_vec, na.rm = TRUE))
+      }
+    }
+  }
+  if (!is.null(X)) {
+    model_offset <- attr(X, "model.offset")
+    if (!is.null(model_offset)) {
+      offset_vec <- as.numeric(model_offset)
+      if (length(offset_vec) && any(is.finite(offset_vec))) {
+        return(mean(offset_vec, na.rm = TRUE))
+      }
+    }
+  }
   sf_vec <- as.numeric(sizeFactors)
   if (!length(sf_vec) || all(!is.finite(sf_vec))) {
-    stop("sizeFactors must contain at least one finite value.")
+    stop("Could not determine reference offset from tradeSeq dm offset, attr(X, 'model.offset'), or sizeFactors.")
   }
   log(exp(mean(log(sf_vec), na.rm = TRUE)))
 }
@@ -986,7 +688,7 @@ get_traj_from_tradeSeq_sce <- function(sce, features, nPoints = 200, lineage_pic
     stop("Beta matrix column count does not match prediction design columns.")
   }
 
-  off_ref_use <- compute_tradeSeq_reference_offset(sizeFactors, off_ref = off_ref)
+  off_ref_use <- compute_tradeSeq_reference_offset(sizeFactors, off_ref = off_ref, dm = dm, X = X)
   eta_mat <- beta_mat %*% t(X_pred)
   eta_mat <- sweep(eta_mat, 2, rep(as.numeric(off_ref_use)[1], ncol(eta_mat)), "+")
   traj_mat <- if (isTRUE(return_log1p)) log1p(exp(eta_mat)) else exp(eta_mat)
@@ -1012,108 +714,49 @@ resolve_output <- function(dir, candidates) {
   first_existing(file.path(dir, candidates))
 }
 
-read_counts_matrix <- function(path) {
-  counts <- as.matrix(read.csv(gzfile(path), row.names = 1, check.names = FALSE))
-  storage.mode(counts) <- "integer"
-  counts
-}
-
-make_pt_cw_sf <- function(counts, dir) {
-  cell_times_path <- first_existing(
-    file.path(dir, "cell_times.csv.gz"),
-    file.path(dir, "cell_times..csv.gz"),
-    file.path(dir, "cell_times.full.csv.gz")
-  )
-  ct <- read.csv(gzfile(cell_times_path), stringsAsFactors = FALSE)
-  libs_full <- read.csv(file.path(dir, "cell_libsize_full.csv"), stringsAsFactors = FALSE)
-
-  stopifnot(all(colnames(counts) %in% ct$cell_id))
-  stopifnot(all(colnames(counts) %in% libs_full$cell_id))
-
-  time_vec <- setNames(ct$time, ct$cell_id)[colnames(counts)]
-  lib_full <- setNames(libs_full$libsize_full, libs_full$cell_id)[colnames(counts)]
-
-  sf <- as.numeric(lib_full)
-  sf <- sf / mean(sf)
-
-  pt01 <- (time_vec - min(time_vec, na.rm = TRUE)) / diff(range(time_vec, na.rm = TRUE))
-  PT <- matrix(pt01, ncol = 1, dimnames = list(NULL, "lineage1"))
-  CW <- matrix(1, nrow = ncol(counts), ncol = 1, dimnames = list(NULL, "lineage1"))
-
-  list(PT = PT, CW = CW, sf = sf, time_vec = time_vec, lib_full = lib_full)
-}
-
-load_dimred_tradeSeq_dataset <- function(entry, load_gamList = FALSE) {
+load_dimred_tradeSeq_dataset <- function(entry) {
   dir <- normalizePath(entry$dir, mustWork = TRUE)
 
   asso_df <- read.csv(resolve_output(dir, entry$asso), row.names = 1, check.names = FALSE)
   asso_df <- asso_df[!is.na(asso_df$waldStat_1), , drop = FALSE]
   sig_df <- read.csv(resolve_output(dir, entry$sig), row.names = 1, check.names = FALSE)
-  gamList <- NULL
-  if (isTRUE(load_gamList)) {
-    gamList_path <- tryCatch(resolve_output(dir, entry$gamList), error = function(e) NULL)
-    if (!is.null(gamList_path)) {
-      gamList <- readRDS(gamList_path)
-    }
-  }
   sce <- readRDS(resolve_output(dir, entry$sce))
-
-  counts <- read_counts_matrix(first_existing(
-    file.path(dir, "counts_genes_x_cells.csv.gz"),
-    file.path(dir, "counts_genes_x_cells..csv.gz")
-  ))
-  if (is.null(rownames(sce)) && nrow(sce) == nrow(counts)) {
-    rownames(sce) <- rownames(counts)
-  }
-  meta <- make_pt_cw_sf(counts, dir)
 
   list(
     asso_df = asso_df,
     sig_df = sig_df,
-    sce = sce,
-    gamList = gamList,
-    counts_sub = counts,
-    PT = meta$PT,
-    CW = meta$CW,
-    sf = meta$sf,
-    time_vec = meta$time_vec,
-    lib_full = meta$lib_full
+    sce = sce
   )
 }
 
-load_dimred_fixed_tradeSeq_outputs <- function(cfg, load_gamList = FALSE) {
+load_dimred_fixed_tradeSeq_outputs <- function(cfg) {
   out <- lapply(names(cfg), function(key) {
     message("Loading fixed tradeSeq objects: ", key)
-    load_dimred_tradeSeq_dataset(cfg[[key]], load_gamList = load_gamList)
+    load_dimred_tradeSeq_dataset(cfg[[key]])
   })
   names(out) <- names(cfg)
 
   list(
     asso_df.ls = lapply(out, `[[`, "asso_df"),
     sig_df.ls = lapply(out, `[[`, "sig_df"),
-    sce.ls = lapply(out, `[[`, "sce"),
-    gamList.ls = lapply(out, `[[`, "gamList"),
-    counts_sub.ls = lapply(out, `[[`, "counts_sub"),
-    PT.ls = lapply(out, `[[`, "PT"),
-    CW.ls = lapply(out, `[[`, "CW"),
-    sf.ls = lapply(out, `[[`, "sf")
+    sce.ls = lapply(out, `[[`, "sce")
   )
 }
 
-select_dimred_features <- function(asso_df.ls, sce.ls, counts_sub.ls = NULL, keys, pvalue_threshold = 0.05) {
+select_dimred_features <- function(asso_df.ls, sce.ls, keys, pvalue_threshold = 0.05) {
   features.ls <- list()
   avail_genes.ls <- list()
   usable_features.ls <- list()
 
   for (key in keys) {
     tmp <- asso_df.ls[[key]]
-    avail <- character(0)
-    if (!is.null(counts_sub.ls) && !is.null(counts_sub.ls[[key]])) {
-      avail <- rownames(counts_sub.ls[[key]])
+    sce <- sce.ls[[key]]
+    avail <- rownames(sce)
+    if ((is.null(avail) || !length(avail)) && "counts" %in% SummarizedExperiment::assayNames(sce)) {
+      avail <- rownames(SummarizedExperiment::assay(sce, "counts"))
     }
-    sce_names <- rownames(sce.ls[[key]])
-    if (!is.null(sce_names) && length(sce_names)) {
-      avail <- if (length(avail)) intersect(avail, sce_names) else sce_names
+    if (is.null(avail) || !length(avail)) {
+      stop("Could not derive gene names from SCE rownames or assay(sce, 'counts') for key: ", key)
     }
     avail_genes.ls[[key]] <- avail
     tmp <- tmp[tmp$pvalue_1 < pvalue_threshold, , drop = FALSE]
@@ -1138,8 +781,8 @@ select_dimred_features <- function(asso_df.ls, sce.ls, counts_sub.ls = NULL, key
   )
 }
 
-extract_dimred_smooth_trajectories <- function(sce.ls, sf.ls, PT.ls, features,
-                                                keys, t_interval_map, lineage_pick = 1) {
+extract_dimred_smooth_trajectories <- function(sce.ls, features,
+                                                keys, npoints_map, lineage_pick = 1) {
   traj.ls <- list()
 
   for (key in keys) {
@@ -1147,10 +790,9 @@ extract_dimred_smooth_trajectories <- function(sce.ls, sf.ls, PT.ls, features,
     if (is.null(features_key)) {
       stop("No feature vector supplied for key: ", key)
     }
-    nPoints <- 1 + ((length(unique(PT.ls[[key]])) - 1) * t_interval_map[[key]])
+    nPoints <- as.integer(npoints_map[[key]])
     tmp <- get_traj_from_tradeSeq_sce(
-      sce.ls[[key]], features_key, nPoints = nPoints, lineage_pick = lineage_pick,
-      sizeFactors = sf.ls[[key]]
+      sce.ls[[key]], features_key, nPoints = nPoints, lineage_pick = lineage_pick
     )
     traj.ls[[key]] <- tmp
     rm(tmp)
@@ -1368,6 +1010,42 @@ prepare_dimred_matrices <- function(traj_mat, tt, pc_df, significance_col = "pva
   list(X = X, Xd = Xd, X_mat = X_mat, Xd_mat = Xd_mat, significant_rows = significant_rows)
 }
 
+build_dimred_base_pc_df <- function(traj_mat, asso_df.ls) {
+  gene_celltype <- rownames(traj_mat)
+  pc_df <- data.frame(
+    gene = sapply(gene_celltype, function(x) strsplit(x, "_")[[1]][1], USE.NAMES = FALSE),
+    cell_type = sub("^[^_]+_", "", gene_celltype),
+    stringsAsFactors = FALSE,
+    row.names = gene_celltype
+  )
+
+  for (nm in c("waldStat_1", "meanLogFC", "pvalue_1", "qval_1")) {
+    pc_df[[nm]] <- NA_real_
+  }
+
+  lookup_df <- do.call(rbind, lapply(names(asso_df.ls), function(ct) {
+    df <- asso_df.ls[[ct]]
+    if (is.null(df) || nrow(df) == 0) return(NULL)
+    out <- data.frame(cell_type = ct, gene = rownames(df), stringsAsFactors = FALSE, row.names = NULL)
+    for (nm in c("waldStat_1", "meanLogFC", "pvalue_1", "qval_1")) {
+      out[[paste0(nm, "_lookup")]] <- if (nm %in% colnames(df)) df[[nm]] else NA_real_
+    }
+    out
+  }))
+
+  pc_df |>
+    tibble::rownames_to_column("row_id") |>
+    dplyr::left_join(lookup_df, by = c("cell_type", "gene")) |>
+    dplyr::mutate(
+      waldStat_1 = ifelse(is.na(waldStat_1), waldStat_1_lookup, waldStat_1),
+      meanLogFC = ifelse(is.na(meanLogFC), meanLogFC_lookup, meanLogFC),
+      pvalue_1 = ifelse(is.na(pvalue_1), pvalue_1_lookup, pvalue_1),
+      qval_1 = ifelse(is.na(qval_1), qval_1_lookup, qval_1)
+    ) |>
+    dplyr::select(-waldStat_1_lookup, -meanLogFC_lookup, -pvalue_1_lookup, -qval_1_lookup) |>
+    tibble::column_to_rownames("row_id")
+}
+
 compute_dimred_pca <- function(X_mat, Xd_mat, variance_threshold = 0.99) {
   pca_X <- prcomp(X_mat, center = TRUE, scale. = FALSE)
   cumvar <- cumsum(pca_X$sdev^2) / sum(pca_X$sdev^2)
@@ -1418,28 +1096,35 @@ cluster_centroid_distances <- function(X_use, cl) {
   data.frame(gene = rownames(X_use), cluster = cl, centroid_dist = gene_cluster_distance, stringsAsFactors = FALSE)
 }
 
-run_dimred_signed_clustering <- function(pc_df, X_n, Xd_n, sign = c("induced", "repressed"),
-                                         alpha = 0.25, log2fc_threshold = 0,
+run_dimred_subset_clustering <- function(row_ids, X_n, Xd_n, alpha,
                                          K_grid = 2:100, wss_fraction = 0.95,
-                                         select_k_by = "elbow") {
-  sign <- match.arg(sign)
-  if (sign == "induced") {
-    subset.rownames <- rownames(pc_df[pc_df$peak_log2fc > log2fc_threshold, , drop = FALSE])
-  } else {
-    subset.rownames <- rownames(pc_df[pc_df$peak_log2fc < -log2fc_threshold, , drop = FALSE])
+                                         k_broad = NULL, k_fine = NULL) {
+  row_ids <- intersect(as.character(row_ids), rownames(X_n))
+  row_ids <- intersect(row_ids, rownames(Xd_n))
+  if (!length(row_ids)) stop("No requested rows are available for clustering.")
+  if (missing(alpha) || is.null(alpha) || !is.finite(alpha) || alpha < 0 || alpha > 1) {
+    stop("`alpha` must be explicitly supplied as a finite value between 0 and 1.")
   }
 
-  X_joint <- cbind(sqrt(1 - alpha) * X_n, sqrt(alpha) * Xd_n)[subset.rownames, , drop = FALSE]
+  X_joint <- cbind(sqrt(1 - alpha) * X_n, sqrt(alpha) * Xd_n)[row_ids, , drop = FALSE]
   D_joint <- dist(X_joint, method = "euclidean")
   hc <- hclust(D_joint, method = "ward.D2")
 
   clust_eval <- calculate_trajectory_clustering_metrics(
     X_mat = X_joint, D = D_joint, hc = hc, K_grid = K_grid,
-    wss_fraction = wss_fraction, select_k_by = select_k_by
+    wss_fraction = wss_fraction, select_k_by = "elbow"
   )
 
-  broad_cl <- cutree(hc, k = clust_eval$selection$k_silhouette)
-  fine_cl <- cutree(hc, k = clust_eval$selection$k_elbow)
+  broad_cl <- fine_cl <- NULL
+  broad_df <- fine_df <- NULL
+  if (!is.null(k_broad)) {
+    broad_cl <- cutree(hc, k = as.integer(k_broad))
+    broad_df <- cluster_centroid_distances(X_joint, broad_cl)
+  }
+  if (!is.null(k_fine)) {
+    fine_cl <- cutree(hc, k = as.integer(k_fine))
+    fine_df <- cluster_centroid_distances(X_joint, fine_cl)
+  }
 
   list(
     X_use = X_joint,
@@ -1448,8 +1133,24 @@ run_dimred_signed_clustering <- function(pc_df, X_n, Xd_n, sign = c("induced", "
     clust_eval = clust_eval,
     broad = broad_cl,
     fine = fine_cl,
-    broad_df = cluster_centroid_distances(X_joint, broad_cl),
-    fine_df = cluster_centroid_distances(X_joint, fine_cl)
+    broad_df = broad_df,
+    fine_df = fine_df
+  )
+}
+
+run_dimred_signed_clustering <- function(pc_df, X_n, Xd_n, sign = c("induced", "repressed"),
+                                         alpha, log2fc_threshold = 0,
+                                         K_grid = 2:100, wss_fraction = 0.95,
+                                         k_broad = NULL, k_fine = NULL) {
+  sign <- match.arg(sign)
+  if (sign == "induced") {
+    subset.rownames <- rownames(pc_df[pc_df$peak_log2fc > log2fc_threshold, , drop = FALSE])
+  } else {
+    subset.rownames <- rownames(pc_df[pc_df$peak_log2fc < -log2fc_threshold, , drop = FALSE])
+  }
+  run_dimred_subset_clustering(
+    row_ids = subset.rownames, X_n = X_n, Xd_n = Xd_n, alpha = alpha,
+    K_grid = K_grid, wss_fraction = wss_fraction, k_broad = k_broad, k_fine = k_fine
   )
 }
 
@@ -1464,11 +1165,19 @@ add_dimred_cluster_assignment <- function(pc_df, cl, disp_df, name) {
   pc_df
 }
 
+add_dimred_named_clusters <- function(pc_df, clustering_res, name) {
+  if (!is.null(clustering_res$broad)) {
+    pc_df <- add_dimred_cluster_assignment(pc_df, clustering_res$broad, clustering_res$broad_df, paste0("broad_", name))
+  }
+  if (!is.null(clustering_res$fine)) {
+    pc_df <- add_dimred_cluster_assignment(pc_df, clustering_res$fine, clustering_res$fine_df, paste0("fine_", name))
+  }
+  pc_df
+}
+
 add_dimred_signed_clusters <- function(pc_df, induced_res, repressed_res) {
-  pc_df <- add_dimred_cluster_assignment(pc_df, induced_res$broad, induced_res$broad_df, "broad_induced")
-  pc_df <- add_dimred_cluster_assignment(pc_df, induced_res$fine, induced_res$fine_df, "fine_induced")
-  pc_df <- add_dimred_cluster_assignment(pc_df, repressed_res$broad, repressed_res$broad_df, "broad_repressed")
-  pc_df <- add_dimred_cluster_assignment(pc_df, repressed_res$fine, repressed_res$fine_df, "fine_repressed")
+  pc_df <- add_dimred_named_clusters(pc_df, induced_res, "induced")
+  pc_df <- add_dimred_named_clusters(pc_df, repressed_res, "repressed")
   pc_df
 }
 
@@ -1509,7 +1218,11 @@ write_matrix_csv <- function(x, path) {
   invisible(normalizePath(path, mustWork = FALSE))
 }
 
-chronopack_characterize_gene_trajectories <- function(
+dimred_log <- function(...) {
+  message(format(Sys.time(), "%Y-%m-%d %H:%M:%S"), " | ", paste0(..., collapse = ""))
+}
+
+chronopack_align_gene_trajectories <- function(
   cfg,
   output_dir,
   keys = c("K562a", "K562_puro", "K562b", "THP1"),
@@ -1518,7 +1231,6 @@ chronopack_characterize_gene_trajectories <- function(
   offset_map = c(K562a = 0, K562_puro = 0, K562b = -68, THP1 = -10),
   scale_map = c(THP1 = 0.65),
   pvalue_threshold = 0.05,
-  descriptor_args = NULL,
   lineage_pick = 1,
   write_outputs = TRUE
 ) {
@@ -1529,18 +1241,16 @@ chronopack_characterize_gene_trajectories <- function(
   feature_info <- select_dimred_features(
     asso_df.ls = loaded$asso_df.ls,
     sce.ls = loaded$sce.ls,
-    counts_sub.ls = loaded$counts_sub.ls,
     keys = keys,
     pvalue_threshold = pvalue_threshold
   )
 
+  npoints_map <- stats::setNames(as.integer(round(as.numeric(time_map[keys]))) + 1L, keys)
   traj.ls <- extract_dimred_smooth_trajectories(
     sce.ls = loaded$sce.ls,
-    sf.ls = loaded$sf.ls,
-    PT.ls = loaded$PT.ls,
     features = feature_info$usable_features.ls,
     keys = keys,
-    t_interval_map = t_interval_map,
+    npoints_map = npoints_map,
     lineage_pick = lineage_pick
   )
 
@@ -1555,24 +1265,7 @@ chronopack_characterize_gene_trajectories <- function(
   traj_mat <- traj_res$traj_mat
   tt <- traj_res$tt
 
-  if (is.null(descriptor_args)) {
-    descriptor_args <- list(
-      N_minutes = 10 / length(tt),
-      z_diff_threshold = 0.2,
-      require_consecutive = 30,
-      onset_mode = "horizontal",
-      pseudocount = 0
-    )
-  }
-
-  pc_df <- build_dimred_pc_df(
-    traj_mat = traj_mat,
-    tt = tt,
-    asso_df.ls = loaded$asso_df.ls,
-    scale_map_use = align_res$scale_map_use,
-    descriptor_args = descriptor_args
-  )
-
+  pc_df <- build_dimred_base_pc_df(traj_mat = traj_mat, asso_df.ls = loaded$asso_df.ls)
   matrix_res <- prepare_dimred_matrices(
     traj_mat = traj_mat,
     tt = tt,
@@ -1585,7 +1278,7 @@ chronopack_characterize_gene_trajectories <- function(
   if (isTRUE(write_outputs)) {
     paths$traj_mat <- file.path(output_dir, "gene_trajectory_fit.csv")
     paths$time_grid <- file.path(output_dir, "gene_trajectory_time_grid.csv")
-    paths$pc_df_characterized <- file.path(output_dir, "pc_df.characterized.csv")
+    paths$pc_df_aligned <- file.path(output_dir, "pc_df.aligned.csv")
     paths$X <- file.path(output_dir, "gene_trajectory_fit_z.csv")
     paths$Xd <- file.path(output_dir, "gene_trajectory_fit_ddt_z.csv")
     paths$X_mat <- file.path(output_dir, "gene_trajectory_fit_significant_z.csv")
@@ -1593,7 +1286,7 @@ chronopack_characterize_gene_trajectories <- function(
 
     write_matrix_csv(traj_mat, paths$traj_mat)
     write.csv(data.frame(time = tt), paths$time_grid, row.names = FALSE)
-    write.csv(pc_df, paths$pc_df_characterized)
+    write.csv(pc_df, paths$pc_df_aligned)
     write_matrix_csv(matrix_res$X, paths$X)
     write_matrix_csv(matrix_res$Xd, paths$Xd)
     write_matrix_csv(matrix_res$X_mat, paths$X_mat)
@@ -1617,25 +1310,122 @@ chronopack_characterize_gene_trajectories <- function(
       offset_map = offset_map,
       scale_map = scale_map,
       pvalue_threshold = pvalue_threshold,
-      descriptor_args = descriptor_args,
       lineage_pick = lineage_pick
     )
   )
-  class(out) <- c("chronopack_gene_trajectory_characterization", class(out))
+  class(out) <- c("chronopack_gene_trajectory_alignment", class(out))
   out
+}
+
+chronopack_compute_gene_trajectory_descriptors <- function(
+  alignment,
+  output_dir,
+  pvalue_threshold = NULL,
+  descriptor_args = NULL,
+  write_outputs = TRUE
+) {
+  output_dir <- normalizePath(output_dir, mustWork = FALSE)
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+  traj_mat <- alignment$traj_mat
+  tt <- alignment$tt
+  if (is.null(descriptor_args)) {
+    descriptor_args <- list(
+      N_minutes = 10 / length(tt),
+      z_diff_threshold = 0.2,
+      require_consecutive = 30,
+      onset_mode = "horizontal",
+      pseudocount = 0
+    )
+  }
+  if (is.null(pvalue_threshold)) {
+    pvalue_threshold <- alignment$parameters$pvalue_threshold
+  }
+
+  pc_df <- build_dimred_pc_df(
+    traj_mat = traj_mat,
+    tt = tt,
+    asso_df.ls = alignment$loaded$asso_df.ls,
+    scale_map_use = alignment$align$scale_map_use,
+    descriptor_args = descriptor_args
+  )
+  matrix_res <- prepare_dimred_matrices(
+    traj_mat = traj_mat,
+    tt = tt,
+    pc_df = pc_df,
+    significance_col = "pvalue_1",
+    significance_threshold = pvalue_threshold
+  )
+
+  paths <- alignment$paths
+  if (isTRUE(write_outputs)) {
+    paths$pc_df_characterized <- file.path(output_dir, "pc_df.characterized.csv")
+    paths$X <- file.path(output_dir, "gene_trajectory_fit_z.csv")
+    paths$Xd <- file.path(output_dir, "gene_trajectory_fit_ddt_z.csv")
+    paths$X_mat <- file.path(output_dir, "gene_trajectory_fit_significant_z.csv")
+    paths$Xd_mat <- file.path(output_dir, "gene_trajectory_fit_ddt_significant_z.csv")
+    write.csv(pc_df, paths$pc_df_characterized)
+    write_matrix_csv(matrix_res$X, paths$X)
+    write_matrix_csv(matrix_res$Xd, paths$Xd)
+    write_matrix_csv(matrix_res$X_mat, paths$X_mat)
+    write_matrix_csv(matrix_res$Xd_mat, paths$Xd_mat)
+  }
+
+  out <- alignment
+  out$pc_df <- pc_df
+  out$matrix_res <- matrix_res
+  out$paths <- paths
+  out$parameters$descriptor_args <- descriptor_args
+  class(out) <- c("chronopack_gene_trajectory_characterization", setdiff(class(out), "chronopack_gene_trajectory_characterization"))
+  out
+}
+
+chronopack_characterize_gene_trajectories <- function(
+  cfg,
+  output_dir,
+  keys = c("K562a", "K562_puro", "K562b", "THP1"),
+  t_interval_map = c(K562a = 10, K562_puro = 10, K562b = 15, THP1 = 15),
+  time_map = c(K562a = 110, K562_puro = 110, K562b = 165, THP1 = 165),
+  offset_map = c(K562a = 0, K562_puro = 0, K562b = -68, THP1 = -10),
+  scale_map = c(THP1 = 0.65),
+  pvalue_threshold = 0.05,
+  descriptor_args = NULL,
+  lineage_pick = 1,
+  write_outputs = TRUE
+) {
+  alignment <- chronopack_align_gene_trajectories(
+    cfg = cfg,
+    output_dir = output_dir,
+    keys = keys,
+    t_interval_map = t_interval_map,
+    time_map = time_map,
+    offset_map = offset_map,
+    scale_map = scale_map,
+    pvalue_threshold = pvalue_threshold,
+    lineage_pick = lineage_pick,
+    write_outputs = write_outputs
+  )
+  chronopack_compute_gene_trajectory_descriptors(
+    alignment = alignment,
+    output_dir = output_dir,
+    pvalue_threshold = pvalue_threshold,
+    descriptor_args = descriptor_args,
+    write_outputs = write_outputs
+  )
 }
 
 chronopack_cluster_gene_trajectories <- function(
   characterization,
   output_dir,
-  alpha = 0.25,
-  log2fc_threshold = 0,
+  row_ids,
+  cluster_name,
+  alpha,
+  k_broad = NULL,
+  k_fine = NULL,
   K_grid = 2:100,
   wss_fraction = 0.95,
-  select_k_by = "elbow",
   variance_threshold = 0.99,
   pca_columns = 4,
-  cell_type_order = c("K562a", "K562b", "K562_puro", "THP1"),
   write_outputs = TRUE
 ) {
   output_dir <- normalizePath(output_dir, mustWork = FALSE)
@@ -1645,76 +1435,104 @@ chronopack_cluster_gene_trajectories <- function(
   matrix_res <- characterization$matrix_res
   X_mat <- matrix_res$X_mat
   Xd_mat <- matrix_res$Xd_mat
+  row_ids <- intersect(as.character(row_ids), rownames(X_mat))
+  if (!length(row_ids)) stop("No requested rows overlap with the significant trajectory matrix.")
 
+  dimred_log("Starting PCA for ", nrow(X_mat), " genes x ", ncol(X_mat), " trajectory features.")
   pca_res <- compute_dimred_pca(
     X_mat = X_mat,
     Xd_mat = Xd_mat,
     variance_threshold = variance_threshold
   )
+  dimred_log("Finished PCA: n_pc_X=", pca_res$n_pc_X, ", n_pc_Xd=", pca_res$n_pc_Xd, ".")
   pc_df <- add_dimred_pca_columns(pc_df, pca_res$pca_X, n_columns = pca_columns)
 
   clustering_inputs <- prepare_dimred_clustering_inputs(X_mat, Xd_mat)
-  induced_res <- run_dimred_signed_clustering(
-    pc_df = pc_df,
+  dimred_log("Starting ", cluster_name, " clustering for ", length(row_ids), " rows.")
+  clustering_res <- run_dimred_subset_clustering(
+    row_ids = row_ids,
     X_n = clustering_inputs$X_n,
     Xd_n = clustering_inputs$Xd_n,
-    sign = "induced",
     alpha = alpha,
-    log2fc_threshold = log2fc_threshold,
     K_grid = K_grid,
     wss_fraction = wss_fraction,
-    select_k_by = select_k_by
+    k_broad = k_broad,
+    k_fine = k_fine
   )
-  repressed_res <- run_dimred_signed_clustering(
-    pc_df = pc_df,
-    X_n = clustering_inputs$X_n,
-    Xd_n = clustering_inputs$Xd_n,
-    sign = "repressed",
-    alpha = alpha,
-    log2fc_threshold = log2fc_threshold,
-    K_grid = K_grid,
-    wss_fraction = wss_fraction,
-    select_k_by = select_k_by
-  )
+  k_broad_label <- if (is.null(k_broad)) "not assigned" else as.character(k_broad)
+  k_fine_label <- if (is.null(k_fine)) "not assigned" else as.character(k_fine)
+  dimred_log("Finished ", cluster_name, " clustering: k_broad=", k_broad_label,
+             ", k_fine=", k_fine_label, ", k_elbow=", clustering_res$clust_eval$selection$k_elbow,
+             ", k_silhouette=", clustering_res$clust_eval$selection$k_silhouette, ".")
 
-  pc_df <- add_dimred_signed_clusters(pc_df, induced_res, repressed_res)
-  pc_df <- finalize_dimred_pc_df(pc_df, cell_type_order = cell_type_order)
+  pc_df <- add_dimred_named_clusters(pc_df, clustering_res, cluster_name)
 
   paths <- list()
   if (isTRUE(write_outputs)) {
-    paths$pc_df <- file.path(output_dir, "pc_df.new.csv")
-    paths$pc_df_rds <- file.path(output_dir, "pc_df.new.rds")
+    dimred_log("Writing clustering outputs.")
+    paths$pc_df_cluster <- file.path(output_dir, paste0("pc_df.", cluster_name, ".csv"))
     paths$pca_X <- file.path(output_dir, "gene_trajectory_X_pca.csv")
     paths$pca_Xd <- file.path(output_dir, "gene_trajectory_Xd_pca.csv")
-    paths$induced_metrics <- file.path(output_dir, "cluster_metrics.induced.csv")
-    paths$repressed_metrics <- file.path(output_dir, "cluster_metrics.repressed.csv")
+    paths$metrics <- file.path(output_dir, paste0("cluster_metrics.", cluster_name, ".csv"))
 
-    write.csv(pc_df, paths$pc_df)
-    saveRDS(pc_df, paths$pc_df_rds)
+    write.csv(pc_df, paths$pc_df_cluster)
     write_matrix_csv(pca_res$pca_X$x, paths$pca_X)
     write_matrix_csv(pca_res$pca_Xd$x, paths$pca_Xd)
-    write.csv(induced_res$clust_eval$metrics, paths$induced_metrics, row.names = FALSE)
-    write.csv(repressed_res$clust_eval$metrics, paths$repressed_metrics, row.names = FALSE)
+    write.csv(clustering_res$clust_eval$metrics, paths$metrics, row.names = FALSE)
+    dimred_log("Finished writing clustering outputs.")
   }
 
   out <- list(
     pc_df = pc_df,
     pca_res = pca_res,
     clustering_inputs = clustering_inputs,
-    induced = induced_res,
-    repressed = repressed_res,
+    clustering = clustering_res,
     paths = paths,
     parameters = list(
+      cluster_name = cluster_name,
       alpha = alpha,
-      log2fc_threshold = log2fc_threshold,
+      row_ids = row_ids,
+      k_broad = k_broad,
+      k_fine = k_fine,
       K_grid = K_grid,
       wss_fraction = wss_fraction,
-      select_k_by = select_k_by,
       variance_threshold = variance_threshold,
-      pca_columns = pca_columns,
-      cell_type_order = cell_type_order
+      pca_columns = pca_columns
     )
   )
   class(out) <- c("chronopack_gene_trajectory_clustering", class(out))
+  out
+}
+
+chronopack_finalize_gene_trajectory_clusters <- function(
+  characterization,
+  clustering_results,
+  output_dir,
+  cell_type_order = c("K562a", "K562b", "K562_puro", "THP1"),
+  write_outputs = TRUE
+) {
+  output_dir <- normalizePath(output_dir, mustWork = FALSE)
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  pc_df <- characterization$pc_df
+  for (res in clustering_results) {
+    pc_df <- add_dimred_named_clusters(pc_df, res$clustering, res$parameters$cluster_name)
+  }
+  pc_df <- finalize_dimred_pc_df(pc_df, cell_type_order = cell_type_order)
+
+  paths <- list()
+  if (isTRUE(write_outputs)) {
+    paths$pc_df <- file.path(output_dir, "pc_df.new.csv")
+    paths$pc_df_rds <- file.path(output_dir, "pc_df.new.rds")
+    write.csv(pc_df, paths$pc_df)
+    saveRDS(pc_df, paths$pc_df_rds)
+  }
+
+  out <- list(
+    pc_df = pc_df,
+    paths = paths,
+    clustering_results = clustering_results,
+    parameters = list(cell_type_order = cell_type_order)
+  )
+  class(out) <- c("chronopack_gene_trajectory_finalized_clusters", class(out))
   out
 }

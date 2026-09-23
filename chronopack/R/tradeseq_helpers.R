@@ -104,8 +104,8 @@ prepare_single_lineage <- function(counts_sub, time_vec, sf) {
   colnames(PT) <- "lineage1"
   CW <- matrix(1, nrow = ncol(counts_sub), ncol = 1)
   colnames(CW) <- "lineage1"
-  offset_mat <- make_offset_matrix(counts_sub, sf)
-  list(PT = PT, CW = CW, offset_mat = offset_mat)
+  offset_vec <- make_offset_vector(sf)
+  list(PT = PT, CW = CW, offset_vec = offset_vec)
 }
 
 prepare_hard_lineages <- function(counts_sub, time_vec, sf, cell_type_path = "cell_types.csv") {
@@ -146,28 +146,31 @@ make_offset_matrix <- function(counts_sub, sf) {
   matrix(log(sf), nrow = nrow(counts_sub), ncol = ncol(counts_sub), byrow = TRUE)
 }
 
-fit_tradeseq_sce <- function(counts_sub, pseudotime, cell_weights, offset_mat,
-                             nknots = 4, workers = 4, verbose = TRUE) {
-  tradeSeq::fitGAM(
-    counts = counts_sub,
-    pseudotime = pseudotime,
-    cellWeights = cell_weights,
-    offset = offset_mat,
-    nknots = nknots,
-    BPPARAM = BiocParallel::MulticoreParam(workers = workers),
-    verbose = verbose
-  )
+make_offset_vector <- function(sf) {
+  as.numeric(log(sf))
 }
 
-fit_tradeseq_gamlist <- function(counts_sub, pseudotime, cell_weights, offset_mat,
-                                 nknots = 8, workers = 4, verbose = TRUE) {
+fit_tradeseq_sce <- function(counts_sub, pseudotime, cell_weights, offset,
+                             nknots = 4, workers = 4, verbose = TRUE,
+                             parallel = TRUE, genes = NULL) {
+  if (length(offset) != ncol(counts_sub)) {
+    stop("offset must be a cell-level vector with length ncol(counts_sub).")
+  }
+  if (nrow(pseudotime) != ncol(counts_sub)) {
+    stop("pseudotime must have one row per cell.")
+  }
+  if (nrow(cell_weights) != ncol(counts_sub)) {
+    stop("cell_weights must have one row per cell.")
+  }
   tradeSeq::fitGAM(
     counts = counts_sub,
+    genes = genes,
     pseudotime = pseudotime,
     cellWeights = cell_weights,
-    offset = offset_mat,
+    offset = offset,
     nknots = nknots,
-    sce = FALSE,
+    sce = TRUE,
+    parallel = parallel,
     BPPARAM = BiocParallel::MulticoreParam(workers = workers),
     verbose = verbose
   )
@@ -258,12 +261,16 @@ run_tradeseq_single_lineage <- function(input_dir,
                                         output_association = "asso_df.1trajectory.nknots4.csv",
                                         output_significant = "sig_df.1trajectory.nknots4.csv",
                                         output_sce = "sce.1trajectory.nknots8.rds",
-                                        output_gamlist = "gamList.1trajectory.nknots8.rds",
+                                        output_sce_screen = "sce_screen.1trajectory.nknots4.rds",
+                                        output_screen_genes = "screen_genes.1trajectory.nknots4.csv",
+                                        output_session_info = "sessionInfo.tradeSeqFits.txt",
                                         association_aliases = character(),
                                         significant_aliases = character(),
                                         sce_aliases = character(),
-                                        gamlist_aliases = character(),
+                                        sce_screen_aliases = character(),
+                                        screen_genes_aliases = character(),
                                         tag = "",
+                                        seed = 123,
                                         verbose = TRUE) {
   old_wd <- getwd()
   on.exit(setwd(old_wd), add = TRUE)
@@ -282,25 +289,31 @@ run_tradeseq_single_lineage <- function(input_dir,
   single_lineage <- prepare_single_lineage(counts_sub, time_vec, sf)
   PT <- single_lineage$PT
   CW <- single_lineage$CW
-  offset_mat <- single_lineage$offset_mat
+  offset_vec <- single_lineage$offset_vec
 
+  set.seed(seed)
   sce_screen <- fit_tradeseq_sce(
     counts_sub = counts_sub,
     pseudotime = PT,
     cell_weights = CW,
-    offset_mat = offset_mat,
+    offset = offset_vec,
     nknots = screen_nknots,
     workers = workers,
     verbose = verbose
+  )
+  sce_screen_paths <- save_rds_with_aliases(
+    sce_screen,
+    output_sce_screen,
+    sce_screen_aliases
   )
 
   asso_df <- association_df_single(sce_screen, n_points = n_points)
   asso_df <- asso_df[!is.na(asso_df$waldStat_1), , drop = FALSE]
 
-  sig_df <- asso_df[!is.na(asso_df$qval_1) & asso_df$qval_1 < 0.05, , drop = FALSE]
-  sig_df <- sig_df[order(-sig_df$waldStat_1, -sig_df$meanLogFC), , drop = FALSE]
+  fdr_sig_df <- asso_df[!is.na(asso_df$qval_1) & asso_df$qval_1 < 0.05, , drop = FALSE]
+  fdr_sig_df <- fdr_sig_df[order(-fdr_sig_df$waldStat_1, -fdr_sig_df$meanLogFC), , drop = FALSE]
 
-  genes_keep <- significant_single_lineage(
+  screen_genes <- significant_single_lineage(
     asso_df,
     p_threshold = p_threshold
   )
@@ -311,65 +324,67 @@ run_tradeseq_single_lineage <- function(input_dir,
     association_aliases
   )
   write_csv_with_aliases(
-    sig_df,
+    fdr_sig_df,
     output_significant,
     significant_aliases
   )
+  write_csv_with_aliases(
+    data.frame(gene = screen_genes, stringsAsFactors = FALSE),
+    output_screen_genes,
+    screen_genes_aliases,
+    row.names = FALSE
+  )
 
-  counts_sig <- counts_sub[genes_keep, , drop = FALSE]
-  offset_sig <- make_offset_matrix(counts_sig, sf)
+  counts_sub2 <- counts_sub[screen_genes, , drop = FALSE]
 
-  sce <- fit_tradeseq_sce(
-    counts_sub = counts_sig,
+  set.seed(seed)
+  sce_final <- fit_tradeseq_sce(
+    counts_sub = counts_sub2,
     pseudotime = PT,
     cell_weights = CW,
-    offset_mat = offset_sig,
+    offset = offset_vec,
     nknots = final_nknots,
     workers = workers,
     verbose = verbose
   )
   sce_paths <- save_rds_with_aliases(
-    sce,
+    sce_final,
     output_sce,
     sce_aliases
   )
 
-  gamList <- fit_tradeseq_gamlist(
-    counts_sub = counts_sig,
-    pseudotime = PT,
-    cell_weights = CW,
-    offset_mat = offset_sig,
-    nknots = final_nknots,
-    workers = workers,
-    verbose = verbose
-  )
-  gamlist_paths <- save_rds_with_aliases(
-    gamList,
-    output_gamlist,
-    gamlist_aliases
-  )
+  session_info_path <- normalizePath(output_session_info, mustWork = FALSE)
+  writeLines(c(
+    paste0("tradeSeq: ", as.character(utils::packageVersion("tradeSeq"))),
+    paste0("mgcv: ", as.character(utils::packageVersion("mgcv"))),
+    capture.output(utils::sessionInfo())
+  ), con = output_session_info)
 
   list(
     input_dir = normalizePath(getwd(), mustWork = TRUE),
     counts_dim = dim(inputs$counts),
     counts_sub_dim = dim(counts_sub),
-    final_counts_dim = dim(counts_sig),
+    final_counts_dim = dim(counts_sub2),
     n_subset_genes = length(inputs$subset_genes),
     n_genes_kept_initial = length(inputs$genes_keep),
     n_tested = nrow(asso_df),
-    n_qval_significant = nrow(sig_df),
-    n_pvalue_significant = length(genes_keep),
-    genes_keep = genes_keep,
+    n_qval_significant = nrow(fdr_sig_df),
+    n_pvalue_significant = length(screen_genes),
+    genes_keep = screen_genes,
+    screen_genes = screen_genes,
     association_path = normalizePath(output_association, mustWork = FALSE),
     significant_path = normalizePath(output_significant, mustWork = FALSE),
     sce_path = normalizePath(output_sce, mustWork = FALSE),
-    gamlist_path = normalizePath(output_gamlist, mustWork = FALSE),
+    sce_final_path = normalizePath(output_sce, mustWork = FALSE),
+    sce_screen_path = normalizePath(output_sce_screen, mustWork = FALSE),
+    screen_genes_path = normalizePath(output_screen_genes, mustWork = FALSE),
+    session_info_path = session_info_path,
     sce_paths = sce_paths,
-    gamlist_paths = gamlist_paths,
+    sce_screen_paths = sce_screen_paths,
     pseudotime = PT,
     cell_weights = CW,
     size_factors = sf,
     association = asso_df,
-    significant = sig_df
+    significant = fdr_sig_df
   )
 }

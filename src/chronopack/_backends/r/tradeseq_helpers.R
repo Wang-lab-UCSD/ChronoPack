@@ -176,20 +176,6 @@ fit_tradeseq_sce <- function(counts_sub, pseudotime, cell_weights, offset,
   )
 }
 
-fit_tradeseq_gamlist <- function(counts_sub, pseudotime, cell_weights, offset_mat,
-                                 nknots = 8, workers = 4, verbose = TRUE) {
-  tradeSeq::fitGAM(
-    counts = counts_sub,
-    pseudotime = pseudotime,
-    cellWeights = cell_weights,
-    offset = offset_mat,
-    nknots = nknots,
-    sce = FALSE,
-    BPPARAM = BiocParallel::MulticoreParam(workers = workers),
-    verbose = verbose
-  )
-}
-
 association_df_single <- function(sce, n_points = 9) {
   asso_res <- tradeSeq::associationTest(
     sce,
@@ -278,13 +264,11 @@ run_tradeseq_single_lineage <- function(input_dir,
                                         output_sce_screen = "sce_screen.1trajectory.nknots4.rds",
                                         output_screen_genes = "screen_genes.1trajectory.nknots4.csv",
                                         output_session_info = "sessionInfo.tradeSeqFits.txt",
-                                        output_gamlist = NA_character_,
                                         association_aliases = character(),
                                         significant_aliases = character(),
                                         sce_aliases = character(),
                                         sce_screen_aliases = character(),
                                         screen_genes_aliases = character(),
-                                        gamlist_aliases = character(),
                                         tag = "",
                                         seed = 123,
                                         verbose = TRUE) {
@@ -376,8 +360,6 @@ run_tradeseq_single_lineage <- function(input_dir,
     capture.output(utils::sessionInfo())
   ), con = output_session_info)
 
-  gamlist_paths <- character()
-
   list(
     input_dir = normalizePath(getwd(), mustWork = TRUE),
     counts_dim = dim(inputs$counts),
@@ -397,10 +379,8 @@ run_tradeseq_single_lineage <- function(input_dir,
     sce_screen_path = normalizePath(output_sce_screen, mustWork = FALSE),
     screen_genes_path = normalizePath(output_screen_genes, mustWork = FALSE),
     session_info_path = session_info_path,
-    gamlist_path = NA_character_,
     sce_paths = sce_paths,
     sce_screen_paths = sce_screen_paths,
-    gamlist_paths = gamlist_paths,
     pseudotime = PT,
     cell_weights = CW,
     size_factors = sf,

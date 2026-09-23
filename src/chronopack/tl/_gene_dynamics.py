@@ -376,7 +376,6 @@ def _read_tradeseq_outputs(result, input_dir):
         "sce_final": _optional_path("sce_final_path"),
         "screen_genes": _optional_path("screen_genes_path"),
         "session_info": _optional_path("session_info_path"),
-        "gamList": _optional_path("gamlist_path"),
     }
     paths.update({key: value for key, value in optional.items() if value})
     association = pd.read_csv(paths["association"], index_col=0)
@@ -419,13 +418,11 @@ def _run_tradeseq_backend(
         output_sce_screen=str(outputs.get("sce_screen", "sce_screen.1trajectory.nknots4.rds")),
         output_screen_genes=str(outputs.get("screen_genes", "screen_genes.1trajectory.nknots4.csv")),
         output_session_info=str(outputs.get("session_info", "sessionInfo.tradeSeqFits.txt")),
-        output_gamlist=str(outputs.get("gamList", "")),
         association_aliases=StrVector(legacy_outputs.get("association", [])),
         significant_aliases=StrVector(legacy_outputs.get("significant", [])),
         sce_aliases=StrVector(legacy_outputs.get("sce", [])),
         sce_screen_aliases=StrVector(legacy_outputs.get("sce_screen", [])),
         screen_genes_aliases=StrVector(legacy_outputs.get("screen_genes", [])),
-        gamlist_aliases=StrVector(legacy_outputs.get("gamList", [])),
         tag=str(tag),
         verbose=bool(verbose),
     )

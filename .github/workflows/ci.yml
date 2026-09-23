@@ -1,0 +1,52 @@
+name: ChronoPack lightweight CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python-package:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+
+      - name: Import public namespaces
+        run: |
+          python - <<'PY'
+          import chronopack as cp
+          assert cp.io
+          assert cp.tl
+          assert cp.pl
+          assert cp.tl.grn
+          assert cp.tl.c2c
+          assert cp.pl.c2c
+          PY
+
+      - name: Verify packaged R resources
+        run: |
+          python - <<'PY'
+          from chronopack._backends.r import read_r_resource_text
+          txt = read_r_resource_text("dimred_plotting_helpers.R")
+          assert "chronopack" in txt.lower()
+          PY
+
+      - name: Run lightweight tests
+        run: pytest -q
+
+      - name: Build wheel and source distribution
+        run: |
+          python -m pip install build
+          python -m build

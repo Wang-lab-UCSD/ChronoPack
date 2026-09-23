@@ -485,13 +485,417 @@ feature_plot_pc_simple <- function(
   p
 }
 
+compute_tradeSeq_reference_offset <- function(sizeFactors, off_ref = NULL) {
+  if (!is.null(off_ref)) return(as.numeric(off_ref)[1])
+  sf_vec <- as.numeric(sizeFactors)
+  if (!length(sf_vec) || all(!is.finite(sf_vec))) {
+    stop("sizeFactors must contain at least one finite value.")
+  }
+  log(exp(mean(log(sf_vec), na.rm = TRUE)))
+}
+
+get_tradeSeq_sce_prediction_components <- function(sce, gene) {
+  rd_ts <- S4Vectors::metadata(SummarizedExperiment::rowData(sce))$tradeSeq
+  if (is.null(rd_ts)) {
+    rd_ts <- SummarizedExperiment::rowData(sce)$tradeSeq
+  }
+  cd_ts <- SummarizedExperiment::colData(sce)$tradeSeq
+  if (is.null(rd_ts) || is.null(cd_ts)) {
+    stop("SCE does not contain tradeSeq rowData/colData metadata.")
+  }
+
+  gene <- as.character(gene)[1]
+  gene_idx <- match(gene, rownames(sce))
+  if (is.na(gene_idx)) {
+    stop("Gene not present in SCE rownames: ", gene)
+  }
+
+  beta_tbl <- rd_ts$beta[[1]]
+  if (is.null(beta_tbl)) {
+    stop("Could not locate tradeSeq beta matrix in rowData(sce)$tradeSeq$beta[[1]].")
+  }
+  beta_mat <- as.matrix(beta_tbl)
+  beta_idx <- gene_idx
+  if (!is.null(rownames(beta_mat)) && gene %in% rownames(beta_mat)) {
+    beta_idx <- match(gene, rownames(beta_mat))
+  }
+  beta <- as.numeric(beta_mat[beta_idx, ])
+  names(beta) <- colnames(beta_mat)
+
+  Sigma <- rd_ts$Sigma[[gene_idx]]
+  if (is.null(Sigma)) {
+    stop("Could not locate tradeSeq covariance matrix for gene: ", gene)
+  }
+  Sigma <- as.matrix(Sigma)
+
+  list(beta = beta, Sigma = Sigma, dm = cd_ts$dm, X = cd_ts$X)
+}
+
+predict_tradeSeq_sce_with_se <- function(sce, gene, lineageId = 1, nPoints = 200,
+                                         off_ref = 0, se_factor = 1.96,
+                                         return_log1p = TRUE) {
+  comp <- get_tradeSeq_sce_prediction_components(sce, gene)
+  dm <- comp$dm
+  X <- comp$X
+  if (is.null(dm) || is.null(X)) {
+    stop("SCE is missing tradeSeq design matrix metadata.")
+  }
+
+  t_cols <- grep("^t[0-9]+$", colnames(dm), value = TRUE)
+  avail_lineages <- as.integer(sub("^t", "", t_cols))
+  if (!length(avail_lineages)) {
+    stop("Could not find t1/t2/... columns in tradeSeq design metadata.")
+  }
+  ell <- as.integer(lineageId)
+  if (!(ell %in% avail_lineages)) ell <- avail_lineages[1]
+
+  df_pred <- tradeSeq:::.getPredictRangeDf(dm, lineageId = ell, nPoints = nPoints)
+  slingshot_coldata <- SummarizedExperiment::colData(sce)$crv
+  if (!is.null(slingshot_coldata)) {
+    pseudotime <- slingshot_coldata[, grep(x = colnames(slingshot_coldata), pattern = "pseudotime"), drop = FALSE]
+  } else {
+    pseudotime <- as.matrix(dm[, t_cols, drop = FALSE])
+  }
+  X_pred <- tradeSeq:::predictGAM(lpmatrix = X, df = df_pred, pseudotime = pseudotime)
+
+  beta <- comp$beta
+  Sigma <- comp$Sigma
+  if (!is.null(names(beta)) && !is.null(colnames(X_pred)) && all(colnames(X_pred) %in% names(beta))) {
+    beta <- beta[colnames(X_pred)]
+  }
+  if (!is.null(rownames(Sigma)) && !is.null(colnames(X_pred)) && all(colnames(X_pred) %in% rownames(Sigma))) {
+    Sigma <- Sigma[colnames(X_pred), colnames(X_pred), drop = FALSE]
+  }
+  if (length(beta) != ncol(X_pred)) {
+    stop("Beta length does not match prediction design columns for gene: ", gene)
+  }
+  if (!all(dim(Sigma) == c(ncol(X_pred), ncol(X_pred)))) {
+    stop("Covariance dimensions do not match prediction design columns for gene: ", gene)
+  }
+
+  eta <- as.numeric(X_pred %*% beta + as.numeric(off_ref)[1])
+  se_eta <- sqrt(pmax(0, rowSums((X_pred %*% Sigma) * X_pred)))
+  out <- data.frame(
+    gene = as.character(gene)[1],
+    lineage = ell,
+    pt = df_pred[[paste0("t", ell)]],
+    fit = eta,
+    se.fit = se_eta,
+    stringsAsFactors = FALSE
+  )
+  if (isTRUE(return_log1p)) {
+    out$mu <- log1p(exp(eta))
+    out$lo <- log1p(exp(eta - se_factor * se_eta))
+    out$hi <- log1p(exp(eta + se_factor * se_eta))
+  } else {
+    out$mu <- exp(eta)
+    out$lo <- exp(eta - se_factor * se_eta)
+    out$hi <- exp(eta + se_factor * se_eta)
+  }
+  out
+}
+
+plot_tradeSeq_gene <- function(
+    gene, sce_ls, q_by_gene = NULL,
+    keys = NULL, key_labels = NULL,
+    offset_map = NULL, time_max_map = NULL,
+    plot_normalized_pt = FALSE, trim_before_zero = FALSE,
+    point_tmax_map = NULL,
+    time_unit = "min", x_tick_step = 20,
+    x_tick_labels = NULL, xlim = NULL,
+    omit_points = FALSE, nPoints = 1000,
+    ny_ticks = 5, ylim = NULL,
+    color_points_by_run = TRUE,
+    points_color = "#274C77", points_alpha = 0.30, points_size = 0.75,
+    se_factor = 1.96,
+    line_width = 1.7, ribbon_alpha = 0.35,
+    show_title = TRUE, show_legend = TRUE,
+    axis_text_size = 14, axis_title_size = 16,
+    colours = NULL, ribbon_alpha_mult = 0.30
+) {
+    if (is.null(keys)) keys <- names(sce_ls)
+    keys <- intersect(keys, names(sce_ls))
+    keys <- keys[vapply(keys, function(k) gene %in% rownames(sce_ls[[k]]), logical(1))]
+    if (!length(keys)) stop("Gene not found in any requested SCE.")
+
+    if (is.null(key_labels)) key_labels <- setNames(keys, keys)
+    labels <- unname(unlist(key_labels[keys]))
+
+    if (is.null(colours)) {
+        colours <- rep(c("#1b9e77", "#d95f02", "#7570b3", "#e7298a",
+                         "#66a61e", "#e6ab02", "#a6761d", "#666666"),
+                       length.out = length(keys))
+        names(colours) <- keys
+    } else if (is.null(names(colours))) {
+        colours <- setNames(rep(colours, length.out = length(keys)), keys)
+    } else {
+        colours <- colours[keys]
+        if (any(is.na(colours))) stop("Named `colours` must include all requested keys.")
+    }
+    fill_cols <- setNames(grDevices::adjustcolor(colours, alpha.f = ribbon_alpha_mult), keys)
+
+    map_num <- function(x, k, default = NA_real_) {
+        if (is.null(x) || is.null(names(x)) || !(k %in% names(x))) return(default)
+        v <- x[[k]]
+        if (!length(v) || is.na(v)) default else as.numeric(v)
+    }
+    get_time_max <- function(k) {
+        if (plot_normalized_pt) return(1)
+        v <- map_num(time_max_map, k)
+        if (is.na(v)) stop("`time_max_map` must provide a value for key: ", k)
+        v
+    }
+    get_offset <- function(k) map_num(offset_map, k, 0)
+    pt_to_x <- function(pt, tm, off) (if (plot_normalized_pt) pt else pt * tm) + off
+    wmean <- function(x, w) {
+        s <- sum(w, na.rm = TRUE)
+        if (is.finite(s) && s > 0) sum(x * w, na.rm = TRUE) / s else NA_real_
+    }
+
+    fit_list <- obs_list <- setNames(vector("list", length(keys)), keys)
+
+    for (k in keys) {
+        sce <- sce_ls[[k]]
+        cd <- SummarizedExperiment::colData(sce)
+        rd <- SummarizedExperiment::rowData(sce)
+        crv <- cd$crv
+        ts_cd <- cd$tradeSeq
+        ts_rd <- S4Vectors::metadata(rd)$tradeSeq
+        if (is.null(ts_rd)) ts_rd <- rd$tradeSeq
+        if (is.null(crv)) stop("[", k, "] Missing slingshot curve metadata in colData(sce)$crv.")
+        if (is.null(ts_cd) || is.null(ts_rd)) stop("[", k, "] Missing tradeSeq metadata in SCE.")
+
+        dm <- ts_cd$dm
+        if (is.null(dm)) stop("[", k, "] Missing tradeSeq design matrix metadata.")
+
+        t_cols <- grep("^t[0-9]+$", colnames(dm), value = TRUE)
+        if (!length(t_cols)) stop("[", k, "] No lineage columns found in tradeSeq design matrix.")
+        ell <- if ("t1" %in% t_cols) 1L else as.integer(sub("^t", "", t_cols[1]))
+
+        pt_col <- paste0("pseudotime.lineage", ell)
+        cw_col <- paste0("cellWeights.lineage", ell)
+        if (!(pt_col %in% colnames(crv))) stop("[", k, "] Missing ", pt_col)
+
+        pt <- as.numeric(crv[[pt_col]])
+        w <- if (cw_col %in% colnames(crv)) as.numeric(crv[[cw_col]]) else rep(1, ncol(sce))
+        w[!is.finite(w)] <- 0
+
+        offset_col <- grep("offset", colnames(dm), value = TRUE)[1]
+        if (is.na(offset_col)) stop("[", k, "] No offset column found in tradeSeq design matrix.")
+
+        offset_vec <- as.numeric(dm[[offset_col]])
+        off_ref <- mean(offset_vec, na.rm = TRUE)
+
+        df_pred <- tradeSeq:::.getPredictRangeDf(dm, lineageId = ell, nPoints = nPoints)
+        t_pt <- df_pred[[paste0("t", ell)]]
+
+        pt_cols <- grep("^pseudotime\\.lineage", colnames(crv), value = TRUE)
+        pt_mat <- as.matrix(crv[, pt_cols, drop = FALSE])
+
+        X_pred <- tradeSeq:::predictGAM(
+            lpmatrix = ts_cd$X,
+            df = df_pred,
+            pseudotime = pt_mat
+        )
+
+        gene_i <- match(gene, rownames(sce))
+        beta_mat <- as.matrix(ts_rd$beta[[1]])
+        beta_i <- gene_i
+        if (!is.null(rownames(beta_mat)) && gene %in% rownames(beta_mat)) {
+            beta_i <- match(gene, rownames(beta_mat))
+        }
+        beta <- as.numeric(beta_mat[beta_i, , drop = TRUE])
+        names(beta) <- colnames(beta_mat)
+        Sigma <- as.matrix(ts_rd$Sigma[[gene_i]])
+
+        if (!is.null(names(beta)) && !is.null(colnames(X_pred)) && all(colnames(X_pred) %in% names(beta))) {
+            beta <- beta[colnames(X_pred)]
+        }
+        if (!is.null(rownames(Sigma)) && !is.null(colnames(X_pred)) && all(colnames(X_pred) %in% rownames(Sigma))) {
+            Sigma <- Sigma[colnames(X_pred), colnames(X_pred), drop = FALSE]
+        }
+        if (length(beta) != ncol(X_pred)) {
+            stop("[", k, "] Beta length does not match prediction design columns for gene: ", gene)
+        }
+        if (!all(dim(Sigma) == c(ncol(X_pred), ncol(X_pred)))) {
+            stop("[", k, "] Covariance dimensions do not match prediction design columns for gene: ", gene)
+        }
+
+        eta <- drop(X_pred %*% beta) + off_ref
+        se <- sqrt(pmax(0, rowSums((X_pred %*% Sigma) * X_pred)))
+
+        tm <- get_time_max(k)
+        off <- get_offset(k)
+        run <- factor(unname(key_labels[[k]]), levels = labels)
+
+        fit_list[[k]] <- data.frame(
+            key = k, run = run, pt = t_pt, x = pt_to_x(t_pt, tm, off),
+            mu = log1p(exp(eta)),
+            lo = log1p(exp(eta - se_factor * se)),
+            hi = log1p(exp(eta + se_factor * se))
+        )
+
+        counts <- SummarizedExperiment::assay(sce, "counts")
+        y <- as.numeric(counts[gene, ]) * exp(off_ref - offset_vec)
+
+        obs_df <- data.frame(
+            key = k, run = run, pt = pt,
+            x = pt_to_x(pt, tm, off), y = log1p(y)
+        )
+
+        nb <- min(nPoints, 200)
+        bin <- cut(pt, breaks = seq(0, 1, length.out = nb + 1),
+                   include.lowest = TRUE, right = TRUE)
+
+        pt_mid <- tapply(pt, bin, mean, na.rm = TRUE)
+        y_mean <- tapply(seq_along(y), bin, function(ii) wmean(y[ii], w[ii]))
+
+        mean_df <- data.frame(
+            key = k, run = run,
+            pt_mid = as.numeric(pt_mid),
+            x_mid = pt_to_x(as.numeric(pt_mid), tm, off),
+            mean_norm_log1p = log1p(as.numeric(y_mean))
+        )
+        mean_df <- mean_df[
+            is.finite(mean_df$pt_mid) & is.finite(mean_df$mean_norm_log1p), ,
+            drop = FALSE
+        ]
+
+        obs_list[[k]] <- list(points = obs_df, means = mean_df)
+    }
+
+    fit_all <- do.call(rbind, fit_list)
+    obs_pts <- do.call(rbind, lapply(obs_list, `[[`, "points"))
+    obs_mea <- do.call(rbind, lapply(obs_list, `[[`, "means"))
+
+    if (trim_before_zero) {
+        fit_all <- fit_all[fit_all$x >= 0, , drop = FALSE]
+        obs_pts <- obs_pts[obs_pts$x >= 0, , drop = FALSE]
+        obs_mea <- obs_mea[obs_mea$x_mid >= 0, , drop = FALSE]
+    }
+
+    if (!is.null(point_tmax_map)) {
+        cutoff <- vapply(as.character(obs_pts$key),
+                         function(k) map_num(point_tmax_map, k), numeric(1))
+        obs_pts <- obs_pts[is.na(cutoff) | obs_pts$x <= cutoff, , drop = FALSE]
+
+        cutoff <- vapply(as.character(obs_mea$key),
+                         function(k) map_num(point_tmax_map, k), numeric(1))
+        obs_mea <- obs_mea[is.na(cutoff) | obs_mea$x_mid <= cutoff, , drop = FALSE]
+    }
+
+    sub_txt <- NULL
+    if (!is.null(q_by_gene) && gene %in% names(q_by_gene)) {
+        qv <- unname(q_by_gene[gene])
+        if (is.finite(qv)) sub_txt <- paste0("FDR = ", formatC(qv, format = "fg", digits = 3))
+    }
+
+    if (is.null(ylim)) {
+        ylo <- min(c(fit_all$lo, obs_mea$mean_norm_log1p,
+                     if (!omit_points) obs_pts$y), na.rm = TRUE)
+        yhi <- max(c(fit_all$hi, obs_mea$mean_norm_log1p,
+                     if (!omit_points) obs_pts$y), na.rm = TRUE)
+
+        if (is.finite(ylo) && is.finite(yhi)) {
+            pad <- 0.04 * (yhi - ylo)
+            if (!is.finite(pad) || pad == 0) pad <- 0.2
+            ylim <- c(max(0, ylo - pad), 1.3 * (yhi + pad))
+        } else {
+            ylim <- c(0, 1)
+        }
+    }
+
+    ylim[2] <- 1.4 * max(fit_all$mu, na.rm = TRUE)
+
+    if (plot_normalized_pt) {
+        x_title <- "Pseudotime"
+        x_breaks <- x_labels <- seq(0, 1, by = 0.2)
+    } else {
+        x_title <- paste0("Time", if (!is.null(time_unit)) paste0(" (", time_unit, ")") else "")
+        if (is.null(x_tick_labels)) {
+            tmax <- max(vapply(keys, get_time_max, numeric(1)), na.rm = TRUE)
+            x_tick_labels <- seq(0, tmax, by = x_tick_step)
+        }
+        x_breaks <- x_labels <- x_tick_labels
+    }
+
+    if (is.null(xlim)) {
+        xlim <- range(c(fit_all$x, obs_mea$x_mid,
+                        if (!omit_points) obs_pts$x), na.rm = TRUE)
+    }
+
+    oob_fun <- if (requireNamespace("scales", quietly = TRUE))
+        scales::squish else function(x, ...) x
+
+    p <- ggplot2::ggplot()
+
+    if (!omit_points) {
+        if (color_points_by_run) {
+            p <- p + ggplot2::geom_point(
+                data = obs_pts, ggplot2::aes(x, y, colour = run),
+                size = points_size, alpha = points_alpha
+            )
+        } else {
+            p <- p + ggplot2::geom_point(
+                data = obs_pts, ggplot2::aes(x, y),
+                size = points_size, alpha = points_alpha, colour = points_color
+            )
+        }
+    }
+
+    p +
+        ggplot2::geom_ribbon(
+            data = fit_all, ggplot2::aes(x, ymin = lo, ymax = hi, fill = run),
+            alpha = ribbon_alpha, colour = NA
+        ) +
+        ggplot2::geom_line(
+            data = fit_all, ggplot2::aes(x, mu, colour = run),
+            linewidth = line_width
+        ) +
+        ggplot2::geom_point(
+            data = obs_mea, ggplot2::aes(x_mid, mean_norm_log1p, colour = run),
+            shape = 21, fill = "white", size = 3.2, stroke = 0.9
+        ) +
+        ggplot2::scale_colour_manual(
+            values = setNames(colours[keys], labels), name = "Run"
+        ) +
+        ggplot2::scale_fill_manual(
+            values = setNames(fill_cols[keys], labels), name = "Run"
+        ) +
+        ggplot2::scale_y_continuous(
+            breaks = if (requireNamespace("scales", quietly = TRUE))
+                scales::pretty_breaks(n = ny_ticks) else ggplot2::waiver(),
+            name = "Expression"
+        ) +
+        ggplot2::scale_x_continuous(
+            breaks = x_breaks, labels = x_labels, limits = xlim, oob = oob_fun
+        ) +
+        ggplot2::coord_cartesian(expand = FALSE, ylim = ylim) +
+        ggplot2::labs(
+            title = if (show_title) gene else NULL,
+            subtitle = if (show_title) sub_txt else NULL,
+            x = x_title, y = "Expression"
+        ) +
+        ggplot2::theme_minimal(base_size = axis_text_size) +
+        ggplot2::theme(
+            panel.grid.minor = ggplot2::element_blank(),
+            panel.grid.major.x = ggplot2::element_line(colour = "grey88"),
+            panel.grid.major.y = ggplot2::element_line(colour = "grey88"),
+            axis.text = ggplot2::element_text(colour = "black", size = axis_text_size),
+            axis.title = ggplot2::element_text(colour = "black", size = axis_title_size),
+            plot.title = ggplot2::element_text(face = "bold", hjust = 0, colour = "black"),
+            plot.subtitle = ggplot2::element_text(size = axis_text_size, colour = "black"),
+            legend.position = if (show_legend) "right" else "none"
+        )
+}
+
 plot_tradeSeq_gene_multirun_pub <- function(
   gene,
-  gamList_ls, sce_ls, counts_sub_ls, PT_ls, sf_ls,
+  sce_ls, counts_sub_ls, PT_ls, sf_ls,
   CW_ls = NULL,                    # optional named list of cellWeights per run (nCells x 1 ok)
   q_by_gene = NULL,
 
-  keys = NULL,                     # which runs to include; default = names(gamList_ls)
+  keys = NULL,                     # which runs to include; default = names(sce_ls)
   key_labels = NULL,               # optional named vector/list mapping key -> legend label
 
   # time handling
@@ -539,14 +943,13 @@ plot_tradeSeq_gene_multirun_pub <- function(
   # -----------------------------
   # 0) keys + basic checks
   # -----------------------------
-  if (is.null(keys)) keys <- names(gamList_ls)
+  if (is.null(keys)) keys <- names(sce_ls)
 
   keys <- intersect(
     keys,
     Reduce(
       intersect,
       list(
-        names(gamList_ls),
         names(sce_ls),
         names(counts_sub_ls),
         names(PT_ls),
@@ -556,7 +959,7 @@ plot_tradeSeq_gene_multirun_pub <- function(
   )
 
   if (!length(keys)) {
-    stop("No overlapping keys across gamList_ls/sce_ls/counts_sub_ls/PT_ls/sf_ls.")
+    stop("No overlapping keys across sce_ls/counts_sub_ls/PT_ls/sf_ls.")
   }
 
   # keep only runs where gene exists
@@ -565,14 +968,14 @@ plot_tradeSeq_gene_multirun_pub <- function(
       keys,
       function(k) {
         gene %in% rownames(counts_sub_ls[[k]]) &&
-          !is.null(gamList_ls[[k]][[gene]])
+          gene %in% rownames(sce_ls[[k]])
       },
       logical(1)
     )
   ]
 
   if (!length(keys)) {
-    stop("Gene not found in counts_sub or gamList for any provided key.")
+    stop("Gene not found in counts_sub and SCE for any provided key.")
   }
 
   # labels
@@ -686,7 +1089,6 @@ plot_tradeSeq_gene_multirun_pub <- function(
 
   for (k in keys) {
 
-    gm <- gamList_ls[[k]][[gene]]
     sce <- sce_ls[[k]]
     counts_sub <- counts_sub_ls[[k]]
     PT <- PT_ls[[k]]
@@ -727,23 +1129,16 @@ plot_tradeSeq_gene_multirun_pub <- function(
     s_ref <- exp(mean(log(sf_vec), na.rm = TRUE))
     off_ref <- log(s_ref)
 
-    # fitted curve in PT space (0..1), then convert x to real time if desired
-    df_pred <- tradeSeq:::.getPredictRangeDf(
-      dm,
+    pr <- predict_tradeSeq_sce_with_se(
+      sce = sce,
+      gene = gene,
       lineageId = ell,
-      nPoints = nPoints
+      nPoints = nPoints,
+      off_ref = off_ref,
+      se_factor = se_factor,
+      return_log1p = TRUE
     )
-
-    t_col <- paste0("t", ell)
-    t_pt <- df_pred[[t_col]]
-
-    pr <- predict(
-      gm,
-      newdata = df_pred,
-      type = "link",
-      se.fit = TRUE,
-      offset = rep(off_ref, nrow(df_pred))
-    )
+    t_pt <- pr$pt
 
     tm <- get_time_max(k)
     off <- get_offset(k)
@@ -756,9 +1151,9 @@ plot_tradeSeq_gene_multirun_pub <- function(
       ),
       pt = t_pt,
       x = pt_to_x(t_pt, tm, off),
-      mu = log1p(exp(pr$fit)),
-      lo = log1p(exp(pr$fit - se_factor * pr$se.fit)),
-      hi = log1p(exp(pr$fit + se_factor * pr$se.fit))
+      mu = pr$mu,
+      lo = pr$lo,
+      hi = pr$hi
     )
 
     fit_list[[k]] <- fit_df
@@ -2716,7 +3111,7 @@ plot_cluster_pair_representative_genes <- function(
   row_cell_type = "K562a",
   col_cell_type = "THP1",
   cluster_col = "cluster",
-  gamList_ls, sce_ls, counts_sub_ls, PT_ls, sf_ls,
+  sce_ls, counts_sub_ls, PT_ls, sf_ls,
   CW_ls = NULL,
   colours = c(THP1 = "#222021", K562a = "#386cb0"),
   cluster_palette = NULL,
@@ -2982,7 +3377,6 @@ plot_cluster_pair_representative_genes <- function(
       p <- suppressMessages(
         suppressWarnings(
           plot_tradeSeq_gene_multirun_pub(
-            gamList_ls = gamList_ls,
             sce_ls = sce_ls,
             counts_sub_ls = counts_sub_ls,
             PT_ls = PT_ls,

@@ -61,10 +61,14 @@ Per-experiment differences:
 
 | Experiment / fit | Input directory | `n_points` | Legacy aliases |
 | --- | --- | --- | --- |
-| K562 + TNFa | `sc-K562-1e4_to_tradeSeq.fixed` | 9 | old `asso_df.1trajectory.csv`, `sig_df.1trajectory.csv`, plus the historical SCE alias |
+| K562 + TNFa | `sc-K562-1e4_to_tradeSeq.fixed` | 9 | old `asso_df.1trajectory.csv`, `sig_df.1trajectory.csv` |
 | K562 + TNFa + puromycin | `sc-K562-1e6-to-tradeSeq.fixed` | 9 | none in the active notebook |
-| THP1 + K562 + LPS, K562 subset | `sc-K562_to_tradeSeq.fixed` | 6 | K562 expanded CSV aliases and `sce.knots8.rds` |
-| THP1 + K562 + LPS, THP1 subset | `sc-THP1_to_tradeSeq.fixed` | 6 | THP1 expanded CSV aliases and `sce.knots8.rds` |
+| THP1 + K562 + LPS, K562 subset | `sc-K562_to_tradeSeq.fixed` | 6 | K562 expanded CSV aliases |
+| THP1 + K562 + LPS, THP1 subset | `sc-THP1_to_tradeSeq.fixed` | 6 | THP1 expanded CSV aliases |
+
+The final nknots = 8 SCE is written only as `sce.1trajectory.nknots8.rds`; the
+former duplicate copies (`sce.1trajectory.nknots8.csv`, `sce.knots8.rds`) are
+no longer written or read.
 
 ## Current Input/Output Contract
 

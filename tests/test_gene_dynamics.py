@@ -35,6 +35,42 @@ def test_prepare_tradeseq_inputs_writes_expected_files(tmp_path):
     assert libs.to_dict(orient="list") == {"cell_id": ["c0", "c1"], "libsize_full": [4, 3]}
 
 
+def _counts_lines(path):
+    import gzip
+
+    with gzip.open(path, "rt") as handle:
+        return handle.read().splitlines()
+
+
+def test_prepare_tradeseq_inputs_writes_integer_valued_float_counts_as_integers(tmp_path):
+    adata = _adata()
+    adata.layers["counts"] = adata.layers["counts"].astype(float)
+
+    paths = _gene_dynamics.prepare_tradeseq_inputs(adata, tmp_path, tag="")
+
+    assert _counts_lines(paths["counts"]) == [",c0,c1", "g0,1,0", "g1,0,2", "g2,3,1"]
+
+
+def test_prepare_tradeseq_inputs_keeps_non_integer_layers_as_floats(tmp_path):
+    adata = _adata()
+    adata.layers["cpm"] = np.array([[0.5, 0.0, 3.0], [0.0, 2.0, 1.25]])
+
+    paths = _gene_dynamics.prepare_tradeseq_inputs(adata, tmp_path, layer="cpm", tag="")
+
+    assert _counts_lines(paths["counts"]) == [",c0,c1", "g0,0.5,0.0", "g1,0.0,2.0", "g2,3.0,1.25"]
+
+
+def test_prepare_tradeseq_inputs_writes_sparse_float_counts_as_integers(tmp_path):
+    import scipy.sparse as sp
+
+    adata = _adata()
+    adata.layers["counts"] = sp.csr_matrix(adata.layers["counts"].astype(float))
+
+    paths = _gene_dynamics.prepare_tradeseq_inputs(adata, tmp_path, tag="")
+
+    assert _counts_lines(paths["counts"]) == [",c0,c1", "g0,1,0", "g1,0,2", "g2,3,1"]
+
+
 def test_fit_gene_dynamics_can_prepare_inputs_without_running_backend(tmp_path):
     adata = _adata()
 

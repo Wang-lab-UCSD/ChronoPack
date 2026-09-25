@@ -162,18 +162,35 @@ fit_tradeseq_sce <- function(counts_sub, pseudotime, cell_weights, offset,
   if (nrow(cell_weights) != ncol(counts_sub)) {
     stop("cell_weights must have one row per cell.")
   }
-  tradeSeq::fitGAM(
-    counts = counts_sub,
-    genes = genes,
-    pseudotime = pseudotime,
-    cellWeights = cell_weights,
-    offset = offset,
-    nknots = nknots,
-    sce = TRUE,
-    parallel = parallel,
-    BPPARAM = BiocParallel::MulticoreParam(workers = workers),
-    verbose = verbose
-  )
+  bpparam <- BiocParallel::MulticoreParam(workers = workers)
+  # Passing genes = NULL overrides tradeSeq's seq_len(nrow(counts)) default and
+  # fits zero genes, so only forward genes when a subset is requested.
+  if (is.null(genes)) {
+    tradeSeq::fitGAM(
+      counts = counts_sub,
+      pseudotime = pseudotime,
+      cellWeights = cell_weights,
+      offset = offset,
+      nknots = nknots,
+      sce = TRUE,
+      parallel = parallel,
+      BPPARAM = bpparam,
+      verbose = verbose
+    )
+  } else {
+    tradeSeq::fitGAM(
+      counts = counts_sub,
+      genes = genes,
+      pseudotime = pseudotime,
+      cellWeights = cell_weights,
+      offset = offset,
+      nknots = nknots,
+      sce = TRUE,
+      parallel = parallel,
+      BPPARAM = bpparam,
+      verbose = verbose
+    )
+  }
 }
 
 association_df_single <- function(sce, n_points = 9) {

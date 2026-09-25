@@ -478,19 +478,19 @@ chronopack_dimred_config <- function(root_puro, root_k562a, root_lps) {
       dir = file.path(root_k562a, "intmd", "sc-K562-1e4_to_tradeSeq.fixed"),
       asso = c("asso_df.1trajectory.nknots4.csv", "asso_df.1trajectory.csv"),
       sig = c("sig_df.1trajectory.nknots4.csv", "sig_df.1trajectory.csv"),
-      sce = c("sce.1trajectory.nknots8.rds", "sce.1trajectory.nknots8.csv")
+      sce = c("sce.1trajectory.nknots8.rds")
     ),
     K562b = list(
       dir = file.path(root_lps, "intmd", "sc-K562_to_tradeSeq.fixed"),
       asso = c("asso_df.1trajectory.nknots4.csv", "asso_df.k562.1trajectory.nknots4.expanded.csv"),
       sig = c("sig_df.1trajectory.nknots4.csv", "sig_df.k562.1trajectory.nknots4.expanded.csv"),
-      sce = c("sce.1trajectory.nknots8.rds", "sce.knots8.rds")
+      sce = c("sce.1trajectory.nknots8.rds")
     ),
     THP1 = list(
       dir = file.path(root_lps, "intmd", "sc-THP1_to_tradeSeq.fixed"),
       asso = c("asso_df.1trajectory.nknots4.csv", "asso_df.thp1.1trajectory.nknots4.expanded.csv"),
       sig = c("sig_df.1trajectory.nknots4.csv", "sig_df.thp1.1trajectory.nknots4.expanded.csv"),
-      sce = c("sce.1trajectory.nknots8.rds", "sce.knots8.rds")
+      sce = c("sce.1trajectory.nknots8.rds")
     )
   )
 }

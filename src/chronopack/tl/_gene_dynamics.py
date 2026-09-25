@@ -289,6 +289,15 @@ def tag_bias_exclusion_genes(corr):
     return set(corr.index[corr["tag_bias_candidate"] == True].astype(str).tolist())
 
 
+def _is_integer_valued(matrix):
+    values = matrix.data if sp.issparse(matrix) else np.asarray(matrix)
+    if np.issubdtype(values.dtype, np.integer):
+        return True
+    if not np.issubdtype(values.dtype, np.floating):
+        return False
+    return bool(np.all(np.isfinite(values)) and np.array_equal(values, np.round(values)))
+
+
 def prepare_tradeseq_inputs(
     adata,
     output_dir,
@@ -317,6 +326,11 @@ def prepare_tradeseq_inputs(
     cells = adata.obs_names.astype(str).to_numpy()
     genes = adata.var_names.astype(str).to_numpy()
     matrix_gc = matrix.T if matrix.shape[0] == len(cells) else matrix
+    # Counts are usually stored as float64; writing them as integers gives the
+    # same values to the R reader (which casts to integer) but is much faster
+    # to format and parse. Non-integer layers keep the float representation.
+    if _is_integer_valued(matrix_gc):
+        matrix_gc = matrix_gc.astype(np.int64)
 
     if sp.issparse(matrix_gc):
         counts_df = pd.DataFrame.sparse.from_spmatrix(matrix_gc, index=genes, columns=cells)

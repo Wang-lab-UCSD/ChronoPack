@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from chronopack._core import validate_adata
+from chronopack._core import validate_adata, validate_preprocessed_adata
 from ._preprocessing import (
     TIME_GROUP_CATEGORIES,
     add_time_metadata,
+    annotate_qc_metrics,
+    filter_cells_by_qc,
     filter_low_count_genes,
     filter_technical_genes,
+    initialize_expression_layers,
     load_time_tagged_anndata,
     map_time_to_group,
     read_time_tagged_dge,
@@ -33,14 +36,18 @@ validate = validate_adata
 __all__ = [
     "TIME_GROUP_CATEGORIES",
     "add_time_metadata",
+    "annotate_qc_metrics",
+    "filter_cells_by_qc",
     "filter_low_count_genes",
     "filter_technical_genes",
+    "initialize_expression_layers",
     "load_time_tagged_anndata",
     "map_time_to_group",
     "read_time_tagged_dge",
     "read_h5ad",
     "score_cell_cycle",
     "validate",
+    "validate_preprocessed_adata",
     "write_h5ad",
 ]
 

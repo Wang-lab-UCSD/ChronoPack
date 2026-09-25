@@ -200,14 +200,9 @@ def run_wot_transport_workflow(
         kwargs = dict(init_pos="spectral", copy=False, random_state=umap_random_state)
         if umap_kwargs:
             kwargs.update(umap_kwargs)
-        original_umap = adata.obsm["X_umap"].copy() if "X_umap" in adata.obsm else None
         original_umap_uns = adata.uns["umap"].copy() if "umap" in adata.uns and hasattr(adata.uns["umap"], "copy") else adata.uns.get("umap")
         _scanpy().tl.umap(adata, neighbors_key=graph_key, **kwargs)
         adata.obsm[umap_key] = adata.obsm["X_umap"].copy()
-        if original_umap is not None:
-            adata.obsm["X_umap"] = original_umap
-        else:
-            del adata.obsm["X_umap"]
         if original_umap_uns is not None:
             adata.uns["umap"] = original_umap_uns
     return CellStateTrajectoryResult(

@@ -75,6 +75,18 @@ Updated: 2026-09-24
 
 ### Deferred fixes (user may address later)
 
+- **APPLIED 2026-09-25 (user approved):** both `cluster_gene_trajectories`
+  calls now pass `reference=cluster_universe` in the template, frozen r6,
+  maintained r7 and repo-root DimRed notebooks (older failed run dirs not
+  edited). Previous DimRed outputs were moved to
+  `k562-tnfa-puromycin.hg38/self_contained_outputs.reference_sig_20260925/` in
+  both runs; DimRed rerun as jobs 932275 (frozen) / 932276 (maintained).
+  Verified: both passed; six broad counts match expected; all five cluster
+  columns 100% identical to the template for the 5,091 non-puro genes in both
+  envs (broad and fine, induced and repressed); K562_puro rows all -1; frozen and
+  maintained identical, including centroid distances (max diff 0). Centroid
+  distances differ from the template by at most 0.0012 (reference scaling changed).
+  Background kept below.
 - **Puromycin still influences DimRed clustering via the reference.** In
   `DimensionalityReduction&Clustering.self_contained.ipynb` (template, both run
   copies, repo root), `cluster_universe` excludes `cell_type == "K562_puro"`,
@@ -97,10 +109,52 @@ Updated: 2026-09-24
   - The fine repressed partition is therefore fragile at k=16. Changing the
     reference will shift the ratio for the frozen run too, so compare fine
     partitions (not just broad counts) against the manuscript after any fix.
+  - What-if test (job 932273, `verification_runs/dimred_reference_exclusion_test_20260925/`):
+    rerunning `chronopack_cluster_trajectory_matrix_to_files` with K562_puro
+    rows removed from the reference (5,091 rows), using the notebook's k rules
+    (broad k=3, fine k = max elbow_score), reproduces the template exactly for
+    both envs: broad ARI 1.0 with identical sizes (induced 1478/474/472,
+    repressed 1521/897/249), same fine k (17 induced, 16 repressed), fine ARI
+    1.0; frozen and maintained assignments identical. Not compared: centroid
+    distances and PCA embeddings, which use the scaled features.
 - Puromycin trajectory clusters 2 -> 3: `regress_out` missing from the
   `corrected` layer (see the puromycin section above).
 - Frozen puromycin tradeSeq screen differs from the template (see the
   TradeSeqFits results); user chose not to pursue it.
+
+### DimRed what-if tests on the maintained run (not applied)
+
+Baseline: alpha = 0.1, `reference=cluster_universe`. Scripts and outputs in
+`verification_runs/dimred_alpha_test_20260925/` (job 932280) and
+`verification_runs/dimred_partition_scaling_test_20260925/` (job 932282).
+
+| Variant | Induced broad ARI / genes moved | Repressed broad ARI / genes moved | Fine k (ind/rep) | Fine ARI (ind/rep) |
+|---|---|---|---|---|
+| alpha = 0.25 | 0.934 / 75 (3.1%) | 0.799 / 186 (7.0%) | 15 / 16 (was 17 / 16) | 0.720 / 0.780 |
+| per-partition scaling, alpha = 0.1 | 0.936 / 71 (2.9%) | 0.273 / 828 (31.0%) | 16 / 15 | 0.730 / 0.787 |
+
+- Per-partition scaling is equivalent to shared scaling with a smaller alpha
+  (induced ~0.058, repressed ~0.029), because the partitions' own slope/shape
+  scale ratios (1.28, 1.82) exceed the shared reference's (0.95). So it weights
+  slope less, the opposite direction from alpha = 0.25.
+- Repressed per-partition: trend-down_2 splits (608 genes join trend-down_1,
+  289 stay), and 219 trend-down_1 genes join transient-down.
+
+### Fine k depends on the K grid (TESTING.ipynb comparison)
+
+- `~/projects/chrono_seq/analyses/k562-tnfa-puromycin.hg38/notebooks/TESTING.ipynb`
+  reads the template's exported `gene_trajectory_fit[_ddt]_significant_z.csv`,
+  scales over all 6,723 rows (like the old `reference=sig`), and clusters with
+  `K_grid = 2:50`; the pipeline uses `K_GRID = range(2, 101)`. Broad k=3 is the
+  same `cutree` of the same tree, so the broad clusters match.
+- Its features equal the pipeline R path to ~1e-12, the Ward trees are identical,
+  and the package's metrics with K 2:50 give the same fine k as TESTING (11
+  induced, 10 repressed) versus 17/16 on 2:100.
+- Reason: in `calculate_trajectory_clustering_metrics`,
+  `resolution = (WSS_minK - WSS) / (WSS_minK - WSS_maxK)` and
+  `k_norm = (K - min K) / (max K - min K)` are both normalized to the grid
+  endpoints, so `elbow_score` (and `k_resolution`) change with the grid's upper
+  bound. The induced elbow at 2:50 is nearly flat (k=11 0.59579 vs k=10 0.59578).
 
 ### PrepareForTradeSeq / tradeSeq input writer
 

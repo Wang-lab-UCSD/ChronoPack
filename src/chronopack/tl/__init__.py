@@ -11,11 +11,16 @@ __all__ = [
     "cluster_cells_to_trajectories",
     "compute_terminal_fate_probabilities",
     "fit_gene_dynamics",
+    "identify_tag_bias_candidates",
+    "filter_tag_bias_candidates",
+    "tag_bias_exclusion_genes",
+    "merge_trajectory_graphs",
     "align_gene_trajectories",
     "association_paths_from_dimred_roots",
     "compute_gene_trajectory_descriptors",
     "cluster_gene_trajectories",
     "sce_paths_from_dimred_roots",
+    "standardize_gene_trajectories",
     "mode_conservation",
     "mode_switchers",
 ]
@@ -38,16 +43,17 @@ def __getattr__(name):
         from ._mode_conservation import ModeConservationResult
 
         return ModeConservationResult
-    if name == "fit_gene_dynamics":
-        from ._gene_dynamics import fit_gene_dynamics
+    if name in {"fit_gene_dynamics", "identify_tag_bias_candidates", "filter_tag_bias_candidates", "tag_bias_exclusion_genes"}:
+        from . import _gene_dynamics
 
-        return fit_gene_dynamics
+        return getattr(_gene_dynamics, name)
     if name in {
         "align_gene_trajectories",
         "association_paths_from_dimred_roots",
         "compute_gene_trajectory_descriptors",
         "cluster_gene_trajectories",
         "sce_paths_from_dimred_roots",
+        "standardize_gene_trajectories",
     }:
         from . import _gene_clustering
 
@@ -60,7 +66,12 @@ def __getattr__(name):
         from ._trajectories import get_trajectories
 
         return get_trajectories
-    if name in {"cluster_cells_to_trajectories", "cluster_cell_state_trajectories", "compute_terminal_fate_probabilities"}:
+    if name in {
+        "cluster_cells_to_trajectories",
+        "cluster_cell_state_trajectories",
+        "compute_terminal_fate_probabilities",
+        "merge_trajectory_graphs",
+    }:
         from . import _trajectories
 
         return getattr(_trajectories, name)

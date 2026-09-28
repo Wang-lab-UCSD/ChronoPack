@@ -77,7 +77,7 @@ def test_preprocess_notebooks_use_loader_and_qc_helper():
         assert "cp.io.annotate_qc_metrics" not in joined, path
         assert "cp.io.filter_cells_by_qc" not in joined, path
         assert "cp.io.initialize_expression_layers" not in joined, path
-        assert "cp.io.validate_preprocessed_adata" not in joined, path
+        assert "cp.io.validate_preprocessed_adata" in joined, path
 
 
 def test_wot_notebooks_use_workflow_helper():
@@ -116,9 +116,11 @@ def test_tradeseq_fit_notebooks_use_backend_entrypoint():
         "thp1-k562-lps.hg38.rep/TradeSeqFits.THP1.ipynb",
     ]:
         joined = "\n".join(_code_sources(path))
-        assert "run_tradeseq_single_lineage" in joined, path
-        assert "fit_tradeseq_sce(" not in joined, path
-        assert "fit_tradeseq_gamlist(" not in joined, path
+        assert "cp.tl.fit_gene_dynamics(" in joined, path
+        assert 'backend="tradeseq"' in joined, path
+        assert "run_tradeseq_single_lineage" not in joined, path
+        assert "source(" not in joined, path
+        assert "find_parent_with" not in joined, path
 
 
 def test_prepare_tradeseq_notebooks_use_gene_dynamics_backend():
@@ -129,9 +131,34 @@ def test_prepare_tradeseq_notebooks_use_gene_dynamics_backend():
     ]:
         joined = "\n".join(_code_sources(path))
         assert "cp.tl.fit_gene_dynamics" in joined, path
-        assert "gd.identify_tag_bias_candidates" in joined, path
-        assert "gd.filter_tag_bias_candidates" in joined, path
-        assert "gd.tag_bias_exclusion_genes" in joined, path
-        assert "gd.compute_smooth_correlations" not in joined, path
-        assert "gd.refilter_tag_bias_candidates" not in joined, path
+        assert "cp.tl.identify_tag_bias_candidates" in joined, path
+        assert "cp.tl.filter_tag_bias_candidates" in joined, path
+        assert "cp.tl.tag_bias_exclusion_genes" in joined, path
+        assert "gd." not in joined, path
+        assert "compute_smooth_correlations" not in joined, path
+        assert "refilter_tag_bias_candidates" not in joined, path
         assert "WriteTradeSeqInputsFromAnnData" not in joined, path
+
+
+PIPELINE_NOTEBOOKS = NOTEBOOKS + [
+    "k562-tnfa.hg38.rep/TradeSeqFits.ipynb",
+    "k562-tnfa-puromycin.hg38/TradeSeqFits.ipynb",
+    "thp1-k562-lps.hg38.rep/TradeSeqFits.K562.ipynb",
+    "thp1-k562-lps.hg38.rep/TradeSeqFits.THP1.ipynb",
+    "k562-tnfa-puromycin.hg38/DimensionalityReduction&Clustering.self_contained.ipynb",
+]
+
+
+def test_pipeline_notebooks_use_only_the_installed_public_api():
+    import re
+
+    for path in PIPELINE_NOTEBOOKS:
+        nb = json.loads((ROOT / path).read_text())
+        assert nb["metadata"]["kernelspec"]["language"] == "python", path
+        joined = "\n".join(_code_sources(path))
+        assert "import chronopack as cp" in joined, path
+        assert "sys.path" not in joined, path
+        assert not re.search(r"(from|import) chronopack(\.\w+)*\._\w+", joined), path
+        assert not re.search(r"from chronopack(\.\w+)* import _", joined), path
+        assert not re.search(r"(from|import) chronopack\.(preprocessing|trajectories|tradeseq)\b", joined), path
+        assert not re.search(r"^\s*def \w+", joined, re.M), path

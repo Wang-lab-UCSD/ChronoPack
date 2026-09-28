@@ -73,6 +73,89 @@ Updated: 2026-09-24
   excludes `K562_puro`, so the final clustering is unaffected.
 
 
+### 2026-09-25: repo-root notebooks refactored into public-API clients
+
+Goal (user): repo-root experiment notebooks should look like a normal user
+workflow (`import chronopack as cp`, public `cp.io` / `cp.tl` / `cp.pl` only),
+keep the Sep 21 cleanups, include this session's maintained-run fixes, and
+behave the same as the maintained run. Guidance followed:
+`mixed_R_python_package_architecture.md` §12,
+`ChronoPack_package_refactor_guide.md` §3/§5/§11-12,
+`additional_notes_on_mixed_python_R_architecture.md` §3-5/§26.
+
+- Package (tests: 63 passed in both envs; only the pre-existing cp.io export
+  test fails): new public `cp.tl.identify_tag_bias_candidates`,
+  `cp.tl.filter_tag_bias_candidates`, `cp.tl.tag_bias_exclusion_genes`,
+  `cp.tl.merge_trajectory_graphs` (per-cell-type WOT graphs -> one graph),
+  `cp.tl.standardize_gene_trajectories` (fit / fit_z / ddt_z exports) and
+  `cp.pl.cell_trajectories.fate_probabilities` (still writes the fate_* obs
+  columns, as before).
+- Notebooks (15 pipeline notebooks): removed `sys.path` repo walk-ups, private
+  imports (`chronopack.tl._trajectories`, `chronopack.tl._gene_dynamics`) and the
+  `chronopack.preprocessing` shim; no function definitions remain; kernelspec
+  set to `python3`; restored `cp.io.validate_preprocessed_adata` checks. The 4 R
+  TradeSeqFits notebooks are now Python notebooks calling
+  `cp.tl.fit_gene_dynamics(input_dir=..., backend="tradeseq", ...)`, which runs
+  the same bundled `run_tradeseq_single_lineage`. K562+TNF Preprocess applies
+  the manuscript cluster removals by barcode
+  (`k562-tnfa.hg38.rep/exclude_leiden_clusters.manuscript.csv`, whitelisted in
+  `.gitignore`). DimRed uses explicit SCE paths instead of the
+  `*_paths_from_dimred_roots` helpers and no association-CSV migration shim.
+- Bugs fixed in the Sep 21 notebooks (never run end to end before):
+  `fate_umap_2x2_scanpy(..., embedding_basis=...)` (wrong keyword) and
+  `basis='X_ot_umap'` in K562+TNF PrepareForTradeSeq after the `ot_umap` rename.
+- Known deviations kept on purpose: `cp.pl.cell_trajectories.mass_retention`
+  and `fate_probabilities` write obs columns used downstream (plotting mutates
+  state); THP1 cell_type and trajectory-cluster names still come from Leiden
+  label numbers; `DimensionalityReduction&Clustering.cluster_visualization.ipynb`
+  expects genes in `.var` of `gene_trajectory_clusters.h5ad` and a different
+  output dir (stale vs current DimRed); only its kernelspec was changed.
+- Verification: env `chronopack-install-test` = clone of `chronopack` with a
+  fresh non-editable wheel (`verification_runs/install_test_20260925/`).
+  New run `full_pipeline_maintained_chronopack_20260925_r8` via
+  `verification_runs/submit_pipeline_user_api.py`, compared stage by stage with
+  the maintained r7 run (`verification_runs/compare_runs.py`, logs in
+  `verification_runs/compare_logs/`). Every stage job confirmed ChronoPack was
+  imported from the installed wheel in site-packages.
+  - PreprocessDatasets (933386-933388): puromycin and THP1/K562 identical to r7;
+    K562+TNF same cells/genes/order, counts/cpm and kNN graphs identical, other
+    values within ~1e-13. K562+TNF `doublet_score` differs from r7 by up to
+    0.014 but is identical to the Sep 19 manuscript template (r6/r7 differ from
+    the template; likely the in-place subset in `cp.io.filter_cells_by_qc`).
+    `predicted_doublet` identical everywhere.
+  - GetTrajectories (933394-933396): `traj_clusters`, fate probabilities,
+    terminal-cell distributions and mass retention identical to r7 for all
+    three experiments. K562+TNF `S` graph equals the template exactly; r6/r7
+    differ from the template in 4 edges over 2 cells (near-tied top-k).
+    `X_umap` differs by design (Sep 21 notebooks keep the Scanpy UMAP there).
+  - PrepareForTradeSeq (933409-933411): all tradeSeq inputs for the four
+    branches have identical genes, cells and parsed values to r7 (counts are
+    now integer text; K562+TNF full counts 9.8 MB vs 11 MB).
+  - TradeSeqFits as Python notebooks via `cp.tl.fit_gene_dynamics(backend="tradeseq")`
+    (933442-933445): all four branches identical to r7 with max diff exactly 0
+    (association stats, significant sets and order, nknots=8 SCE coefficients
+    and rowData); screen SCEs present, no duplicate SCE copies. BiocParallel
+    forking under rpy2 works; runtimes match r7 (THP1 ~30 min, K562+TNF ~2 h).
+  - DimRed first attempt (933703) failed: `cp.tl.align_gene_trajectories` passed
+    `association_paths=None` to R, which rpy2 cannot convert (this path never
+    ran before because the old notebooks always passed the CSV shim). Fixed in
+    `src/chronopack/tl/_gene_clustering.py` (argument omitted when None; the R
+    default is NULL). Rebuilt wheel `install_test_20260925/dist_fix1/` installed
+    into `chronopack-install-test`; recorded in the run's `code_provenance.txt`.
+    Stages 1-4 used the first wheel (the change doesn't affect them). Rerun: job 933975.
+  - DimRed (933975): passed. Six broad counts match expected; `pc_df.new.csv`
+    has the same 6,725 rows, order and 31 columns as r7; every cluster column
+    (broad and fine, induced and repressed) and all association statistics are
+    identical; K562_puro rows all -1. Numeric descriptors and centroid distances
+    differ from r7 by at most ~1e-10 (floating point); exported fit / z-score
+    matrices and cluster metrics within 7e-11.
+  - Conclusion: the refactored repo-root notebooks, run against a normally
+    installed ChronoPack, reproduce the maintained r7 pipeline at every stage.
+  - `tests/test_pre_trade_refactor.py` updated to the new notebook structure
+    (public API only; Python TradeSeqFits; validation checks present) plus a new
+    test that pipeline notebooks use only the installed public API. 64 passed;
+    the only failure is still the pre-existing cp.io export test.
+
 ### Deferred fixes (user may address later)
 
 - **APPLIED 2026-09-25 (user approved):** both `cluster_gene_trajectories`

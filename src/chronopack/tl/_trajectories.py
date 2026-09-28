@@ -302,6 +302,34 @@ def embed_block(A, idx, n):
     return sparse.csr_matrix((A.data, (idx[A.row], idx[A.col])), shape=(n, n))
 
 
+def merge_trajectory_graphs(adata, graphs):
+    """Combine per-subset cell-cell graphs into one graph over ``adata.obs_names``.
+
+    ``graphs`` is an iterable of ``(obs_names, graph)`` pairs, where each square
+    sparse ``graph`` is ordered like its ``obs_names``. Used when transport maps
+    are computed separately per cell type. Subsets must not overlap.
+    """
+    obs_index = pd.Index(adata.obs_names)
+    n = adata.n_obs
+    merged = None
+    seen = pd.Index([])
+    for names, graph in graphs:
+        names = pd.Index(names)
+        if graph.shape != (len(names), len(names)):
+            raise ValueError(f"Graph shape {graph.shape} does not match {len(names)} obs_names.")
+        missing = names.difference(obs_index)
+        if len(missing):
+            raise ValueError(f"{len(missing)} obs_names are not in adata.obs_names.")
+        if len(seen.intersection(names)):
+            raise ValueError("Cell subsets passed to merge_trajectory_graphs overlap.")
+        seen = seen.append(names)
+        block = embed_block(graph, obs_index.get_indexer(names), n)
+        merged = block if merged is None else merged + block
+    if merged is None:
+        raise ValueError("merge_trajectory_graphs needs at least one graph.")
+    return merged.tocsr()
+
+
 def topk_csr_rows(M_csr, k=200, renorm=True, eps=1e-15):
     """Keep only top-k values per CSR row, optionally row-normalizing."""
     M = M_csr.tocsr()
@@ -756,6 +784,7 @@ __all__ = [
     "get_trajectories",
     "keep_topk",
     "mass_retention_plots_and_umap",
+    "merge_trajectory_graphs",
     "read_tmap",
     "run_wot_transport_workflow",
     "sparse_adjacency_from_tmats",

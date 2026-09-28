@@ -58,3 +58,37 @@ def test_clustering_result_assignments_are_indexed_series():
     assert isinstance(result.assignments[2], pd.Series)
     assert result.assignments[2].index.equals(obs_names)
     assert result.assignments[3].tolist() == [1, 2, 3]
+
+
+def test_standardize_gene_trajectories_matches_notebook_math():
+    import numpy as np
+    import pandas as pd
+    from anndata import AnnData
+
+    import chronopack as cp
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(4, 6)).astype(np.float32)
+    X[2] = 3.0  # constant row keeps SD 1
+    traj = AnnData(
+        X=X,
+        obs=pd.DataFrame(index=[f"g{i}_K562a" for i in range(4)]),
+        var=pd.DataFrame({"time": [0.0, 1.0, 2.5, 4.0, 6.0, 9.0]}, index=[f"t{i}" for i in range(6)]),
+    )
+
+    fit, fit_z, ddt_z = cp.tl.standardize_gene_trajectories(traj)
+
+    def z_row(M):  # verbatim from DimensionalityReduction&Clustering.self_contained.ipynb
+        M = M.astype(float)
+        mu = M.mean(axis=1, keepdims=True)
+        sd = M.std(axis=1, ddof=1, keepdims=True)
+        sd[(~pd.notna(sd)) | (sd == 0)] = 1
+        return (M - mu) / sd
+
+    time = traj.var["time"].to_numpy(dtype=float)
+    ddt = (traj.X[:, 1:] - traj.X[:, :-1]) / (time[1:] - time[:-1])
+    np.testing.assert_array_equal(fit.to_numpy(), traj.X)
+    np.testing.assert_array_equal(fit_z.to_numpy(), z_row(traj.X.copy()))
+    np.testing.assert_array_equal(ddt_z.to_numpy(), z_row(ddt))
+    assert list(ddt_z.columns) == list(traj.var_names[1:])
+    assert np.all(fit_z.iloc[2] == 0.0)

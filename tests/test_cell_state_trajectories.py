@@ -100,3 +100,61 @@ def test_cell_state_trajectory_result_supports_legacy_mapping_access():
     assert result["T_pruned"] is matrix
     assert result.as_dict()["T_sym"] is matrix
     assert set(result.keys()) == {"tmaps", "transitions_long", "tmats", "T_full", "T_pruned", "T_sym"}
+
+
+def test_merge_trajectory_graphs_matches_block_embedding():
+    import chronopack as cp
+    from chronopack.tl._trajectories import embed_block
+
+    adata = AnnData(
+        X=np.zeros((5, 1)),
+        obs=pd.DataFrame(index=["a0", "b0", "a1", "b1", "b2"]),
+        var=pd.DataFrame(index=["g0"]),
+    )
+    a_cells, b_cells = ["a0", "a1"], ["b0", "b1", "b2"]
+    A = sp.csr_matrix(np.array([[0.0, 1.0], [0.5, 0.5]], dtype=np.float32))
+    B = sp.csr_matrix(np.arange(9, dtype=np.float32).reshape(3, 3))
+
+    merged = cp.tl.merge_trajectory_graphs(adata, [(a_cells, A), (b_cells, B)])
+
+    idx = pd.Index(adata.obs_names)
+    expected = embed_block(A, idx.get_indexer(a_cells), 5) + embed_block(B, idx.get_indexer(b_cells), 5)
+    assert merged.dtype == expected.dtype
+    np.testing.assert_array_equal(merged.toarray(), expected.toarray())
+    assert merged[2, 0] == 0.5  # a1 -> a0
+    assert merged[4, 3] == 7.0  # b2 -> b1
+
+
+def test_merge_trajectory_graphs_rejects_overlapping_or_unknown_cells():
+    import pytest
+
+    import chronopack as cp
+
+    adata = AnnData(X=np.zeros((2, 1)), obs=pd.DataFrame(index=["c0", "c1"]), var=pd.DataFrame(index=["g0"]))
+    one = sp.csr_matrix([[1.0]])
+    with pytest.raises(ValueError, match="overlap"):
+        cp.tl.merge_trajectory_graphs(adata, [(["c0"], one), (["c0"], one)])
+    with pytest.raises(ValueError, match="not in adata.obs_names"):
+        cp.tl.merge_trajectory_graphs(adata, [(["cX"], one)])
+
+
+def test_fate_probabilities_plot_writes_fate_summaries(tmp_path, monkeypatch):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import chronopack as cp
+
+    adata = AnnData(
+        X=np.zeros((3, 1)),
+        obs=pd.DataFrame(index=["c0", "c1", "c2"]),
+        var=pd.DataFrame(index=["g0"]),
+        obsm={"ot_umap": np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
+              "terminal_fate_probs_traj": np.array([[1.0, 0.0], [0.5, 0.5], [0.2, 0.8]])},
+        uns={"terminal_fate_probs_traj_fates": ["0", "1"]},
+    )
+
+    cp.pl.cell_trajectories.fate_probabilities(adata, size=5)
+
+    np.testing.assert_allclose(adata.obs["fate_1"], [0.0, 0.5, 0.8])
+    np.testing.assert_allclose(adata.obs["fate_maxprob"], [1.0, 0.5, 0.8])
+    assert adata.obs["fate_entropy"].iloc[1] == np.float32(1.0)

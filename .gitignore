@@ -22,6 +22,8 @@
 !r/chronopackR/DESCRIPTION
 !src/**
 !tests/**
+# Barcode list read by k562-tnfa.hg38.rep/PreprocessDatasets.ipynb
+!k562-tnfa.hg38.rep/exclude_leiden_clusters.manuscript.csv
 
 __pycache__/
 *.py[cod]

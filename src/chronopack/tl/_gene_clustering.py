@@ -233,6 +233,10 @@ def align_gene_trajectories(
         work_dir = Path(output_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
     try:
+        # rpy2 cannot convert None; omit association_paths so R uses its NULL default.
+        optional = {}
+        if association_paths is not None:
+            optional["association_paths"] = _r_optional_path_dict(association_paths)
         r["chronopack_align_sce_trajectories_to_files"](
             _r_sce_dict({k: sce_dict[k] for k in keys}),
             str(work_dir),
@@ -240,9 +244,9 @@ def align_gene_trajectories(
             time_map=_r_named_vector({k: time_map[k] for k in keys}),
             offset_map=_r_named_vector({k: offset_map[k] for k in keys}),
             scale_map=_r_named_vector(scale_map),
-            association_paths=_r_optional_path_dict(association_paths),
             lineage_pick=int(lineage_pick),
             write_raw=True,
+            **optional,
         )
         fit = _read_matrix(work_dir / "trajectory_aligned_fit.csv")
         obs = pd.read_csv(work_dir / "trajectory_obs.csv", index_col=0)
@@ -472,6 +476,32 @@ def cluster_gene_trajectories(
     )
 
 
+def standardize_gene_trajectories(traj):
+    """Return fitted, row-standardized and derivative-standardized trajectories.
+
+    ``traj`` is the gene-trajectory AnnData from :func:`align_gene_trajectories`
+    (obs = gene-context trajectories, var = aligned time points). Returns
+    ``(fit, fit_z, ddt_z)`` DataFrames: the fitted curves, their row z-scores
+    (sample SD; constant rows keep SD 1), and z-scores of the forward-difference
+    time derivative, whose columns are the time points after the first.
+    """
+
+    def _z_row(M):
+        M = M.astype(float)
+        mu = M.mean(axis=1, keepdims=True)
+        sd = M.std(axis=1, ddof=1, keepdims=True)
+        sd[(~pd.notna(sd)) | (sd == 0)] = 1
+        return (M - mu) / sd
+
+    X = np.asarray(traj.X)
+    time = traj.var["time"].to_numpy(dtype=float)
+    ddt = (X[:, 1:] - X[:, :-1]) / (time[1:] - time[:-1])
+    fit = pd.DataFrame(X, index=traj.obs_names, columns=traj.var_names)
+    fit_z = pd.DataFrame(_z_row(X.copy()), index=traj.obs_names, columns=traj.var_names)
+    ddt_z = pd.DataFrame(_z_row(ddt), index=traj.obs_names, columns=traj.var_names[1:])
+    return fit, fit_z, ddt_z
+
+
 __all__ = [
     "GeneTrajectoryClusteringResult",
     "align_gene_trajectories",
@@ -480,4 +510,5 @@ __all__ = [
     "compute_gene_trajectory_descriptors",
     "dimred_config",
     "sce_paths_from_dimred_roots",
+    "standardize_gene_trajectories",
 ]

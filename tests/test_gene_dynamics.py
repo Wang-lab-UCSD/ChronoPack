@@ -133,3 +133,11 @@ def test_fit_gene_dynamics_writes_association_stats_with_mocked_backend(tmp_path
     sidecars = adata.uns[CHRONOPACK_UNS_KEY]["mock_fit"]["result_keys"]["sidecar"]
     assert sidecars["sce"].endswith("sce.rds")
     assert sidecars["sce_screen"].endswith("sce_screen.rds")
+
+
+def test_tag_bias_helpers_are_public_tl_api():
+    assert cp.tl.identify_tag_bias_candidates is _gene_dynamics.identify_tag_bias_candidates
+    assert cp.tl.filter_tag_bias_candidates is _gene_dynamics.filter_tag_bias_candidates
+    assert cp.tl.tag_bias_exclusion_genes is _gene_dynamics.tag_bias_exclusion_genes
+    for name in ["identify_tag_bias_candidates", "filter_tag_bias_candidates", "tag_bias_exclusion_genes"]:
+        assert name in cp.tl.__all__

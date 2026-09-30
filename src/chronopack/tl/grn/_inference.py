@@ -6,7 +6,7 @@ import json
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
@@ -32,9 +32,8 @@ class TargetGeneScoreResult:
     params: pd.DataFrame
     parameters: dict[str, Any] = field(default_factory=dict)
     provenance: dict[str, Any] = field(default_factory=dict)
-    sidecar_paths: dict[str, str] = field(default_factory=dict)
 
-    def write(self, output_dir: str | Path, *, prefix: str = "target_gene_scores") -> dict[str, str]:
+    def write(self, output_dir: str | Path, *, prefix: str = "target_scores") -> dict[str, str]:
         """Write result tables as CSV files."""
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -47,27 +46,6 @@ class TargetGeneScoreResult:
         self.summary.to_csv(paths["summary"], index=False)
         self.params.to_csv(paths["params"], index=False)
         return {key: str(path) for key, path in paths.items()}
-
-
-@dataclass
-class TFRankingResult:
-    """OmniPath TF-prioritization result."""
-
-    rankings: dict[str, pd.DataFrame]
-    histories: dict[str, pd.DataFrame] = field(default_factory=dict)
-    parameters: dict[str, Any] = field(default_factory=dict)
-    provenance: dict[str, Any] = field(default_factory=dict)
-
-    def write(self, output_dir: str | Path, *, prefix: str = "omnipath_ranks") -> dict[str, str]:
-        """Write one ranking CSV per context."""
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        paths = {}
-        for label, df in self.rankings.items():
-            path = output_dir / f"{prefix}.{label}.csv"
-            df.to_csv(path, index=False)
-            paths[label] = str(path)
-        return paths
 
 
 @dataclass
@@ -148,59 +126,40 @@ def _load_valid_targets(valid_targets: str | Path | Iterable[str] | pd.DataFrame
     return {gene for gene in values if not gene.startswith("MT-") and not gene.startswith("ENSG")}
 
 
-def _normalize_contexts(
-    tf_scores: Mapping[str, str | Path | pd.DataFrame],
-    contexts: Mapping[str, str | Mapping[str, Any]] | None,
-) -> dict[str, dict[str, Any]]:
-    if contexts is None:
-        return {label: {"dataset": label, "tf_scores": scores} for label, scores in tf_scores.items()}
-    out = {}
-    for label, spec in contexts.items():
-        if isinstance(spec, Mapping):
-            dataset = spec.get("dataset", label)
-            score_obj = spec.get("tf_scores", tf_scores.get(label))
-        else:
-            dataset = str(spec)
-            score_obj = tf_scores.get(label)
-        if score_obj is None:
-            raise ValueError(f"No TF score table supplied for context {label!r}.")
-        out[str(label)] = {"dataset": str(dataset), "tf_scores": score_obj}
-    return out
+# Column conventions of the inputs to infer().
+TARGET_GENE_COLUMN = "gene"
+TARGET_LFDR_COLUMN = "lfdr_bum"  # beta-uniform-mixture local FDR from score_targets()
+TF_COLUMN = "TF"
+TF_SCORE_COLUMN = "priority_act"  # net activating mass from rank_regulators()
 
 
 def _context_edges(
     *,
     method: str,
-    dataset: str,
     gene_scores: pd.DataFrame,
     tf_scores: pd.DataFrame,
     valid_targets: set[str] | None,
     tf_universe: set[str] | None,
-    gene_column: str,
-    dataset_column: str,
-    lfdr_column: str,
-    tf_column: str,
-    tf_score_column: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    missing = {gene_column, dataset_column, lfdr_column}.difference(gene_scores.columns)
+    missing = {TARGET_GENE_COLUMN, TARGET_LFDR_COLUMN}.difference(gene_scores.columns)
     if missing:
-        raise ValueError(f"gene_scores is missing required columns: {sorted(missing)}")
-    missing = {tf_column, tf_score_column}.difference(tf_scores.columns)
+        raise ValueError(f"Target-gene scores are missing required columns: {sorted(missing)}")
+    missing = {TF_COLUMN, TF_SCORE_COLUMN}.difference(tf_scores.columns)
     if missing:
-        raise ValueError(f"tf_scores for {method!r} is missing required columns: {sorted(missing)}")
+        raise ValueError(f"TF scores are missing required columns: {sorted(missing)}")
 
-    genes = gene_scores.loc[gene_scores[dataset_column].astype(str) == str(dataset), [gene_column, lfdr_column]].copy()
-    genes = genes.rename(columns={gene_column: "target", lfdr_column: "lfdr"})
+    genes = gene_scores[[TARGET_GENE_COLUMN, TARGET_LFDR_COLUMN]].copy()
+    genes = genes.rename(columns={TARGET_GENE_COLUMN: "target", TARGET_LFDR_COLUMN: "lfdr"})
     genes["gene_score"] = 1.0 - pd.to_numeric(genes["lfdr"], errors="coerce")
     genes = genes[np.isfinite(genes["gene_score"]) & (genes["gene_score"] > 0)].copy()
     if valid_targets is not None:
         genes = genes[genes["target"].astype(str).isin(valid_targets)].copy()
     genes = genes.drop_duplicates("target", keep="first").reset_index(drop=True)
     if genes.empty:
-        raise ValueError(f"No positive target-gene scores remain for dataset {dataset!r}.")
+        raise ValueError(f"No positive target-gene scores remain for {method!r}.")
 
-    tfs = tf_scores[[tf_column, tf_score_column]].copy()
-    tfs = tfs.rename(columns={tf_column: "TF", tf_score_column: "priority_act"})
+    tfs = tf_scores[[TF_COLUMN, TF_SCORE_COLUMN]].copy()
+    tfs = tfs.rename(columns={TF_COLUMN: "TF", TF_SCORE_COLUMN: "priority_act"})
     tfs["priority_act"] = pd.to_numeric(tfs["priority_act"], errors="coerce")
     tfs = tfs[np.isfinite(tfs["priority_act"]) & (tfs["priority_act"] > 0)].copy()
     if tf_universe is not None:
@@ -208,7 +167,7 @@ def _context_edges(
     tfs = tfs.drop_duplicates("TF", keep="first").reset_index(drop=True)
     tf_total = float(tfs["priority_act"].sum())
     if not np.isfinite(tf_total) or tf_total <= 0:
-        raise ValueError(f"No positive TF priority scores remain for context {method!r}.")
+        raise ValueError(f"No positive TF priority scores remain for {method!r}.")
     tfs["tf_score"] = tfs["priority_act"] / tf_total
 
     edge_weight = np.outer(tfs["tf_score"].to_numpy(dtype=float), genes["gene_score"].to_numpy(dtype=float))
@@ -225,169 +184,126 @@ def _context_edges(
 
 
 def infer(
+    targets: TargetGeneScoreResult | str | Path | pd.DataFrame,
+    tfs: str | Path | pd.DataFrame,
     *,
-    gene_scores: str | Path | pd.DataFrame,
-    tf_scores: Mapping[str, str | Path | pd.DataFrame],
     valid_targets: str | Path | Iterable[str] | pd.DataFrame | None = None,
-    contexts: Mapping[str, str | Mapping[str, Any]] | None = None,
+    name: str = "ChronoPack",
     tf_universe: Iterable[str] | None = None,
-    gene_column: str = "gene",
-    dataset_column: str = "dataset",
-    lfdr_column: str = "lfdr_bum",
-    tf_column: str = "TF",
-    tf_score_column: str = "priority_act",
-    provenance: Mapping[str, Any] | None = None,
 ) -> GRNResult:
-    """Infer ChronoPack TF-target edge scores from target and TF priorities."""
-    gene_score_df = _read_table(gene_scores)
+    """Infer ranked TF -> target edges for one context.
+
+    ``targets`` is the result of :func:`score_targets` (or a table / CSV with
+    ``gene`` and ``lfdr_bum`` columns); ``tfs`` is the ranking from
+    :func:`rank_regulators` (``TF`` and ``priority_act`` columns). Each edge is
+    weighted by the TF's share of the total priority times the target's
+    ``1 - lfdr``, restricted to ``valid_targets``, then ranked with a
+    deterministic tie-breaker. ``name`` fills the edges' ``method`` column.
+    ``tf_universe`` optionally restricts the regulators (benchmark use).
+    """
+    gene_scores = targets.scores if isinstance(targets, TargetGeneScoreResult) else _read_table(targets)
     valid = _load_valid_targets(valid_targets)
     tf_filter = {str(tf) for tf in tf_universe} if tf_universe is not None else None
-    context_map = _normalize_contexts(tf_scores, contexts)
+    edge_df, tf_df, gene_df = _context_edges(
+        method=name,
+        gene_scores=gene_scores,
+        tf_scores=_read_table(tfs),
+        valid_targets=valid,
+        tf_universe=tf_filter,
+    )
 
-    edge_parts = []
-    regulator_parts = []
-    target_parts = []
-    for method, spec in context_map.items():
-        edge_df, tf_df, gene_df = _context_edges(
-            method=method,
-            dataset=str(spec["dataset"]),
-            gene_scores=gene_score_df,
-            tf_scores=_read_table(spec["tf_scores"]),
-            valid_targets=valid,
-            tf_universe=tf_filter,
-            gene_column=gene_column,
-            dataset_column=dataset_column,
-            lfdr_column=lfdr_column,
-            tf_column=tf_column,
-            tf_score_column=tf_score_column,
-        )
-        edge_parts.append(edge_df)
-        regulator_parts.append(tf_df.assign(method=method))
-        target_parts.append(gene_df.assign(method=method, dataset=str(spec["dataset"])))
+    edge_df = edge_df.sort_values(["method", "EdgeWeight"], ascending=[True, False], kind="mergesort")
+    edge_df = edge_df.drop_duplicates(["method", "TF", "target"], keep="first").reset_index(drop=True)
+    edge_df["rank"] = edge_df.groupby("method").cumcount() + 1
+    group_n = edge_df.groupby("method")["rank"].transform("max")
+    edge_df["percentile"] = 1 - (edge_df["rank"] - 1) / group_n
 
-    legacy_edges = pd.concat(edge_parts, ignore_index=True)
-    legacy_edges = legacy_edges.sort_values(["method", "EdgeWeight"], ascending=[True, False], kind="mergesort")
-    legacy_edges = legacy_edges.drop_duplicates(["method", "TF", "target"], keep="first").reset_index(drop=True)
-    legacy_edges["rank"] = legacy_edges.groupby("method").cumcount() + 1
-    group_n = legacy_edges.groupby("method")["rank"].transform("max")
-    legacy_edges["percentile"] = 1 - (legacy_edges["rank"] - 1) / group_n
-
-    edges = legacy_edges.rename(columns={"TF": "regulator", "EdgeWeight": "score"})
+    edges = edge_df.rename(columns={"TF": "regulator", "EdgeWeight": "score"})
     edges = edges[["method", "regulator", "target", "score", "rank", "percentile"]]
     return GRNResult(
         edges=edges,
-        regulators=pd.concat(regulator_parts, ignore_index=True),
-        target_scores=pd.concat(target_parts, ignore_index=True),
-        parameters={
-            "gene_column": gene_column,
-            "dataset_column": dataset_column,
-            "lfdr_column": lfdr_column,
-            "tf_column": tf_column,
-            "tf_score_column": tf_score_column,
-            "tf_universe_size": None if tf_filter is None else len(tf_filter),
-        },
-        provenance=dict(provenance or {}),
+        regulators=tf_df.assign(method=name),
+        target_scores=gene_df.assign(method=name),
+        parameters={"name": name, "tf_universe_size": None if tf_filter is None else len(tf_filter)},
     )
 
 
-def score_targets(
-    *,
-    valid_targets_path: str | Path,
-    gene_tables: Mapping[str, str | Path],
-    output_dir: str | Path | None = None,
-) -> TargetGeneScoreResult:
-    """Run the packaged R/fdrtool target-gene score recalibration workflow."""
+def score_targets(association: str | Path, *, valid_targets: str | Path) -> TargetGeneScoreResult:
+    """Score target genes for one context by local FDR (fdrtool / beta-uniform mixture, R).
+
+    ``association`` is a tradeSeq association CSV with ``pvalue_1`` and ``lfdr``
+    columns and gene names in an ``X`` column (as written by R's ``write.csv``)
+    or otherwise the first column; ``valid_targets`` is a one-column CSV
+    (no header) of allowed target genes. Returns per-gene scores (``lfdr_bum``
+    is used by :func:`infer`) plus a summary and the fitted parameters.
+    """
     source_r_resource("grn_inference_helpers.R")
     try:
         from rpy2.robjects import ListVector, r
     except ImportError as exc:
         raise ImportError("GRN target scoring requires the optional 'rpy2' dependency.") from exc
 
-    r_gene_tables = ListVector({str(label): str(Path(path)) for label, path in gene_tables.items()})
-    result = r["calculate_lfdr_recalibration"](str(Path(valid_targets_path)), r_gene_tables)
-
-    if output_dir is None:
-        with tempfile.TemporaryDirectory(prefix="chronopack-grn-targets-") as tmp:
-            paths = r["write_lfdr_recalibration_outputs"](result, tmp)
-            sidecars = {}
-            scores = pd.read_csv(str(paths.rx2("scores")[0]))
-            summary = pd.read_csv(str(paths.rx2("summary")[0]))
-            params = pd.read_csv(str(paths.rx2("params")[0]))
-    else:
-        out = Path(output_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        paths = r["write_lfdr_recalibration_outputs"](result, str(out))
-        sidecars = {name: str(paths.rx2(name)[0]) for name in ("scores", "summary", "params")}
-        scores = pd.read_csv(sidecars["scores"])
-        summary = pd.read_csv(sidecars["summary"])
-        params = pd.read_csv(sidecars["params"])
+    # The R helper labels rows with a dataset name; one context per call, so it is dropped.
+    result = r["calculate_lfdr_recalibration"](
+        str(Path(valid_targets)), ListVector({"context": str(Path(association))})
+    )
+    with tempfile.TemporaryDirectory(prefix="chronopack-grn-targets-") as tmp:
+        paths = r["write_lfdr_recalibration_outputs"](result, tmp)
+        tables = {
+            name: pd.read_csv(str(paths.rx2(name)[0])).drop(columns="dataset")
+            for name in ("scores", "summary", "params")
+        }
 
     return TargetGeneScoreResult(
-        scores=scores,
-        summary=summary,
-        params=params,
-        parameters={"valid_targets_path": str(valid_targets_path), "datasets": list(gene_tables.keys())},
+        scores=tables["scores"],
+        summary=tables["summary"],
+        params=tables["params"],
+        parameters={"association": str(association), "valid_targets": str(valid_targets)},
         provenance={"backend": "fdrtool/BUM R helper", "r_resource": "grn_inference_helpers.R"},
-        sidecar_paths=sidecars,
     )
 
 
 def rank_regulators(
     *,
+    source: str,
     human_tf_path: str | Path,
     ligand_receptor_path: str | Path,
-    contexts: Mapping[str, Mapping[str, Any]],
+    is_ligand: bool = False,
     organism: str = "human",
-    output_dir: str | Path | None = None,
     w_signed: float = 1.0,
     w_unsigned: float = 0.5,
     alpha: float = 0.85,
     max_steps: int = 80,
     min_steps: int = 10,
     tol_mass: float = 1e-12,
-) -> TFRankingResult:
-    """Rank context-specific regulators with the OmniPath signed diffusion workflow."""
+) -> pd.DataFrame:
+    """Rank TFs downstream of one upstream signal by signed OmniPath diffusion.
+
+    Mass starts at ``source`` (for a ligand, ``is_ligand=True``, at its receptors
+    from the ligand-receptor table), spreads over OmniPath signaling edges,
+    flipping sign across inhibitory edges, and is absorbed by TFs (human TFs
+    with OmniPath transcriptional targets). Returns one row per TF sorted by
+    ``priority_act`` (net activating mass absorbed).
+    """
     resources = load_omnipath_tf_resources(
         human_tf_path=human_tf_path,
         ligand_receptor_path=ligand_receptor_path,
         organism=organism,
     )
     graph_bundle = build_omnipath_tf_graph(resources)
-    rankings = {}
-    histories = {}
-    for label, cfg in contexts.items():
-        ranking, history = rank_omnipath_tfs(
-            graph_bundle,
-            resources.ligand_receptor,
-            source=str(cfg["source"]),
-            is_ligand=bool(cfg.get("is_ligand", False)),
-            w_signed=w_signed,
-            w_unsigned=w_unsigned,
-            alpha=alpha,
-            max_steps=max_steps,
-            min_steps=min_steps,
-            tol_mass=tol_mass,
-        )
-        rankings[str(label)] = ranking
-        histories[str(label)] = history
-
-    out = TFRankingResult(
-        rankings=rankings,
-        histories=histories,
-        parameters={
-            "organism": organism,
-            "w_signed": w_signed,
-            "w_unsigned": w_unsigned,
-            "alpha": alpha,
-            "max_steps": max_steps,
-            "min_steps": min_steps,
-            "tol_mass": tol_mass,
-        },
-        provenance={"human_tf_path": str(human_tf_path), "ligand_receptor_path": str(ligand_receptor_path)},
+    ranking, _history = rank_omnipath_tfs(
+        graph_bundle,
+        resources.ligand_receptor,
+        source=str(source),
+        is_ligand=bool(is_ligand),
+        w_signed=w_signed,
+        w_unsigned=w_unsigned,
+        alpha=alpha,
+        max_steps=max_steps,
+        min_steps=min_steps,
+        tol_mass=tol_mass,
     )
-    if output_dir is not None:
-        out.write(output_dir)
-    return out
+    return ranking
 
 
 def build_chronopack_ranked_edges(
@@ -398,18 +314,23 @@ def build_chronopack_ranked_edges(
     trrust_path: str | Path | None = None,
     chip_encode_gt_path: str | Path | None = None,
 ) -> pd.DataFrame:
-    """Compatibility wrapper returning the historical ranked-edge schema."""
+    """Compatibility wrapper returning the historical ranked-edge schema.
+
+    ``gene_scores_path`` is the combined K562/THP1 target-score table with a
+    ``dataset`` column, as written by the former multi-context workflow.
+    """
     valid_targets = _legacy_edges.load_valid_targets(valid_targets_path)
-    result = infer(
-        gene_scores=gene_scores_path,
-        tf_scores={
-            "ChronoPack_K562": k562_tf_scores_path,
-            "ChronoPack_THP1": thp1_tf_scores_path,
-        },
-        valid_targets=valid_targets,
-        contexts={"ChronoPack_K562": "K562", "ChronoPack_THP1": "THP1"},
-    )
-    edges = result.to_legacy_edges()
+    gene_scores = _read_table(gene_scores_path)
+    parts = []
+    for dataset, tf_path in (("K562", k562_tf_scores_path), ("THP1", thp1_tf_scores_path)):
+        result = infer(
+            gene_scores[gene_scores["dataset"].astype(str) == dataset],
+            tf_path,
+            valid_targets=valid_targets,
+            name=f"ChronoPack_{dataset}",
+        )
+        parts.append(result.to_legacy_edges())
+    edges = pd.concat(parts, ignore_index=True)
     if trrust_path is not None and chip_encode_gt_path is not None:
         tf_universe = _legacy_edges.load_reference_tfs(
             valid_targets,
@@ -440,7 +361,6 @@ def write_chronopack_ranked_edges(ranked_edges: GRNResult | pd.DataFrame, path: 
 __all__ = [
     "GRNResult",
     "TargetGeneScoreResult",
-    "TFRankingResult",
     "OmniPathTfResources",
     "OmniPathTfGraph",
     "build_omnipath_tf_graph",

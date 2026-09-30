@@ -12,10 +12,14 @@ benchmark-specific preprocessing/plots.
 - `cp.tl.c2c.infer(...)`
   - loads or accepts a ligand-receptor table;
   - splits sender and receiver populations from AnnData;
-  - filters LR pairs by sender ligand and receiver receptor expression;
+  - filters LR pairs by sender ligand and receiver receptor expression
+    (`min_cells`, default 1: each gene detected in at least that many cells);
   - restricts ligands to genes with association rows;
-  - builds temporal LR activity profiles against a receiver response module;
-  - scores early-window LR activity and ligand temporal significance;
+  - builds temporal LR activity profiles (no receiver response module; the
+    scores never used it);
+  - scores early-window LR activity (summed over the time points in
+    `causal_window`, default `(0, 45)` minutes) and ligand temporal
+    significance;
   - returns `C2CResult`.
 
 Reusable lower-level helpers remain available temporarily in `cp.tl.c2c` and
@@ -33,8 +37,9 @@ the top-level `chronopack.c2c` compatibility shim, including:
 `C2CResult` contains:
 
 - `interactions`: primary LR pair score table with sender/receiver context,
-  ligand, receptor, pair, score, historical `avg`, receptor detection,
-  ligand `logp`, early-window point count, and pair rank;
+  ligand, receptor, pair, `activity_sum` (early-window summed activity),
+  receptor detection `rec_det`, ligand `logp`, early-window point count, and
+  pair rank;
 - `ligand_scores`: ligand-level aggregate priority table;
 - `temporal_profiles`: long-form LR activity and receiver-response profiles;
 - `candidate_interactions`: filtered LR catalog used for scoring;
@@ -47,8 +52,6 @@ interactions are not aligned to either AnnData axis.
 
 `C2CResult.write()` exports CSV tables plus JSON metadata and attempts Parquet
 for the interaction table when a Parquet backend is available.
-`C2CResult.legacy_pair_scores()` reproduces the historical pair-score CSV
-schema used by the active notebook.
 
 ## Preserved Temporal Method
 
@@ -58,21 +61,30 @@ The migrated workflow preserves the current method exactly:
   `annotation == "Secreted Signaling"`;
 - ligand/receptor component parsing, including receptor shorthand expansion
   such as `TGFBR1_R2`;
-- expression eligibility by nonzero detection in sender/receiver cells;
+- expression eligibility: every ligand / receptor gene detected (count > 0) in
+  at least `min_cells` sender / receiver cells (default 1, identical to the
+  former `min_detect=1e-100`);
 - ligand restriction to the association table index;
 - LR activity:
   - ligand time series from sender expression;
   - receptor availability from receiver receptor expression;
   - activity as the existing square-root expression/availability transform;
-- receiver response module as the existing average response-gene time series;
 - score:
   - subtract baseline activity at the first time point;
-  - average within the configured causal window, currently `0-45` minutes;
+  - sum over the time points within `causal_window` (default `0-45` minutes;
+    time tags map to `(tag - 1) * 15` minutes, so the default window has 4
+    points for every pair);
   - combine with ligand temporal significance `-log10(p + 1e-3)`;
 - ligand aggregation and z-score composite ranking as in the notebook.
 
-No switch was made between sum, integral, or area-under-curve definitions; the
-historical early-window mean activity remains `avg`.
+The pair activity is now a sum (`activity_sum`) instead of the historical mean
+(`avg`). Every pair has the same number of window points, so the sum is the
+mean times that number: pair ranks are unchanged, and ligand ranks are
+unchanged because `max_lr_activity` enters the composite only through a
+z-score. Only the activity scale (x4 for the default window) changes, so an
+activity threshold of 0.1 on the old mean corresponds to 0.4 on the sum.
+The legacy `score_lr_pairs` helper still computes the mean `avg` for the
+frozen manuscript notebooks.
 
 ## Current Workflow Mapping
 
@@ -116,9 +128,7 @@ No `cp.tl.c2c.benchmark` namespace was added.
 `c2c/CellCommunication.ipynb` is now a thin package client. It retains:
 
 - dataset paths and resource paths;
-- sender/receiver definitions;
-- response-gene module;
-- detection and causal-window parameters;
+- one `cp.tl.c2c.infer` call with sender/receiver written inline;
 - package calls;
 - output saving;
 - manuscript-specific TNF and selected-gene plots.

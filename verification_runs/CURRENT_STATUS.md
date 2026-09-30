@@ -156,6 +156,101 @@ behave the same as the maintained run. Guidance followed:
     test that pipeline notebooks use only the installed public API. 64 passed;
     the only failure is still the pre-existing cp.io export test.
 
+### 2026-09-28: GRN notebooks combined
+
+- `grn_inference/GRNInference.ipynb` replaces the three GRN notebooks (moved to
+  `grn_inference/old/`): one context table drives `cp.tl.grn.rank_regulators`,
+  `cp.tl.grn.score_targets` and `cp.tl.grn.infer`, with results passed in
+  memory; python3 kernel; outputs and parameters unchanged.
+- Verified (`verification_runs/grn_inference_notebook_20260928/`, job 934103,
+  installed wheel): OmniPath TF rankings and all lfdr tables identical to the
+  Sep 17 `grn_inference/outputs`. Edges: 5,009,770 vs 4,334,306 in
+  `regulator_prioritization_chronopack_ranked_edges.csv`; every reference edge
+  is present with identical EdgeWeight, and restricting to the reference's
+  regulators (176 K562 / 189 THP1) reproduces it exactly, rank order included
+  (job 934104). The reference was built with a benchmark TF-universe filter,
+  which the active workflow intentionally omits.
+- Target-gene inputs still come from the external snapshot
+  `/new-stg/home/alex/tmp/grn_inference_v2/reproduction/...`, not from the
+  verified pipeline outputs.
+
+### 2026-09-28: notebooks runnable from Jupyter with the `chronopack` env
+
+- ChronoPack is now installed editable (`pip install --no-deps -e .`) in
+  `/new-stg/home/alex/miniconda3/envs/chronopack`; no other packages changed.
+- New `chronopack._backends.r.ensure_r_home()` (called when the R backend
+  package is imported, before any rpy2 import) sets `R_HOME` to
+  `<sys.prefix>/lib/R` when `R_HOME` is unset and no `R` is on `PATH`. Fixes
+  "Unable to determine R_HOME" in Jupyter kernels that start an env's Python
+  without activating the env (e.g. `~/.local/share/jupyter/kernels/chronopack`).
+  Tests: `tests/test_r_home.py`; full suite 68 passed both with and without an
+  activated env (only the pre-existing cp.io export test fails).
+- `chronopack-install-test` reinstalled from `install_test_20260925/dist_fix2/`, then
+  (2026-09-30, after the C2C/GRN API changes) from `dist_fix3/`. That env has a
+  copied wheel, so it needs a rebuild after package edits; `chronopack` is editable
+  (only a Jupyter kernel restart is needed).
+
+### 2026-09-30: C2C simplified
+
+- `cp.tl.c2c.infer(*, adata, lr_resource, association, sender, receiver, min_cells=1)`.
+  Removed arguments (now fixed module constants in `tl/c2c/_inference.py`):
+  cell_type/time keys, counts/log1p layers, 0-45 min window, `pvalue_2`,
+  pseudocount, secreted-only, fits/tradeSeq exports, provenance. Removed
+  `response_genes` (scores never used the receiver response); `temporal_profiles`
+  now has LR activity only. `min_detect=1e-100` replaced by `min_cells` (each
+  ligand / receptor gene detected in at least that many sender / receiver cells;
+  default 1 is identical). Clear ValueError when no pairs remain.
+- `cp.pl.c2c.pair_overlay` kept; takes `response=` (time-indexed Series).
+- `c2c/CellCommunication.ipynb` rewritten: load, one short `infer` call with
+  sender/receiver inline, `write`, three plots. No longer writes the legacy
+  `chronopack_lr_pair_scores*.csv` / `chronopack_ligand_scores.csv` copies.
+  With user approval, `C2CResult.legacy_pair_scores` was removed and those
+  three stale CSVs were deleted from `c2c/outputs/`.
+- Verified: same-node old vs new `infer` identical in every table (job 934409);
+  notebook run (job 934403) gives the same 73-ligand ranking as the Sep 28
+  outputs, with `logp`-derived values differing by <=1.1e-16 (different CPU).
+  Tests: 69 passed (only the pre-existing cp.io export test fails).
+
+### 2026-09-30: C2C window parameter, summed activity, reference scatter style
+
+- `cp.tl.c2c.infer(..., causal_window=(0.0, 45.0))` replaces the
+  `CAUSAL_WINDOW_MIN` constant (metadata key `causal_window`).
+- Pair activity is now the **sum** over window time points (`activity_sum`),
+  not the mean; `avg` and the duplicate `score` columns are gone. Scoring lives
+  in `_score_pairs` in `tl/c2c/_inference.py`; legacy `score_lr_pairs` (mean
+  `avg`) is untouched for the frozen notebooks.
+- Every pair has 4 window points, so sum = 4 x mean: pair order, pair ranks,
+  ligand order and every ligand rank identical to the mean-based outputs;
+  z-scores / composite differ by <=4.4e-16 (job 934421,
+  `verification_runs/c2c_sum_window_20260930/`). An old mean threshold of 0.1
+  is 0.4 on the sum.
+- `cp.pl.c2c.interaction_scatter` restyled to match
+  `c2c_downsample/reproduction/.../candidate_lr_ligand_significance_vs_activity.pdf`
+  (Reds by rec_det clipped at 0.2, size-300 bubbles, dashed p=0.05 / `x_thresh`
+  lines, boxed labels for pairs past both). Notebook call:
+  `interaction_scatter(c2c, x_thresh=0.4, xlim=(-0.6, 1.2))` = reference axes x4.
+- Install-test wheel rebuilt as `install_test_20260925/dist_fix4/`.
+
+### 2026-09-30: GRN API and notebook are per-context
+
+- `cp.tl.grn.rank_regulators(source=, is_ligand=, human_tf_path=, ligand_receptor_path=)`
+  returns one TF ranking DataFrame (`TFRankingResult` removed; diffusion
+  history no longer returned). `score_targets(association, valid_targets=)`
+  scores one tradeSeq table (no `dataset` column). `infer(targets, tfs,
+  valid_targets=, name=, tf_universe=None)` builds one context's edges; the
+  column-name arguments are fixed constants. `build_chronopack_ranked_edges`
+  now calls `infer` per context (same output).
+- `grn_inference/GRNInference.ipynb`: shared resource paths once, then a
+  K562 + TNF-α section and a THP1 + LPS section (rank TFs, score targets,
+  infer, write to `outputs/<context>/`). No context loop.
+- Verified (job 934416, 152 s, unactivated env like a Jupyter kernel) against the
+  previous combined run: TF rankings, lfdr summary/params, edges, regulators and
+  target scores used by `infer` identical for both contexts. The per-gene
+  `target_scores.scores.csv` differs only in CSV float text (<=3.4e-16 rel with
+  pandas' default parser; the old file was R's 15-digit `write.csv`).
+- Tests: 71 passed (new single-context and `score_targets` R tests); only the
+  pre-existing cp.io export test fails. Docs updated.
+
 ### Deferred fixes (user may address later)
 
 - **APPLIED 2026-09-25 (user approved):** both `cluster_gene_trajectories`

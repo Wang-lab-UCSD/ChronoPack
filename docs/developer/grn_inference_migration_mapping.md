@@ -8,21 +8,25 @@ metrics, Perturb-seq/TRRUST/ENCODE benchmark logic, or C2C benchmarking.
 
 ## Public API
 
-- `cp.tl.grn.rank_regulators(...)`
+All three functions work on one context per call (2026-09-30); a workflow
+runs them once for K562 + TNF-α and once for THP1 + LPS.
+
+- `cp.tl.grn.rank_regulators(source=..., is_ligand=..., human_tf_path=..., ligand_receptor_path=...)`
   - Loads OmniPath and CellChat-style ligand-receptor resources.
   - Builds the signed OmniPath TF graph.
-  - Ranks context-specific TFs with the existing signed absorbing diffusion
-    workflow.
-  - Returns `TFRankingResult`.
+  - Ranks TFs downstream of one signal with the existing signed absorbing
+    diffusion workflow.
+  - Returns the TF ranking DataFrame (`TF`, ..., `priority_act`).
 
-- `cp.tl.grn.score_targets(...)`
-  - Runs the packaged R/fdrtool target-gene LFDR recalibration helper.
+- `cp.tl.grn.score_targets(association, valid_targets=...)`
+  - Runs the packaged R/fdrtool target-gene LFDR recalibration helper on one
+    tradeSeq association table.
   - Returns `TargetGeneScoreResult` with `scores`, `summary`, and `params`
-    DataFrames.
+    DataFrames (no `dataset` column).
 
-- `cp.tl.grn.infer(...)`
+- `cp.tl.grn.infer(targets, tfs, valid_targets=..., name=...)`
   - Builds ChronoPack TF-target edge scores from recalibrated target-gene
-    scores and TF priority scores.
+    scores and TF priority scores; `name` fills the `method` column.
   - Returns `GRNResult`.
   - Uses the existing core calculation:
     `gene_score = 1 - lfdr_bum`,
@@ -57,8 +61,8 @@ Parquet plus JSON metadata. `GRNResult.to_legacy_edges()` exports the
 historical `TF` / `EdgeWeight` schema for compatibility.
 
 `TargetGeneScoreResult` contains the fdrtool/BUM score, summary, and parameter
-tables. `TFRankingResult` contains one TF ranking table per context plus
-diffusion histories.
+tables. `TFRankingResult` was removed; `rank_regulators` returns the ranking
+DataFrame directly (the diffusion convergence history is not returned).
 
 ## Current Workflow Mapping
 
@@ -101,21 +105,11 @@ No `cp.tl.grn.benchmark` or `cp.tl.c2c.benchmark` namespace was added.
 
 ## Active Notebooks
 
-The active GRN notebooks are thin workflow clients:
-
-- `grn_inference/OmnipathTFPrioritization.ipynb`
-  - calls `cp.tl.grn.rank_regulators()`;
-  - writes `outputs/omnipath_tf_ranks/omnipath_ranks.{context}.csv`.
-
-- `grn_inference/GeneScoreLfdrRecalibration.ipynb`
-  - calls `cp.tl.grn.score_targets()`;
-  - writes local score, summary, and parameter CSVs.
-
-- `grn_inference/ChronoPackRegulatoryEdges.ipynb`
-  - calls `cp.tl.grn.infer()`;
-  - writes clean ChronoPack GRN outputs under
-    `outputs/tables/chronopack_grn/`;
-  - intentionally does not apply benchmark-specific TF-universe filtering.
+`grn_inference/GRNInference.ipynb` (the three earlier notebooks are in
+`grn_inference/old/`) runs `rank_regulators`, `score_targets` and `infer` once
+per context and writes `outputs/<context>/tf_ranking.csv`,
+`target_scores.{scores,summary,params}.csv` and `grn.*`. It intentionally does
+not apply benchmark-specific TF-universe filtering.
 
 ## Regression Verification
 

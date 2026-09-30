@@ -8,7 +8,6 @@ from chronopack._legacy.grn_inference import load_reference_tfs, load_valid_targ
 from chronopack.tl.grn import (  # noqa: F401
     GRNResult,
     TargetGeneScoreResult,
-    TFRankingResult,
     build_chronopack_ranked_edges,
     infer,
     rank_regulators,
@@ -19,7 +18,6 @@ from chronopack.tl.grn import (  # noqa: F401
 __all__ = [
     "GRNResult",
     "TargetGeneScoreResult",
-    "TFRankingResult",
     "infer",
     "rank_regulators",
     "score_targets",

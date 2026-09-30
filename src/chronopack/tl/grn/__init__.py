@@ -5,7 +5,6 @@ from ._inference import (
     OmniPathTfGraph,
     OmniPathTfResources,
     TargetGeneScoreResult,
-    TFRankingResult,
     build_chronopack_ranked_edges,
     build_omnipath_tf_graph,
     infer,
@@ -20,7 +19,6 @@ from ._inference import (
 __all__ = [
     "GRNResult",
     "TargetGeneScoreResult",
-    "TFRankingResult",
     "infer",
     "rank_regulators",
     "score_targets",

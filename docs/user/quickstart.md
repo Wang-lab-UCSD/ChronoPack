@@ -89,24 +89,26 @@ cp.pl.mode_sankey(mode_res, output="mode_switches.svg")
 GRN and C2C workflows also return transparent result objects:
 
 ```python
-grn = cp.tl.grn.infer(
-    adata,
-    regulator_scores=tf_scores,
-    target_scores=target_scores,
+tfs = cp.tl.grn.rank_regulators(
+    source="TNF",
+    is_ligand=True,
+    human_tf_path="hs_tfs.txt",
+    ligand_receptor_path="interaction_input_CellChatDB.csv",
 )
+targets = cp.tl.grn.score_targets("asso_df.1trajectory.lfdr.csv", valid_targets="protein_coding_genes.csv")
+grn = cp.tl.grn.infer(targets, tfs, valid_targets="protein_coding_genes.csv", name="ChronoPack_K562")
 grn.write("grn_edges")
 
 c2c = cp.tl.c2c.infer(
-    adata,
+    adata=adata,
     lr_resource=ligand_receptor_table,
     association=association_table,
     sender="THP1",
     receiver="K562",
-    response_genes=["NFKBIA", "TNFAIP3"],
-    cell_type_key="cell_type",
-    time_key="time",
+    causal_window=(0, 45),  # minutes; LR activity is summed over this window
 )
 c2c.write("c2c_results")
+fig, ax = cp.pl.c2c.interaction_scatter(c2c, x_thresh=0.4)
 ```
 
 Legacy modules such as `chronopack.tradeseq` and `chronopack.c2c` remain for

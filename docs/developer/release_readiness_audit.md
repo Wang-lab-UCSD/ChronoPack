@@ -30,7 +30,7 @@ Recommended public imports:
   - `ModeConservationResult`
 - `chronopack.tl.grn`
   - `infer`, `rank_regulators`, `score_targets`
-  - `GRNResult`, `TFRankingResult`, `TargetGeneScoreResult`
+  - `GRNResult`, `TargetGeneScoreResult`
 - `chronopack.tl.c2c`
   - `infer`
   - `C2CResult`

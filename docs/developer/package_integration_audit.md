@@ -120,7 +120,7 @@ visualization:
 
 ### `cp.tl.grn`
 
-- `rank_regulators(...) -> TFRankingResult`
+- `rank_regulators(...) -> pd.DataFrame` (one context per call)
 - `score_targets(...) -> TargetGeneScoreResult`
 - `infer(...) -> GRNResult`
 - compatibility:

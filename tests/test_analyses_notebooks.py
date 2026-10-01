@@ -13,11 +13,9 @@ TRADESEQ_FITS = [
     "thp1-k562-lps.hg38.rep/04_TradeSeqFits.K562.ipynb",
     "thp1-k562-lps.hg38.rep/04_TradeSeqFits.THP1.ipynb",
 ]
-GENE_CLUSTERING = [
-    "gene_clustering/01_DimensionalityReduction&Clustering.ipynb",
-    "gene_clustering/02_ClusterVisualization.ipynb",
-]
+GENE_CLUSTERING = ["gene_clustering/01_GeneTrajectoryClustering.ipynb"]
 NOTEBOOKS = PREPROCESS + GET_TRAJECTORIES + PREPARE
+VISUALIZATION = ["k562-tnfa.hg38.rep/05_Visualization.ipynb", "thp1-k562-lps.hg38.rep/05_Visualization.ipynb"]
 
 SHARED_DEFS = [
     "def read_tmap",
@@ -116,10 +114,10 @@ def test_prepare_tradeseq_notebooks_use_gene_dynamics_backend():
         assert "WriteTradeSeqInputsFromAnnData" not in joined, path
 
 
-PIPELINE_NOTEBOOKS = NOTEBOOKS + TRADESEQ_FITS + GENE_CLUSTERING + ["c2c/CellCommunication.ipynb", "grn/GRNInference.ipynb"]
-# Notebooks whose analysis logic must come from the package (the plotting
-# notebooks may define small row-selection helpers).
-ANALYSIS_NOTEBOOKS = NOTEBOOKS + TRADESEQ_FITS + GENE_CLUSTERING[:1]
+PIPELINE_NOTEBOOKS = NOTEBOOKS + TRADESEQ_FITS + VISUALIZATION + GENE_CLUSTERING + ["c2c/CellCommunication.ipynb", "grn/GRNInference.ipynb"]
+# Notebooks whose analysis logic must come from the package (no `def`; c2c/ and
+# grn/ may define small row-selection helpers).
+ANALYSIS_NOTEBOOKS = NOTEBOOKS + TRADESEQ_FITS + VISUALIZATION + GENE_CLUSTERING
 
 
 def test_pipeline_notebooks_use_only_the_installed_public_api():
@@ -159,3 +157,19 @@ def test_notebook_inputs_and_resources_resolve_inside_the_repo():
         # analyses/inputs/ is not in git; only check the layout of the references.
         for rel in re.findall(r"""['"](\.\./inputs/[^'"]+)['"]""", joined):
             assert rel.count("/") >= 2, (path, rel)
+
+
+def test_visualization_notebook_uses_the_figure_api():
+    for path in VISUALIZATION:
+        joined = "\n".join(_code_sources(path))
+        assert "cp.tl.signed_max_log2fc_from_start(" in joined, path
+        assert "cp.tl.predict_gene_dynamics(" in joined, path
+        assert "cp.pl.gene_dynamics_curves(" in joined, path
+        assert 'FIG_DIR = EXP_DIR / "figures"' in joined, path
+    k562, thp1 = ("\n".join(_code_sources(path)) for path in VISUALIZATION)
+    assert "cp.pl.association_volcano(" in k562
+    assert "cp.tl.early_fate_correlations(" in k562
+    assert "cp.pl.cell_trajectories.trajectory_endpoints(" in thp1
+    assert "cp.tl.combine_context_associations(" in thp1
+    assert "cp.pl.response_specificity_volcano(" in thp1
+    assert "cp.tl.fit_gene_dynamics(" in thp1

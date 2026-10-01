@@ -817,6 +817,24 @@ def trajectory_soft_memberships(
     )
 
 
+def _rotate_to_time(Xc, t):
+    """Rotate centred 2-D coordinates so that ``t`` increases along +y."""
+    tc = t - np.nanmean(t)
+    tc = np.where(np.isfinite(tc), tc, 0.0)
+    v = (tc[:, None] * Xc).sum(axis=0)
+    norm = np.linalg.norm(v)
+    if not np.isfinite(norm) or norm < 1e-12:
+        return Xc.copy()
+    ux, uy = v / (norm + 1e-12)
+    R = np.array([[uy, -ux],
+                  [ux, uy]], dtype=float)
+    Xr = Xc @ R.T
+    ok = np.isfinite(Xr[:, 1]) & np.isfinite(t)
+    if ok.sum() >= 3 and np.corrcoef(Xr[ok, 1], t[ok])[0, 1] < 0:
+        Xr[:, 1] *= -1
+    return Xr
+
+
 def rotate_embedding_to_time(
     adata,
     *,
@@ -824,14 +842,19 @@ def rotate_embedding_to_time(
     time_key="time",
     key_added=None,
     flip_x=False,
+    groupby=None,
 ):
     """Rotate a 2-D embedding so that time increases along +y.
 
     The centred coordinates are rotated so the direction most correlated with
     ``obs[time_key]`` becomes the y-axis (time increasing upward) and recentred.
     A rotation cannot undo a mirror image; ``flip_x=True`` also negates x (e.g.
-    to match an earlier layout). Stores the result in
-    ``adata.obsm[key_added]`` (default ``f"{basis}_rot"``) and returns the key.
+    to match an earlier layout). With ``groupby`` (an ``obs`` column, e.g. the
+    cell type), each group is rotated about its own centroid, which stays where
+    it was, so separate groups keep their layout (groups of fewer than 3 cells
+    are not rotated; ``flip_x`` mirrors each group about its centroid). Stores
+    the result in ``adata.obsm[key_added]`` (default ``f"{basis}_rot"``) and
+    returns the key.
     """
     if basis not in adata.obsm:
         raise KeyError(f"Missing adata.obsm[{basis!r}].")
@@ -839,21 +862,23 @@ def rotate_embedding_to_time(
     X = np.asarray(adata.obsm[basis], dtype=float)[:, :2].copy()
     t = np.asarray(adata.obs[time_key]).astype(float)
 
-    Xc = X - X.mean(axis=0, keepdims=True)
-    tc = t - t.mean()
-    v = (tc[:, None] * Xc).sum(axis=0)
-    u = v / (np.linalg.norm(v) + 1e-12)
-    ux, uy = u
-    R = np.array([[uy, -ux],
-                  [ux, uy]], dtype=float)
-    Xr = Xc @ R.T
-
-    corr = np.corrcoef(Xr[:, 1], t)[0, 1]
-    if corr < 0:
-        Xr[:, 1] *= -1
-    if flip_x:
-        Xr[:, 0] *= -1
-    Xr -= Xr.mean(axis=0, keepdims=True)
+    if groupby is None:
+        Xr = _rotate_to_time(X - X.mean(axis=0, keepdims=True), t)
+        if flip_x:
+            Xr[:, 0] *= -1
+        Xr -= Xr.mean(axis=0, keepdims=True)
+    else:
+        groups = np.asarray(adata.obs[groupby]).astype(str)
+        Xr = np.full_like(X, np.nan)
+        for group in np.unique(groups):
+            m = groups == group
+            centroid = np.nanmean(X[m], axis=0, keepdims=True)
+            Xg = X[m] - centroid
+            if m.sum() >= 3:
+                Xg = _rotate_to_time(Xg, t[m])
+            if flip_x:
+                Xg[:, 0] *= -1
+            Xr[m] = Xg - np.nanmean(Xg, axis=0, keepdims=True) + centroid
 
     adata.obsm[key_added] = Xr
     return key_added

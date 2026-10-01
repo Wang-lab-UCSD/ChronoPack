@@ -54,13 +54,12 @@ AnnData
         └── infer(...) -> C2CResult
 
 cross-context:
-  cp.tl.mode_conservation(...) -> ModeConservationResult
-  cp.tl.mode_switchers(...)    -> ModeConservationResult
+  cp.tl.topk_mode_recovery(...) -> DataFrame
 
 visualization:
   cp.pl
     ├── gene trajectory / dynamic-mode plots
-    ├── mode-conservation plots
+    ├── cross-context mode plots
     └── c2c plots
 ```
 
@@ -94,8 +93,9 @@ visualization:
   - `characterize_gene_trajectories`
   - `cluster_gene_trajectories`
 - cross-context mode analysis:
-  - `mode_conservation`
-  - `mode_switchers`
+  - `topk_mode_recovery`
+  - (removed 2026-10-01: `mode_conservation`, `mode_switchers`,
+    `ModeConservationResult`)
 - subnamespaces:
   - `cp.tl.grn`
   - `cp.tl.c2c`
@@ -108,7 +108,6 @@ visualization:
   - `cluster_medoids_and_top_genes`
   - `clustering_metrics`
 - cross-context modes:
-  - `mode_conservation`
   - `mode_proportions`
   - `mode_sankey`
   - `mode_chord`
@@ -203,16 +202,11 @@ artifacts if `adata.varm["gene_trajectories_fit"]` is absent.
 
 ### Cross-Context Modes
 
-`ModeConservationResult` contains:
-
-- `directional_scores`
-- `conservation_scores`
-- `gene_matches`
-- `mode_transitions`
-- `switchers`
-- `parameters`
-
-The result is not forced into either input AnnData.
+`cp.tl.topk_mode_recovery()` returns a DataFrame and the cross-context plots
+(`mode_proportions`, `mode_sankey`, `mode_chord`) read the gene-trajectory
+AnnData; nothing is written into the input AnnData. (`ModeConservationResult`,
+`cp.tl.mode_conservation`/`mode_switchers` and `cp.pl.mode_conservation` were
+removed on 2026-10-01.)
 
 ### GRN
 

@@ -191,3 +191,143 @@ def test_plot_result_displays_preview_png_inline_with_short_repr(tmp_path):
     with_preview = RPlotResult("demo", data=pd.DataFrame({"x": [1]}), output=str(svg), preview_png=png)
     assert with_preview._repr_png_() == (png, {"width": 1200})  # shown at half width
     assert repr(with_preview) == f"RPlotResult(plot_type='demo', output={str(svg)!r})"
+
+
+def _association_table(n=40, seed=0):
+    rng = np.random.default_rng(seed)
+    wald = np.sort(rng.gamma(2.0, 20.0, n))[::-1]
+    df = pd.DataFrame(
+        {
+            "waldStat_1": wald,
+            "qval_1": np.linspace(0, 0.5, n) ** 2,
+            "signedMaxLog2FC_start": rng.normal(0, 1.5, n),
+        },
+        index=[f"G{i}" for i in range(n)],
+    )
+    df.loc["G39", "signedMaxLog2FC_start"] = np.nan
+    return df
+
+
+def test_fdr_wald_break_is_the_wald_nearest_the_fdr_cutoff():
+    import chronopack as cp
+
+    df = _association_table()
+    i = int(np.argmin(np.abs(df["qval_1"].to_numpy() - 0.01)))
+    assert cp.pl.fdr_wald_break(df, 0.01) == df["waldStat_1"].iloc[i]
+
+    result = cp.pl.association_volcano(df, fdr_thresh=0.01)
+    assert result.output is None and result.metadata["y_break"] == df["waldStat_1"].iloc[i]
+    assert cp.pl.association_volcano(df, y_break=12.5).metadata["y_break"] == 12.5
+    with pytest.raises(KeyError, match="signedMaxLog2FC_start"):
+        cp.pl.association_volcano(df.drop(columns="signedMaxLog2FC_start"))
+
+
+def test_association_volcano_rendering_smoke(tmp_path):
+    pytest.importorskip("rpy2")
+    import chronopack as cp
+
+    df = _association_table()
+    out = tmp_path / "volcano.png"
+    result = cp.pl.association_volcano(
+        df, top_labels=5, x_lim=(-3, 3), y_lim=(1, 1000), y_lower_scale=0.1, output=out, dpi=100,
+    )
+    assert out.exists() and result.preview_png == out.read_bytes()
+    labels = result.metadata["labels"]
+    assert labels["gene"].tolist() == ["G0", "G1", "G2", "G3", "G4"]
+    np.testing.assert_allclose(labels["waldStat_1"], df["waldStat_1"].iloc[:5])
+    assert set(labels["side"]) <= {"other", "sig_mid", "neg", "pos"}
+
+    pdf = cp.pl.association_volcano(df, y_break=None, output=tmp_path / "volcano.pdf")
+    assert (tmp_path / "volcano.pdf").stat().st_size > 0 and pdf.preview_png[:4] == b"\x89PNG"
+
+
+def test_gene_dynamics_curves_grid_follows_gene_order(tmp_path):
+    import chronopack as cp
+
+    t = np.linspace(0, 110, 5)
+    curves = pd.concat(
+        pd.DataFrame({"gene": g, "t": t, "mu_log1p": t / 100 + k, "lo_log1p": t / 100, "hi_log1p": t / 100 + 1, "lineage": lin})
+        for g in ["A", "B", "C"] for k, lin in enumerate(["L1", "L2"])
+    )
+    out = tmp_path / "curves.pdf"
+    fig = cp.pl.gene_dynamics_curves(curves, ["C", "A", "B"], ncols=2, colors={"L1": "#386cb0"}, output=out)
+
+    visible = [ax for ax in fig.axes if ax.get_visible()]
+    assert [ax.get_title(loc="left") for ax in visible] == ["C", "A", "B"]
+    assert len(visible[0].lines) == 2 and visible[0].lines[0].get_color() == "#386cb0"
+    assert out.exists()
+    with pytest.raises(KeyError):
+        cp.pl.gene_dynamics_curves(curves, ["A", "MISSING"])
+
+
+def test_gene_dynamics_curves_draws_assigned_points_and_weighted_time_means():
+    import chronopack as cp
+
+    t = np.linspace(0, 110, 5)
+    curves = pd.concat(
+        pd.DataFrame({"gene": "A", "t": t, "mu_log1p": t / 100, "lineage": lin}) for lin in ["L1", "L2"]
+    )
+    observations = pd.concat([
+        pd.DataFrame({"gene": "A", "t": [0, 0, 60], "expr_log1p": np.log1p([1.0, 3.0, 2.0]),
+                      "weight": [1.0, 0.0, 0.5], "assigned": [True, False, True], "lineage": "L1"}),
+        pd.DataFrame({"gene": "A", "t": [0, 0, 60], "expr_log1p": np.log1p([1.0, 3.0, 2.0]),
+                      "weight": [0.0, 1.0, 0.5], "assigned": [False, True, False], "lineage": "L2"}),
+    ])
+    fig = cp.pl.gene_dynamics_curves(curves, ["A"], observations=observations, ncols=1,
+                                     colors={"L1": "#386cb0", "L2": "#DC143C"})
+
+    ax = fig.axes[0]
+    points_l1, points_l2, means_l1, means_l2 = ax.collections[0], ax.collections[1], ax.collections[-2], ax.collections[-1]
+    assert len(points_l1.get_offsets()) == 2 and len(points_l2.get_offsets()) == 1
+    np.testing.assert_allclose(means_l1.get_offsets(), [[0, np.log1p(1.0)], [60, np.log1p(2.0)]])
+    np.testing.assert_allclose(means_l2.get_offsets(), [[0, np.log1p(3.0)], [60, np.log1p(2.0)]])
+    assert tuple(means_l1.get_facecolor()[0]) == (1.0, 1.0, 1.0, 1.0)
+
+
+def _combined_table():
+    df = pd.DataFrame(
+        {
+            "waldStat_1": [900.0, 50.0, 3.0, 40.0, 30.0, 20.0],
+            "waldStat_2": [800.0, 2.0, 60.0, 0.0, 25.0, 1.0],
+            "qval": [1e-6, 1e-4, 1e-3, 0.02, 0.001, 0.04],
+            "log2FC_t1": [2.0, 1.5, 0.1, -1.2, 0.2, 0.3],
+            "log2FC_t2": [2.5, 0.2, -2.0, 0.0, 0.1, 0.4],
+        },
+        index=["SHARED", "A_UP", "B_DOWN", "A_DOWN", "FLAT", "OTHER"],
+    )
+    return df
+
+
+def test_response_specificity_volcano_checks_inputs():
+    import chronopack as cp
+
+    df = _combined_table()
+    result = cp.pl.response_specificity_volcano(df, ("A", "B"))
+    assert result.output is None and result.metadata["genes"] is None
+    assert result.metadata["conditions"] == ("A", "B") and result.metadata["n_genes"] == 6
+    assert cp.pl.response_specificity_volcano(df, {"condA": "X", "condB": "Y"}).metadata["conditions"] == ("X", "Y")
+    with pytest.raises(KeyError, match="log2FC_t2"):
+        cp.pl.response_specificity_volcano(df.drop(columns="log2FC_t2"), ("A", "B"))
+
+
+def test_response_specificity_volcano_rendering_classifies_genes(tmp_path):
+    pytest.importorskip("rpy2")
+    import chronopack as cp
+
+    out = tmp_path / "specificity.png"
+    result = cp.pl.response_specificity_volcano(
+        _combined_table(), ("A", "B"), require_fdr=False, fdr_thresh=0.01,
+        dyn_thresh_condA=1, flat_thresh_condA=0.5, dyn_thresh_condB=1, flat_thresh_condB=0.5,
+        label_top_wald=1, label_top_condA=1, label_top_condB=1, output=out, dpi=72,
+    )
+    assert out.exists() and result.preview_png == out.read_bytes()
+    genes = result.metadata["genes"].set_index("gene")
+    assert genes["side"].to_dict() == {
+        "SHARED": "sig_mid", "A_UP": "condA_ind", "B_DOWN": "condB_rep",
+        "A_DOWN": "condA_rep", "FLAT": "sig_mid", "OTHER": "other",
+    }
+    assert sorted(genes.index[genes["labelled"]]) == ["A_UP", "B_DOWN", "SHARED"]
+    np.testing.assert_allclose(genes.loc["A_UP", "x"], 1.5 - 0.2)
+
+    pdf = cp.pl.response_specificity_volcano(_combined_table(), ("A", "B"), output=tmp_path / "s.pdf")
+    assert (tmp_path / "s.pdf").stat().st_size > 0 and pdf.preview_png[:4] == b"\x89PNG"

@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 
 
-NOTEBOOK = Path(__file__).resolve().parents[1] / "analyses/gene_clustering/01_DimensionalityReduction&Clustering.ipynb"
+NOTEBOOK = Path(__file__).resolve().parents[1] / "analyses/gene_clustering/01_GeneTrajectoryClustering.ipynb"
 
 
 def _code_cells():

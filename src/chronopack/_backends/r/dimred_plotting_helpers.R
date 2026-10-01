@@ -5815,40 +5815,6 @@ chronopack_plot_gene_trajectory_csv <- function(
   chronopack_save_plot(p, output, width = width, height = height)
 }
 
-chronopack_plot_mode_conservation_csv <- function(
-  data_path,
-  output,
-  width = 7,
-  height = 4,
-  title = ""
-) {
-  df <- utils::read.csv(data_path, check.names = FALSE, stringsAsFactors = FALSE)
-  required <- c("mode", "bidirectional_conservation")
-  missing <- setdiff(required, colnames(df))
-  if (length(missing) > 0) stop("Missing required columns: ", paste(missing, collapse = ", "))
-  df$mode <- as.character(df$mode)
-  title_value <- if (nzchar(title)) title else NULL
-  pal <- chronopack_mode_palette(df$mode)
-
-  p <- ggplot2::ggplot(df, ggplot2::aes(x = mode, y = bidirectional_conservation, fill = mode)) +
-    ggplot2::geom_col(width = 0.72, color = "grey25", linewidth = 0.3) +
-    ggplot2::scale_fill_manual(values = pal) +
-    ggplot2::coord_cartesian(ylim = c(0, 1)) +
-    ggplot2::labs(
-      title = title_value,
-      x = NULL,
-      y = "Bidirectional conservation",
-      fill = NULL
-    ) +
-    ggplot2::theme_classic(base_size = 12) +
-    ggplot2::theme(
-      axis.text.x = ggplot2::element_text(angle = 45, hjust = 1),
-      legend.position = "none"
-    )
-
-  chronopack_save_plot(p, output, width = width, height = height)
-}
-
 # cp.pl.trajectory_features: feature_plot_pc_simple() on a pc_df-style table.
 chronopack_plot_trajectory_features_csv <- function(data_path, output, feature, width = 6.5, height = 5, dpi = 300, ...) {
   chronopack_attach_plot_packages()
@@ -5981,4 +5947,908 @@ chronopack_plot_cluster_violin_csv <- function(data_path, output, features, plot
   dplyr::bind_rows(lapply(seq_along(features), function(i) {
     data.frame(feature = features[[i]], as.data.frame(res[[i]]$summary), check.names = FALSE)
   }))
+}
+
+# Volcano of a single-lineage tradeSeq association table (TradeSeqFits.ipynb): waldStat_1 on a
+# two-slope log10 axis (compressed below y_break) against signedMaxLog2FC_start, coloured by qval_1.
+plot_association_volcano <- function(
+  asso_df,
+  fdr_thresh        = 0.01,
+  l2fc_thresh       = 0.5,       # magnitude cutoff for coloring & guide lines
+  top_labels        = 12,        # number of labels
+  point_alpha       = 0.85,
+  point_size        = 2.2,
+  axis_title_size   = 26,
+  axis_text_size    = 18,
+  label_size        = 4.6,
+  label_only_pass   = FALSE,
+  # limits & flooring
+  y_log_floor       = 1e-6,      # floor on Wald to keep log defined
+  x_lim             = NULL,      # c(xmin, xmax) in log2FC units
+  y_lim             = NULL,      # c(ymin, ymax) in Wald units (pre-log)
+  # --- two-slope scaling controls (in Wald/log10 space) ---
+  y_break           = NULL,      # break on Wald (pre-log); NULL = auto from non-sig
+  y_break_quantile  = 0.95,      # quantile of non-sig Wald to set break if NULL
+  y_lower_scale     = 0.35,      # slope below break (<=1; 1 = no compression)
+  # --- label placement without ggrepel ---
+  label_x_nudge       = 0.8,
+  label_y_offset_frac = 0.015,
+  label_min_vgap_frac = 0.018,
+  label_segment_alpha = 0.6,
+  label_segment_size  = 0.4,
+  # --- how to choose top-k labels ---
+  label_rank_by     = c("wald","logfc"),
+  label_logfc_abs   = TRUE,
+  save_prefix       = NULL
+) {
+  label_rank_by <- match.arg(label_rank_by)
+
+  stopifnot(all(c("signedMaxLog2FC_start","qval_1","waldStat_1") %in% names(asso_df)))
+  df <- asso_df
+
+  # ---- raw axes ----
+  x_raw <- df$signedMaxLog2FC_start
+  y_raw <- df$waldStat_1
+  q_raw <- df$qval_1
+
+  # ---- winsorize / clamp to limits so points are kept ----
+  y_plot <- ifelse(is.finite(y_raw), pmax(y_raw, y_log_floor), y_log_floor)
+  if (!is.null(y_lim) && length(y_lim) == 2) {
+    if (is.finite(y_lim[1])) y_plot <- pmax(y_plot, max(y_log_floor, y_lim[1]))
+    if (is.finite(y_lim[2])) y_plot <- pmin(y_plot, y_lim[2])
+  }
+
+  x_plot <- x_raw
+  if (!is.null(x_lim) && length(x_lim) == 2 && all(is.finite(x_lim))) {
+    xmin <- min(x_lim); xmax <- max(x_lim)
+    msk <- is.finite(x_plot)
+    x_plot[msk] <- pmin(pmax(x_plot[msk], xmin), xmax)
+  }
+
+  df$x_plot <- x_plot
+  df$y_plot <- y_plot
+
+  # ---- color categories: other / sig_mid / neg / pos ----
+  pass_fdr <- is.finite(q_raw) & (q_raw < fdr_thresh)
+  n <- nrow(df)
+  side <- rep("other", n)
+
+  if (l2fc_thresh > 0) {
+    neg_msk <- pass_fdr & is.finite(x_raw) & (x_raw <= -l2fc_thresh)
+    pos_msk <- pass_fdr & is.finite(x_raw) & (x_raw >=  l2fc_thresh)
+    mid_msk <- pass_fdr & is.finite(x_raw) & (abs(x_raw) < l2fc_thresh)  # NEW darker gray
+    side[neg_msk] <- "neg"
+    side[pos_msk] <- "pos"
+    side[mid_msk] <- "sig_mid"
+  } else {
+    side[ pass_fdr & is.finite(x_raw) & (x_raw < 0) ] <- "neg"
+    side[ pass_fdr & is.finite(x_raw) & (x_raw > 0) ] <- "pos"
+    # no mid band when no magnitude cutoff
+  }
+  df$side <- factor(side, levels = c("other","sig_mid","neg","pos"))
+
+  # ---- labels: top-k by chosen metric ----
+  df$label <- ""
+  if (top_labels > 0) {
+    rank_val <- if (label_rank_by == "wald") y_raw else if (label_logfc_abs) abs(x_raw) else x_raw
+    cand <- which(is.finite(rank_val))
+    if (label_only_pass) cand <- cand[df$side[cand] %in% c("neg","pos")]
+    if (length(cand) > 0) {
+      tiebreak <- if (label_rank_by == "wald") abs(x_raw) else y_raw
+      ord <- cand[order(rank_val[cand], tiebreak[cand], decreasing = TRUE)]
+      labs_idx <- head(ord, top_labels)
+      rn <- rownames(df)
+      if (!is.null(rn))               df$label[labs_idx] <- rn[labs_idx]
+      else if ("gene" %in% names(df)) df$label[labs_idx] <- as.character(df$gene[labs_idx])
+    }
+  }
+  label_df <- df[df$label != "" & is.finite(df$x_plot) & is.finite(df$y_plot), , drop = FALSE]
+
+  # ---- piecewise scaling in log10 space ----
+  logy <- log10(df$y_plot)
+
+  if (is.null(y_break) || !is.finite(y_break)) {
+    non_sig <- df$y_plot[!pass_fdr & is.finite(df$y_plot)]
+    if (length(non_sig)) {
+      y_break <- as.numeric(stats::quantile(non_sig, probs = y_break_quantile, na.rm = TRUE))
+    } else {
+      y_break <- as.numeric(stats::quantile(df$y_plot, probs = 0.60, na.rm = TRUE))
+    }
+  }
+  y_break <- max(y_break, y_log_floor)
+  t_break <- log10(y_break)
+  y_lower_scale <- max(1e-6, min(1, y_lower_scale))
+
+  ps <- function(t) ifelse(t <= t_break, y_lower_scale * t, y_lower_scale * t_break + (t - t_break))
+  df$y_scaled <- ps(logy)
+
+  # ---- axis limits & ticks ----
+  t_lo <- if (!is.null(y_lim) && is.finite(y_lim[1])) log10(max(y_log_floor, y_lim[1])) else min(logy[is.finite(logy)])
+  t_hi <- if (!is.null(y_lim) && is.finite(y_lim[2])) log10(y_lim[2])                 else max(logy[is.finite(logy)])
+  y_limits_scaled <- ps(c(t_lo, t_hi))
+  tick_t   <- seq(floor(t_lo), ceiling(t_hi), by = 1)
+  tick_pos <- ps(tick_t)
+  tick_lab <- as.character(tick_t)
+
+  # ---- compute the Wald value closest to the FDR cutoff & map to scaled y ----
+  fdr_line_scaled <- NA_real_
+  m_fdr <- is.finite(q_raw) & is.finite(y_raw)
+  if (any(m_fdr)) {
+    idx <- which.min(abs(q_raw[m_fdr] - fdr_thresh))
+    y_fdr <- y_raw[m_fdr][idx]
+    # clamp to plotting domain, then map to scaled coordinates
+    y_fdr <- max(y_fdr, y_log_floor)
+    if (!is.null(y_lim) && length(y_lim) == 2) {
+      if (is.finite(y_lim[1])) y_fdr <- max(y_fdr, y_lim[1])
+      if (is.finite(y_lim[2])) y_fdr <- min(y_fdr, y_lim[2])
+    }
+    fdr_line_scaled <- ps(log10(y_fdr))
+    # clip inside final scale limits
+    if (is.finite(y_limits_scaled[1])) fdr_line_scaled <- max(fdr_line_scaled, y_limits_scaled[1])
+    if (is.finite(y_limits_scaled[2])) fdr_line_scaled <- min(fdr_line_scaled, y_limits_scaled[2])
+  }
+
+  # ---- colors ----
+  col_other   <- "#B8B8B8"
+  col_sigmid  <- "#6E6E6E"   # darker gray for significant but not |log2FC| strong
+  col_neg     <- "#1f4e79"
+  col_pos     <- "#b80d2d"
+  col_line    <- "#6E6E6E"
+
+  # ---- plot base ----
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = x_plot, y = y_scaled)) +
+    ggplot2::geom_point(
+      ggplot2::aes(color = side),
+      shape = 16, alpha = point_alpha, size = point_size, show.legend = FALSE
+    ) +
+    ggplot2::scale_color_manual(values = c(other = col_other, sig_mid = col_sigmid, neg = col_neg, pos = col_pos),
+                                guide = "none") +
+    ggplot2::geom_vline(xintercept = 0, linetype = "solid", linewidth = 0.6, color = col_line) +
+    { if (l2fc_thresh > 0)
+        ggplot2::geom_vline(xintercept = c(-l2fc_thresh, l2fc_thresh),
+                            linetype = "dotted", linewidth = 0.7, color = col_line)
+      else NULL } +
+    # dashed horizontal line at Wald closest to FDR cutoff (on scaled y)
+    { if (is.finite(fdr_line_scaled))
+        ggplot2::geom_hline(yintercept = fdr_line_scaled, linetype = "dashed",
+                            linewidth = 0.6, color = col_line)
+      else NULL } +
+    ggplot2::scale_x_continuous(limits = if (!is.null(x_lim) && length(x_lim)==2) c(min(x_lim), max(x_lim)) else NULL) +
+    ggplot2::scale_y_continuous(
+      limits = y_limits_scaled,
+      breaks = tick_pos,
+      labels = tick_lab
+    ) +
+    ggplot2::labs(
+      x = "Signed max log2FC (vs. start)",
+      y = expression(log[10]("Wald"))
+    ) +
+    ggplot2::theme_classic(base_size = 20) +
+    ggplot2::theme(
+      panel.grid.major.y = ggplot2::element_line(color = "grey85", linewidth = 0.4),
+      panel.grid.minor.y = ggplot2::element_blank(),
+      axis.title.x       = ggplot2::element_text(size = axis_title_size,
+                                                 margin = ggplot2::margin(t = 12)),
+      axis.title.y       = ggplot2::element_text(size = axis_title_size, face = "bold",
+                                                 margin = ggplot2::margin(r = 12)),
+      axis.text          = ggplot2::element_text(size = axis_text_size),
+      plot.title         = ggplot2::element_blank(),
+      plot.margin        = ggplot2::margin(14, 18, 14, 16)
+    )
+
+  # ---- dependency-free label "repel": above + spaced vertically ----
+  if (nrow(label_df) > 0) {
+    label_df$y_scaled <- ps(log10(label_df$y_plot))
+
+    y_rng   <- diff(range(y_limits_scaled[is.finite(y_limits_scaled)]))
+    if (!is.finite(y_rng) || y_rng == 0) y_rng <- diff(range(df$y_scaled, na.rm = TRUE))
+    y_off   <- label_y_offset_frac * y_rng
+    y_gap   <- label_min_vgap_frac * y_rng
+
+    label_df$y_lab <- label_df$y_scaled + y_off
+    ord <- order(label_df$y_lab, decreasing = FALSE)
+    label_df <- label_df[ord, , drop = FALSE]
+    if (nrow(label_df) > 1) {
+      for (i in 2:nrow(label_df)) {
+        min_allowed <- label_df$y_lab[i-1] + y_gap
+        if (label_df$y_lab[i] < min_allowed) label_df$y_lab[i] <- min_allowed
+      }
+    }
+    y_top <- if (is.finite(y_limits_scaled[2])) y_limits_scaled[2] else max(df$y_scaled, na.rm = TRUE)
+    if (nrow(label_df) > 0 && is.finite(y_top)) {
+      overflow <- max(0, label_df$y_lab[nrow(label_df)] - (y_top - y_gap*0.5))
+      if (overflow > 0) label_df$y_lab <- label_df$y_lab - overflow
+    }
+
+    # sign-based horizontal nudge and clamp
+    sgn <- ifelse(is.finite(label_df$x_plot) & label_df$x_plot < 0, -1, 1)
+    label_df$x_lab <- label_df$x_plot + sgn * label_x_nudge
+    if (!is.null(x_lim) && length(x_lim) == 2 && all(is.finite(x_lim))) {
+      label_df$x_lab <- pmin(pmax(label_df$x_lab, min(x_lim)), max(x_lim))
+    }
+
+    # leader lines + labels
+    p <- p + ggplot2::geom_segment(
+      data = label_df,
+      ggplot2::aes(x = x_plot, xend = x_lab, y = y_scaled, yend = y_lab),
+      inherit.aes = FALSE,
+      linewidth = label_segment_size, alpha = label_segment_alpha, color = "#555555"
+    ) +
+    ggplot2::geom_label(
+      data = label_df,
+      ggplot2::aes(x = x_lab, y = y_lab, label = label),
+      size = label_size, label.size = 0.15,
+      label.padding = ggplot2::unit(0.10, "lines"),
+      fill = scales::alpha("white", 0.75), color = "black"
+    )
+  }
+
+  if (!is.null(save_prefix)) {
+    ggplot2::ggsave(paste0(save_prefix, ".png"), p, width = 7.5, height = 6.5, dpi = 500)
+    ggplot2::ggsave(paste0(save_prefix, ".pdf"), p, width = 7.5, height = 6.5)
+  }
+  p
+}
+
+# cp.pl.association_volcano: plot_association_volcano() on an association table with
+# signedMaxLog2FC_start (rownames from row_id). Returns the labelled genes.
+chronopack_plot_association_volcano_csv <- function(data_path, output, width = 7.5, height = 6.5, dpi = 500, ...) {
+  asso_df <- chronopack_read_plot_table(data_path)
+  asso_df$row_id <- NULL
+  p <- plot_association_volcano(asso_df, ...)
+  chronopack_save_plot(p, output, width = width, height = height, dpi = dpi)
+  label_layers <- Filter(function(l) inherits(l$geom, "GeomLabel"), p$layers)
+  cols <- c("signedMaxLog2FC_start", "waldStat_1", "qval_1")
+  if (!length(label_layers)) {
+    return(data.frame(gene = character(), signedMaxLog2FC_start = numeric(), waldStat_1 = numeric(),
+                      qval_1 = numeric(), side = character()))
+  }
+  d <- label_layers[[1]]$data
+  d <- d[order(d$waldStat_1, decreasing = TRUE), , drop = FALSE]
+  data.frame(gene = d$label, d[, cols, drop = FALSE], side = as.character(d$side), row.names = NULL)
+}
+
+# Two-context response-specificity volcano (VolcanoPlot.ipynb plot_association_volcano):
+# |log2FC(condA)| - |log2FC(condB)| against the larger (or difference of the) Wald statistics,
+# coloured by condition-specific induction / repression. Input: cp.tl.combine_context_associations().
+plot_response_specificity_volcano <- function(
+  asso_df,
+
+  # ---------- condition display names ----------
+  condition_key = c(
+    condA = "Condition A",
+    condB = "Condition B"
+  ),
+
+  # ---------- thresholds ----------
+  fdr_thresh        = 0.01,
+  require_fdr       = TRUE,
+  dyn_thresh_condA  = 0.75,
+  flat_thresh_condA = 0.25,
+  dyn_thresh_condB  = 0.75,
+  flat_thresh_condB = 0.25,
+
+  # ---------- plotting ----------
+  wald_mode         = c("max", "difference"),
+  point_alpha       = 0.95,
+  point_size        = 2.2,
+  axis_title_size   = 26,
+  axis_text_size    = 18,
+  legend_text_size  = 16,
+  axis_title_pad_x  = 12,
+  axis_title_pad_y  = 12,
+  y_log_floor       = 1e-6,
+  x_lim             = NULL,
+  y_lim             = NULL,
+  y_break           = NULL,
+  y_break_quantile  = 0.95,
+  y_lower_scale     = 0.35,
+
+  # ---------- labels ----------
+  top_labels        = 12,
+  label_size        = 4.6,
+  label_only_pass   = FALSE,
+  label_rank_by     = c("wald", "x"),
+  label_top_wald    = NULL,
+  label_top_condA   = NULL,
+  label_top_condB   = NULL,
+
+  # ---------- ggrepel controls ----------
+  repel_box_padding        = 0.25,
+  repel_point_padding      = 0.20,
+  repel_min_segment_length = 0,
+  repel_force              = 1.2,
+  repel_max_overlaps       = Inf,
+  repel_seed               = 1,
+
+  # ---------- optional legend-label overrides ----------
+  lab_condA_ind = NULL,
+  lab_condA_rep = NULL,
+  lab_condB_ind = NULL,
+  lab_condB_rep = NULL,
+
+  # ---------- colors ----------
+  col_condA_ind = "#E35335",
+  col_condA_rep = "#FFE5B4",
+  col_condB_ind = "#008000",
+  col_condB_rep = "#90EE90",
+
+  col_sigmid = "#6E6E6E",
+  col_other  = "#B8B8B8",
+  col_line   = "#6E6E6E",
+
+  # ---------- legend ----------
+  legend_pos      = c(0.03, 0.05),
+  legend_just     = c(0, 0),
+  legend_bg_alpha = 0.75,
+  legend_bg_col   = "white",
+  legend_key_size = 0.8,
+
+  save_prefix = NULL
+) {
+  label_rank_by <- match.arg(label_rank_by)
+  wald_mode <- match.arg(wald_mode)
+
+  required_cols <- c(
+    "waldStat_1", "waldStat_2", "qval",
+    "log2FC_t1", "log2FC_t2"
+  )
+
+  stopifnot(all(required_cols %in% names(asso_df)))
+
+  if (!all(c("condA", "condB") %in% names(condition_key))) {
+    stop(
+      "condition_key must be a named vector containing ",
+      "'condA' and 'condB'."
+    )
+  }
+
+  condA_name <- as.character(condition_key[["condA"]])
+  condB_name <- as.character(condition_key[["condB"]])
+
+  # Construct legend labels unless explicitly overridden
+  if (is.null(lab_condA_ind)) {
+    lab_condA_ind <- paste0(condA_name, "-specific induction")
+  }
+
+  if (is.null(lab_condA_rep)) {
+    lab_condA_rep <- paste0(condA_name, "-specific repression")
+  }
+
+  if (is.null(lab_condB_ind)) {
+    lab_condB_ind <- paste0(condB_name, "-specific induction")
+  }
+
+  if (is.null(lab_condB_rep)) {
+    lab_condB_rep <- paste0(condB_name, "-specific repression")
+  }
+
+  x_axis_label <- sprintf(
+    "Response specificity (|log2FC(%s)| - |log2FC(%s)|)",
+    condA_name,
+    condB_name
+  )
+
+  y_axis_label <- switch(
+    wald_mode,
+    max = expression(log[10]("Maximum Wald")),
+    difference = expression(log[10]("Wald difference"))
+  )
+
+  df <- asso_df
+
+  if (!requireNamespace("ggrepel", quietly = TRUE)) {
+    stop(
+      "Package 'ggrepel' is required. ",
+      "Install via install.packages('ggrepel')."
+    )
+  }
+
+  # ---------- condition mapping ----------
+  # t1 = condA; t2 = condB
+  condA_eff <- as.numeric(df$log2FC_t1)
+  condB_eff <- as.numeric(df$log2FC_t2)
+
+  # Right side means condA is more dynamic
+  x_raw <- abs(condA_eff) - abs(condB_eff)
+
+  # ---------- Wald metric ----------
+  wald_1 <- as.numeric(df$waldStat_1)
+  wald_2 <- as.numeric(df$waldStat_2)
+
+  if (wald_mode == "max") {
+    y_raw <- pmax(wald_1, wald_2, na.rm = TRUE)
+    y_raw[!is.finite(y_raw)] <- NA_real_
+  } else {
+    # Higher Wald minus lower Wald
+    y_raw <- ifelse(
+      is.finite(wald_1) & is.finite(wald_2),
+      abs(wald_1 - wald_2),
+      NA_real_
+    )
+  }
+
+  q_raw <- as.numeric(df$qval)
+
+  pass_fdr <- is.finite(q_raw) & q_raw < fdr_thresh
+
+  pass_gate <- if (isTRUE(require_fdr)) {
+    pass_fdr
+  } else {
+    rep(TRUE, nrow(df))
+  }
+
+  # ---------- clamp y ----------
+  y_plot <- ifelse(
+    is.finite(y_raw),
+    pmax(y_raw, y_log_floor),
+    y_log_floor
+  )
+
+  if (!is.null(y_lim) && length(y_lim) == 2) {
+    if (is.finite(y_lim[1])) {
+      y_plot <- pmax(
+        y_plot,
+        max(y_log_floor, y_lim[1])
+      )
+    }
+
+    if (is.finite(y_lim[2])) {
+      y_plot <- pmin(y_plot, y_lim[2])
+    }
+  }
+
+  # ---------- clamp x ----------
+  x_plot <- x_raw
+
+  if (
+    !is.null(x_lim) &&
+    length(x_lim) == 2 &&
+    all(is.finite(x_lim))
+  ) {
+    xmin <- min(x_lim)
+    xmax <- max(x_lim)
+    msk <- is.finite(x_plot)
+
+    x_plot[msk] <- pmin(
+      pmax(x_plot[msk], xmin),
+      xmax
+    )
+  }
+
+  df$x_plot <- x_plot
+  df$y_plot <- y_plot
+
+  # ---------- specificity and direction ----------
+  a_dyn <- is.finite(condA_eff) &
+    abs(condA_eff) >= dyn_thresh_condA
+
+  a_flat <- is.finite(condA_eff) &
+    abs(condA_eff) <= flat_thresh_condA
+
+  b_dyn <- is.finite(condB_eff) &
+    abs(condB_eff) >= dyn_thresh_condB
+
+  b_flat <- is.finite(condB_eff) &
+    abs(condB_eff) <= flat_thresh_condB
+
+  condA_spec <- pass_gate & a_dyn & b_flat
+  condB_spec <- pass_gate & b_dyn & a_flat
+
+  a_pos <- is.finite(condA_eff) & condA_eff > 0
+  a_neg <- is.finite(condA_eff) & condA_eff < 0
+  b_pos <- is.finite(condB_eff) & condB_eff > 0
+  b_neg <- is.finite(condB_eff) & condB_eff < 0
+
+  side <- rep("other", nrow(df))
+  side[pass_fdr] <- "sig_mid"
+
+  side[condA_spec & a_pos] <- "condA_ind"
+  side[condA_spec & a_neg] <- "condA_rep"
+  side[condB_spec & b_pos] <- "condB_ind"
+  side[condB_spec & b_neg] <- "condB_rep"
+
+  df$side <- factor(
+    side,
+    levels = c(
+      "other",
+      "sig_mid",
+      "condA_ind",
+      "condA_rep",
+      "condB_ind",
+      "condB_rep"
+    )
+  )
+
+  # ---------- label selection ----------
+  df$label <- ""
+
+  rn <- rownames(df)
+
+  gene_names <- if (!is.null(rn)) {
+    rn
+  } else if ("gene" %in% names(df)) {
+    as.character(df$gene)
+  } else {
+    as.character(seq_len(nrow(df)))
+  }
+
+  pass_side <- if (label_only_pass) {
+    df$side %in% c(
+      "condA_ind",
+      "condA_rep",
+      "condB_ind",
+      "condB_rep"
+    )
+  } else {
+    rep(TRUE, nrow(df))
+  }
+
+  labs_idx <- integer(0)
+
+  if (!is.null(label_top_wald) && as.integer(label_top_wald) > 0) {
+    cand <- which(is.finite(y_raw) & pass_side)
+
+    if (length(cand)) {
+      ord <- cand[
+        order(
+          y_raw[cand],
+          abs(x_raw[cand]),
+          decreasing = TRUE
+        )
+      ]
+
+      labs_idx <- c(
+        labs_idx,
+        head(ord, as.integer(label_top_wald))
+      )
+    }
+  }
+
+  if (!is.null(label_top_condA) && as.integer(label_top_condA) > 0) {
+    cand <- which(
+      df$side %in% c("condA_ind", "condA_rep") &
+        pass_side &
+        is.finite(condA_eff) &
+        is.finite(y_raw)
+    )
+
+    if (length(cand)) {
+      ord <- cand[
+        order(
+          abs(condA_eff[cand]),
+          y_raw[cand],
+          decreasing = TRUE
+        )
+      ]
+
+      labs_idx <- c(
+        labs_idx,
+        head(ord, as.integer(label_top_condA))
+      )
+    }
+  }
+
+  if (!is.null(label_top_condB) && as.integer(label_top_condB) > 0) {
+    cand <- which(
+      df$side %in% c("condB_ind", "condB_rep") &
+        pass_side &
+        is.finite(condB_eff) &
+        is.finite(y_raw)
+    )
+
+    if (length(cand)) {
+      ord <- cand[
+        order(
+          abs(condB_eff[cand]),
+          y_raw[cand],
+          decreasing = TRUE
+        )
+      ]
+
+      labs_idx <- c(
+        labs_idx,
+        head(ord, as.integer(label_top_condB))
+      )
+    }
+  }
+
+  if (length(labs_idx) == 0 && top_labels > 0) {
+    rank_val <- if (label_rank_by == "wald") {
+      y_raw
+    } else {
+      x_raw
+    }
+
+    cand <- which(
+      is.finite(rank_val) & pass_side
+    )
+
+    if (length(cand)) {
+      ord <- cand[
+        order(
+          rank_val[cand],
+          y_raw[cand],
+          decreasing = TRUE
+        )
+      ]
+
+      labs_idx <- head(
+        ord,
+        as.integer(top_labels)
+      )
+    }
+  }
+
+  labs_idx <- unique(labs_idx)
+  df$label[labs_idx] <- gene_names[labs_idx]
+
+  label_df <- df[
+    df$label != "" &
+      is.finite(df$x_plot) &
+      is.finite(df$y_plot),
+    ,
+    drop = FALSE
+  ]
+
+  # ---------- piecewise y scaling ----------
+  logy <- log10(df$y_plot)
+
+  if (is.null(y_break) || !is.finite(y_break)) {
+    non_sig <- df$y_plot[
+      !pass_fdr & is.finite(df$y_plot)
+    ]
+
+    y_break <- if (length(non_sig)) {
+      as.numeric(
+        stats::quantile(
+          non_sig,
+          probs = y_break_quantile,
+          na.rm = TRUE
+        )
+      )
+    } else {
+      as.numeric(
+        stats::quantile(
+          df$y_plot,
+          probs = 0.60,
+          na.rm = TRUE
+        )
+      )
+    }
+  }
+
+  y_break <- max(y_break, y_log_floor)
+  t_break <- log10(y_break)
+
+  y_lower_scale <- max(
+    1e-6,
+    min(1, y_lower_scale)
+  )
+
+  ps <- function(t) {
+    ifelse(
+      t <= t_break,
+      y_lower_scale * t,
+      y_lower_scale * t_break + (t - t_break)
+    )
+  }
+
+  df$y_scaled <- ps(log10(df$y_plot))
+
+  t_lo <- if (!is.null(y_lim) && is.finite(y_lim[1])) {
+    log10(max(y_log_floor, y_lim[1]))
+  } else {
+    min(logy[is.finite(logy)])
+  }
+
+  t_hi <- if (!is.null(y_lim) && is.finite(y_lim[2])) {
+    log10(y_lim[2])
+  } else {
+    max(logy[is.finite(logy)])
+  }
+
+  y_limits_scaled <- ps(c(t_lo, t_hi))
+
+  tick_t <- seq(
+    floor(t_lo),
+    ceiling(t_hi),
+    by = 1
+  )
+
+  tick_pos <- ps(tick_t)
+  tick_lab <- as.character(tick_t)
+
+  label_df$y_scaled <- ps(
+    log10(label_df$y_plot)
+  )
+
+  # ---------- colors ----------
+  col_map <- c(
+    other     = col_other,
+    sig_mid   = col_sigmid,
+    condA_ind = col_condA_ind,
+    condA_rep = col_condA_rep,
+    condB_ind = col_condB_ind,
+    condB_rep = col_condB_rep
+  )
+
+  # ---------- plot ----------
+  p <- ggplot2::ggplot(
+    df,
+    ggplot2::aes(
+      x = x_plot,
+      y = y_scaled
+    )
+  ) +
+    ggplot2::geom_point(
+      ggplot2::aes(colour = side),
+      shape = 16,
+      alpha = point_alpha,
+      size = point_size,
+      show.legend = TRUE
+    ) +
+    ggplot2::scale_colour_manual(
+      values = col_map,
+      breaks = c(
+        "condA_ind",
+        "condA_rep",
+        "condB_ind",
+        "condB_rep"
+      ),
+      labels = c(
+        lab_condA_ind,
+        lab_condA_rep,
+        lab_condB_ind,
+        lab_condB_rep
+      ),
+      drop = FALSE,
+      name = NULL
+    ) +
+    ggplot2::geom_vline(
+      xintercept = 0,
+      linetype = "solid",
+      linewidth = 0.6,
+      color = col_line
+    ) +
+    ggplot2::scale_x_continuous(
+      limits = if (
+        !is.null(x_lim) &&
+        length(x_lim) == 2
+      ) {
+        c(min(x_lim), max(x_lim))
+      } else {
+        NULL
+      }
+    ) +
+    ggplot2::scale_y_continuous(
+      limits = y_limits_scaled,
+      breaks = tick_pos,
+      labels = tick_lab
+    ) +
+    ggplot2::labs(
+      x = x_axis_label,
+      y = y_axis_label
+    ) +
+    ggplot2::theme_classic(
+      base_size = 20
+    ) +
+    ggplot2::theme(
+      panel.grid.major.y = ggplot2::element_line(
+        color = "grey85",
+        linewidth = 0.4
+      ),
+      panel.grid.minor.y = ggplot2::element_blank(),
+      axis.title.x = ggplot2::element_text(
+        size = axis_title_size,
+        margin = ggplot2::margin(
+          t = axis_title_pad_x
+        )
+      ),
+      axis.title.y = ggplot2::element_text(
+        size = axis_title_size,
+        face = "bold",
+        margin = ggplot2::margin(
+          r = axis_title_pad_y
+        )
+      ),
+      axis.text = ggplot2::element_text(
+        size = axis_text_size
+      ),
+      plot.margin = ggplot2::margin(
+        14, 18, 14, 16
+      ),
+      legend.position = legend_pos,
+      legend.justification = legend_just,
+      legend.background = ggplot2::element_rect(
+        fill = scales::alpha(
+          legend_bg_col,
+          legend_bg_alpha
+        ),
+        color = "grey60",
+        linewidth = 0.3
+      ),
+      legend.key = ggplot2::element_rect(
+        fill = NA,
+        color = NA
+      ),
+      legend.key.size = ggplot2::unit(
+        legend_key_size,
+        "lines"
+      ),
+      legend.text = ggplot2::element_text(
+        size = legend_text_size
+      )
+    )
+
+  # ---------- ggrepel labels ----------
+  if (nrow(label_df) > 0) {
+    p <- p +
+      ggrepel::geom_label_repel(
+        data = label_df,
+        ggplot2::aes(
+          x = x_plot,
+          y = y_scaled,
+          label = label
+        ),
+        inherit.aes = FALSE,
+        size = label_size,
+        label.size = 0.15,
+        label.padding = ggplot2::unit(
+          0.10,
+          "lines"
+        ),
+        fill = scales::alpha(
+          "white",
+          0.75
+        ),
+        color = "black",
+        box.padding = ggplot2::unit(
+          repel_box_padding,
+          "lines"
+        ),
+        point.padding = ggplot2::unit(
+          repel_point_padding,
+          "lines"
+        ),
+        min.segment.length = repel_min_segment_length,
+        force = repel_force,
+        max.overlaps = repel_max_overlaps,
+        seed = repel_seed
+      )
+  }
+
+  if (!is.null(save_prefix)) {
+    ggplot2::ggsave(
+      paste0(save_prefix, ".png"),
+      p,
+      width = 10,
+      height = 8.75,
+      dpi = 300
+    )
+
+    ggplot2::ggsave(
+      paste0(save_prefix, ".pdf"),
+      p,
+      width = 10,
+      height = 8.75,
+      dpi = 300
+    )
+  }
+
+  p
+}
+
+
+# cp.pl.response_specificity_volcano: plot_response_specificity_volcano() on a combined table
+# (rownames from row_id). Returns every gene's side and whether it is labelled.
+chronopack_plot_response_specificity_volcano_csv <- function(data_path, output, width = 10, height = 8.75,
+                                                              dpi = 300, ...) {
+  asso_df <- chronopack_read_plot_table(data_path)
+  asso_df$row_id <- NULL
+  p <- plot_response_specificity_volcano(asso_df, ...)
+  chronopack_save_plot(p, output, width = width, height = height, dpi = dpi)
+  d <- p$data
+  data.frame(gene = rownames(d), x = d$x_plot, y = d$y_plot, side = as.character(d$side),
+             labelled = d$label != "", row.names = NULL)
 }

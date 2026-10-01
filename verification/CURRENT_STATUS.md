@@ -1,6 +1,29 @@
 # Current Status: ChronoPack SCE/AnnData Refactor Verification
 
-Updated: 2026-09-30
+Updated: 2026-10-01
+
+## Update (2026-10-01): K562 + TNF-alpha figures (`05_Visualization`)
+
+- New `analyses/k562-tnfa.hg38.rep/05_Visualization.ipynb` (optional stage
+  `Visualization` in `run_pipeline.py`) ports the CreateFigures.ipynb figures
+  and the TradeSeqFits.ipynb volcano. Inputs: `output/adata_full.1e4-variant.chk1.h5ad`
+  and `intmd/sc-K562-1e4_to_tradeSeq.fixed/{asso_df,sce_screen}.1trajectory.nknots4.*`;
+  figures (PDF) go to `EXP_DIR/figures/`.
+- New API: `cp.tl.rotate_embedding_to_time`, `cp.tl.early_fate_correlations`,
+  `cp.tl.signed_max_log2fc_from_start` (R `signed_max_log2fc_start_many`, verbatim,
+  in `tradeseq_helpers.R`), `cp.pl.association_volcano` / `cp.pl.fdr_wald_break`
+  (R `plot_association_volcano` in `dimred_plotting_helpers.R`; `y_break="fdr"`
+  replaces the hard-coded 18.31693), and `cp.pl.cell_trajectories.{time_minutes,
+  trajectory_cell_types, fate_probability_panels, two_gene_fate_scatter,
+  top_fate_correlations}`. `fate_probabilities` (02 notebooks) is unchanged.
+- Check `verification_runs/k562_visualization_check_20261001/` (job 934618, r9
+  data via symlinks, editable env): no errors, one image per figure cell; promoted.
+  Early-bin correlations identical to the legacy outputs (top/bottom 10 genes and
+  r); volcano: 11,865 genes, y_break 17.3383 (RACGAP1), 712 genes q < 0.01, 22 of
+  the 30 labels shared with the legacy plot (different gene universe). The rotated
+  `ot_umap` is the x-mirror of the legacy layout, hence `flip_x=True`.
+- Wheel rebuilt: `install_test_20260925/dist_fix15` (installed in
+  chronopack-install-test). Tests: 94 passed.
 
 ## Update (2026-09-30): analyses/ layout, frozen env and puromycin removed
 
@@ -922,3 +945,64 @@ Before making more changes, inspect the current `git status --short` carefully.
   columns identical to r9 (n_diff 0); no errors; every plot cell has a PNG (01: 4, 02: 14).
   Top-k recovery = TESTING saved values (induced 0.61 / 0.35 / 0.26, repressed 0.11 /
   0.06 / 0.09). Executed 01/02 promoted. Wheel: `dist_fix14`.
+
+### 2026-10-01: gene-clustering notebooks merged; mode-conservation API removed
+
+- `gene_clustering/01_DimensionalityReduction&Clustering` + `02_ClusterVisualization` merged
+  into `gene_clustering/01_GeneTrajectoryClustering` (one setup cell, figures use the
+  in-memory `traj`; same output paths). New cell after the pies: paired modes grouped
+  (impulse-up, trend-up, trend-down, transient-down) as percent of responsive genes per
+  context and min-max range (13-25 / 24-41 / 44-52 / 2-6%). `run_pipeline.py`
+  `GeneClustering`, tests and README updated.
+- Removed `cp.tl.mode_conservation` / `mode_switchers` / `ModeConservationResult`,
+  `cp.pl.mode_conservation` and R `chronopack_plot_mode_conservation_csv` (with their tests);
+  `tl/_mode_conservation.py` keeps `MODE_DIRECTIONS` and `topk_mode_recovery`.
+- Verified (Slurm 934640, `gene_clustering_refactor_check_20261001/`): cluster columns
+  identical to r9 (n_diff 0); no errors; 17 inline plots (4 + 13, as in the previous 01/02);
+  text outputs of the moved cells equal the previous 02. Promoted. Wheel: `dist_fix16`.
+- 2026-10-01: `cp.pl.gene_dynamics_curves` (matplotlib grid of fitted NB-GAM curves, one
+  panel per gene, one curve + 95% band per group) added; K562+TNF `05_Visualization`
+  ends with the two-lineage curves (`predict_gene_dynamics(..., lineage=1/2,
+  sce_file="sce.2trajectory.nknots8.rds", time_max=110)`) for NFKBIA, NFKB2, ICAM1, BIRC3 /
+  CXCL3, CD69, IFNGR2, DDIT4. Re-executed on r9 + two-lineage check data (7 figures, no
+  errors) and promoted.
+
+### 2026-10-01: THP-1 + K562 + LPS `05_Visualization`
+
+- New `analyses/thp1-k562-lps.hg38.rep/05_Visualization.ipynb` (also in `run_pipeline.py`
+  `Visualization` as a separate job, README, notebook tests):
+  1. CreateFigures.ipynb final figure (endpoint UMAP, cells 3 + 8): new
+     `cp.pl.cell_trajectories.trajectory_endpoints`; `cp.tl.rotate_embedding_to_time(groupby=)`
+     rotates each cell type about its own centroid (CreateFigures cell 3, "preserve" mode).
+     Input `adata_hvg.chk1.h5ad` (original: `adata_both_prefiltered.h5ad`, not produced by the
+     pipeline; same cells and identical `traj_clusters` per barcode: 0 = NF-kB hi, 1 = lo, 2 = THP1).
+  2. VolcanoPlot.ipynb first volcano (K562b vs THP1): a different function from the K562
+     volcano, ported verbatim as R `plot_response_specificity_volcano` +
+     `cp.pl.response_specificity_volcano`; `make_combined_from_pc_df` ported as
+     `cp.tl.combine_context_associations`. Original inputs (`pc_df.rds` + `desc.pc_1e-1.rds` of the
+     old multi-experiment global analysis) replaced by the two `asso_df.1trajectory.nknots4.csv`
+     with `signed_max_log2fc_from_start(pseudocount=0.1)`; the original's gene-exclusion step was a
+     no-op (0 overlaps) and is dropped; no puromycin data used. Original arguments kept (y_break
+     default = 95% quantile logic). 28 of the original's 33 labels recur.
+  3. NB-GAM curves (THP1 / K562b, 8 knots, 0-165 min). Ad hoc fits: THP1 IRF1
+     (`fit_gene_dynamics(input_dir=THP1 fit, genes=...)`) and THP1 CD69, which is not a THP1
+     tradeSeq input (8 UMIs, low-count filter): fitted from the THP1 cells of
+     `adata_full.chk1.h5ad` prepared into a temporary folder (route checked: identical to the
+     folder fit for IRF1/NFKBIA, max diff 0).
+- Verified (Slurm 934657, `verification_runs/thp1_lps_visualization_check_20261001/`, per-file
+  r9 symlinks): no errors, 3 inline PNGs; promoted. Tests 95 pass. Wheel: `dist_fix17`.
+
+## Update (2026-10-01): NB-GAM composites in the GATA1 (`plot_tradeSeq_gene_multirun_pub`) style
+
+- New `cp.tl.observed_gene_dynamics(fit_or_input_dir, genes, *, lineage, lineage_weights, time_max)`:
+  per-cell `log1p(count * s_ref / sf)` (same reference library size as `predict_gene_dynamics`),
+  `t` in minutes, `weight` (normalized lineage weight, as in the backend) and `assigned`
+  (highest-weight lineage).
+- `cp.pl.gene_dynamics_curves(..., observations=...)`: cell points (group color, alpha 0.3,
+  rasterized), band + line, white-filled per-time-point means (weighted mean of normalized
+  counts, then log1p, as in the R reference); minimal theme, x ticks every 30 min.
+- Both 05_Visualization notebooks updated (K562: points colored by highest-weight lineage of
+  `cell_weights.csv`, means weighted per lineage; THP1/K562b: observations from each fit folder,
+  THP1 CD69 from the temporary input folder). Checks: Slurm 934686 (K562; `cell_weights.csv`
+  symlinked from `two_lineage_check_20260930`, counts identical to r9) and 934685 (THP1): no
+  errors; promoted. Tests: 97 passed. Wheel: `dist_fix18`.

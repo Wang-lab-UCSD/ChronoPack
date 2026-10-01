@@ -74,20 +74,6 @@ plot = cp.pl.gene_trajectory(
 )
 ```
 
-Cross-context analyses return result objects rather than forcing paired-dataset
-outputs into one AnnData:
-
-```python
-mode_res = cp.tl.mode_conservation(
-    source=adata_tnf,
-    target=adata_lps,
-    source_label="K562_TNFa",
-    target_label="THP1_LPS",
-)
-
-cp.pl.mode_conservation(mode_res, output="mode_conservation.svg")
-```
-
 Mode reassignment between contexts is plotted from the gene-trajectory AnnData
 (one row per gene and context, with `broad_cluster` in `obs`):
 

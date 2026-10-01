@@ -8,9 +8,9 @@ latest verified run (see `verification/`).
 
 | Folder | Notebooks, in order |
 |---|---|
-| `k562-tnfa.hg38.rep/` (K562 + TNF-α) | `01_PreprocessDatasets` → `02_GetTrajectories` → `03_PrepareForTradeSeq` → `04_TradeSeqFits` (and optionally `04_TradeSeqFits.TwoLineage`, not used downstream) |
-| `thp1-k562-lps.hg38.rep/` (THP-1 + K562 + LPS) | `01_PreprocessDatasets` → `02_GetTrajectories` → `03_PrepareForTradeSeq` → `04_TradeSeqFits.K562`, `04_TradeSeqFits.THP1` |
-| `gene_clustering/` (both experiments) | `01_DimensionalityReduction&Clustering` → `02_ClusterVisualization` |
+| `k562-tnfa.hg38.rep/` (K562 + TNF-α) | `01_PreprocessDatasets` → `02_GetTrajectories` → `03_PrepareForTradeSeq` → `04_TradeSeqFits` (and optionally `04_TradeSeqFits.TwoLineage`, not used downstream) → `05_Visualization` (figures) |
+| `thp1-k562-lps.hg38.rep/` (THP-1 + K562 + LPS) | `01_PreprocessDatasets` → `02_GetTrajectories` → `03_PrepareForTradeSeq` → `04_TradeSeqFits.K562`, `04_TradeSeqFits.THP1` → `05_Visualization` (figures) |
+| `gene_clustering/` (both experiments) | `01_GeneTrajectoryClustering` (clustering and figures) |
 | `c2c/` | `CellCommunication` |
 | `grn/` | `GRNInference` |
 

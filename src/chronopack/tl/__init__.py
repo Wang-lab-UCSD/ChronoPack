@@ -6,13 +6,14 @@ __all__ = [
     "CellStateTrajectoryResult",
     "GeneDynamicsResult",
     "GeneTrajectoryClusteringResult",
-    "ModeConservationResult",
     "get_trajectories",
     "cluster_cells_to_trajectories",
     "compute_terminal_fate_probabilities",
     "fit_gene_dynamics",
     "predict_gene_dynamics",
+    "observed_gene_dynamics",
     "signed_max_log2fc_from_start",
+    "combine_context_associations",
     "early_fate_correlations",
     "rotate_embedding_to_time",
     "identify_tag_bias_candidates",
@@ -24,8 +25,6 @@ __all__ = [
     "compute_gene_trajectory_descriptors",
     "cluster_gene_trajectories",
     "standardize_gene_trajectories",
-    "mode_conservation",
-    "mode_switchers",
     "topk_mode_recovery",
 ]
 
@@ -43,14 +42,12 @@ def __getattr__(name):
         from . import _gene_clustering
 
         return getattr(_gene_clustering, name)
-    if name == "ModeConservationResult":
-        from ._mode_conservation import ModeConservationResult
-
-        return ModeConservationResult
     if name in {
         "fit_gene_dynamics",
         "predict_gene_dynamics",
+        "observed_gene_dynamics",
         "signed_max_log2fc_from_start",
+        "combine_context_associations",
         "identify_tag_bias_candidates",
         "filter_tag_bias_candidates",
         "tag_bias_exclusion_genes",
@@ -67,7 +64,7 @@ def __getattr__(name):
         from . import _gene_clustering
 
         return getattr(_gene_clustering, name)
-    if name in {"mode_conservation", "mode_switchers", "topk_mode_recovery"}:
+    if name == "topk_mode_recovery":
         from . import _mode_conservation
 
         return getattr(_mode_conservation, name)

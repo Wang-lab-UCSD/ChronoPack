@@ -53,10 +53,9 @@ STAGES = {
     # Optional: the two-lineage K562 + TNF-alpha fit (not used downstream). Needs
     # more memory than 90G; run with --mem 160G --allow-bigcompute.
     "TradeSeqFitsTwoLineage": [(f"{K}/04_TradeSeqFits.TwoLineage.ipynb",)],
-    "GeneClustering": [(
-        "gene_clustering/01_DimensionalityReduction&Clustering.ipynb",
-        "gene_clustering/02_ClusterVisualization.ipynb",
-    )],
+    # Optional: figures of both experiments (need GetTrajectories and TradeSeqFits).
+    "Visualization": [(f"{K}/05_Visualization.ipynb",), (f"{T}/05_Visualization.ipynb",)],
+    "GeneClustering": [("gene_clustering/01_GeneTrajectoryClustering.ipynb",)],
     "CellCommunication": [("c2c/CellCommunication.ipynb",)],
     "GRNInference": [("grn/GRNInference.ipynb",)],
 }

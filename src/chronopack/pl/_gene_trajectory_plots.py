@@ -473,14 +473,152 @@ def clustering_metrics(
     return RPlotResult("clustering_metrics", data=data, output=rendered, backend="matplotlib", figure=fig)
 
 
+VOLCANO_COLUMNS = ("signedMaxLog2FC_start", "qval_1", "waldStat_1")
+
+
+def fdr_wald_break(asso_df, fdr_thresh: float = 0.01) -> float:
+    """``waldStat_1`` of the gene whose ``qval_1`` is closest to ``fdr_thresh`` (first on ties)."""
+    q = pd.to_numeric(asso_df["qval_1"], errors="coerce").to_numpy(float)
+    w = pd.to_numeric(asso_df["waldStat_1"], errors="coerce").to_numpy(float)
+    ok = np.isfinite(q) & np.isfinite(w)
+    if not ok.any():
+        raise ValueError("No genes with finite qval_1 and waldStat_1.")
+    return float(w[ok][np.argmin(np.abs(q[ok] - float(fdr_thresh)))])
+
+
+def association_volcano(
+    asso_df: pd.DataFrame,
+    *,
+    fdr_thresh: float = 0.01,
+    l2fc_thresh: float = 0.5,
+    top_labels: int = 12,
+    y_break: float | str | None = "fdr",
+    output: str | Path | None = None,
+    width: float = 7.5,
+    height: float = 6.5,
+    dpi: int = 500,
+    **kwargs,
+) -> RPlotResult:
+    """Volcano of a single-lineage tradeSeq association table (TradeSeqFits ``plot_association_volcano``).
+
+    ``asso_df`` is indexed by gene with ``waldStat_1``, ``qval_1`` (e.g.
+    ``asso_df.1trajectory.nknots4.csv``) and ``signedMaxLog2FC_start``
+    (:func:`chronopack.tl.signed_max_log2fc_from_start`). The y-axis is log10
+    Wald, compressed below ``y_break`` (Wald units) by ``y_lower_scale``:
+    ``"fdr"`` (default) uses the Wald of the gene whose ``qval_1`` is closest to
+    ``fdr_thresh`` (also where the dashed line is drawn), a number is used as is,
+    and ``None`` uses the ``y_break_quantile`` of the non-significant Walds.
+    Points with ``qval_1 < fdr_thresh`` are coloured by sign when
+    ``|log2FC| >= l2fc_thresh``; the ``top_labels`` genes by Wald are labelled.
+    Extra keyword arguments (``x_lim``, ``y_lim``, ``y_lower_scale``,
+    ``label_*``, ``axis_*_size``, ...) go to the R function. ``metadata`` holds
+    the ``y_break`` used and, once drawn, the labelled genes.
+    """
+    missing = [c for c in VOLCANO_COLUMNS if c not in asso_df]
+    if missing:
+        raise KeyError(f"Association table is missing column(s): {', '.join(missing)}.")
+    data = asso_df.loc[:, list(VOLCANO_COLUMNS)].apply(pd.to_numeric, errors="coerce")
+    data.insert(0, "row_id", asso_df.index.astype(str))
+    data = data.reset_index(drop=True)
+    if isinstance(y_break, str):
+        if y_break != "fdr":
+            raise ValueError("y_break must be a number, 'fdr' or None.")
+        y_break = fdr_wald_break(data, fdr_thresh)
+    rendered, preview, value = _draw(
+        "chronopack_plot_association_volcano_csv",
+        output,
+        tables={"data": data},
+        fdr_thresh=float(fdr_thresh),
+        l2fc_thresh=float(l2fc_thresh),
+        top_labels=int(top_labels),
+        y_break=None if y_break is None else float(y_break),
+        width=float(width),
+        height=float(height),
+        dpi=int(dpi),
+        **kwargs,
+    )
+    labels = _r_to_pandas(value) if value is not None else None
+    return RPlotResult(
+        "association_volcano",
+        data=data,
+        output=rendered,
+        preview_png=preview,
+        metadata={"y_break": y_break, "fdr_thresh": float(fdr_thresh), "n_genes": int(len(data)), "labels": labels},
+    )
+
+
+
+RESPONSE_SPECIFICITY_COLUMNS = ("waldStat_1", "waldStat_2", "qval", "log2FC_t1", "log2FC_t2")
+
+
+def response_specificity_volcano(
+    combined: pd.DataFrame,
+    conditions=("Condition A", "Condition B"),
+    *,
+    output: str | Path | None = None,
+    width: float = 10,
+    height: float = 8.75,
+    dpi: int = 300,
+    **kwargs,
+) -> RPlotResult:
+    """Two-context response-specificity volcano (VolcanoPlot ``plot_association_volcano``).
+
+    ``combined`` is indexed by gene with ``waldStat_1`` / ``waldStat_2``, ``qval`` and
+    ``log2FC_t1`` / ``log2FC_t2`` (context 1 = ``conditions[0]``), e.g. from
+    :func:`chronopack.tl.combine_context_associations`. The x-axis is
+    ``|log2FC_t1| - |log2FC_t2|``, the y-axis log10 of the larger Wald statistic
+    (``wald_mode="difference"``: their difference), compressed below ``y_break``
+    (Wald units; default: the ``y_break_quantile`` of the Walds with
+    ``qval >= fdr_thresh``) by ``y_lower_scale``. A gene is specific to a context when
+    its |log2FC| there is >= ``dyn_thresh_condA`` / ``dyn_thresh_condB`` and <=
+    ``flat_thresh_*`` in the other (and ``qval < fdr_thresh`` if ``require_fdr``).
+    Labels: ``label_top_wald`` genes by Wald plus the ``label_top_condA`` /
+    ``label_top_condB`` most specific genes (else ``top_labels``). Extra keyword
+    arguments (thresholds, ``x_lim``, ``y_lim``, ``label_*``, ``repel_*``, colours,
+    ...) go to the R function. ``metadata["genes"]`` has each gene's ``side``
+    (``other``, ``sig_mid``, ``condA_ind`` / ``condA_rep`` / ``condB_ind`` /
+    ``condB_rep``) and whether it is ``labelled``, once drawn.
+    """
+    missing = [c for c in RESPONSE_SPECIFICITY_COLUMNS if c not in combined]
+    if missing:
+        raise KeyError(f"Combined association table is missing column(s): {', '.join(missing)}.")
+    if isinstance(conditions, dict):
+        conditions = (conditions["condA"], conditions["condB"])
+    if len(conditions) != 2:
+        raise ValueError("conditions must name exactly two contexts.")
+    data = combined.loc[:, list(RESPONSE_SPECIFICITY_COLUMNS)].apply(pd.to_numeric, errors="coerce")
+    data.insert(0, "row_id", combined.index.astype(str))
+    data = data.reset_index(drop=True)
+    rendered, preview, value = _draw(
+        "chronopack_plot_response_specificity_volcano_csv",
+        output,
+        tables={"data": data},
+        condition_key={"condA": str(conditions[0]), "condB": str(conditions[1])},
+        width=float(width),
+        height=float(height),
+        dpi=int(dpi),
+        **kwargs,
+    )
+    genes = _r_to_pandas(value) if value is not None else None
+    return RPlotResult(
+        "response_specificity_volcano",
+        data=data,
+        output=rendered,
+        preview_png=preview,
+        metadata={"conditions": tuple(conditions), "n_genes": int(len(data)), "genes": genes},
+    )
+
 __all__ = [
     "CATEGORICAL_COLORS",
     "LOW_SIGNIFICANCE_COLOR",
     "MODE_COLORS",
     "MODE_ORDER",
     "RPlotResult",
+    "association_volcano",
     "cluster_medoids_and_top_genes",
     "clustering_metrics",
+    "fdr_wald_break",
     "gene_trajectory",
+    "response_specificity_volcano",
     "trajectory_features",
 ]

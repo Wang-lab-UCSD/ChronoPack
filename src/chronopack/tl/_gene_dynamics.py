@@ -543,7 +543,10 @@ def fit_gene_dynamics(
     lineages as a full run (a gene's fit equals its fit there), is written to a
     temporary folder rather than ``input_dir``, and can be passed to
     :func:`predict_gene_dynamics`. Its association table covers only those genes,
-    so q-values are adjusted over them alone.
+    so q-values are adjusted over them alone. ``tag`` selects tagged inputs
+    (``counts_genes_x_cells.{tag}.csv.gz``, ...); ``tag="full"`` reads the
+    unfiltered count matrix, so genes removed from the tradeSeq inputs (e.g. as
+    low-count) can be fitted too, on the same cells and offsets.
 
     tradeSeq SingleCellExperiment objects are retained as sidecar RDS files.
     Scalar association-test outputs are written to ``adata.var`` when
@@ -764,6 +767,95 @@ def predict_gene_dynamics(
     )
 
 
+def observed_gene_dynamics(
+    fit,
+    genes=None,
+    *,
+    lineage: int = 1,
+    lineage_weights=None,
+    time_max: float = 165.0,
+) -> pd.DataFrame:
+    """Per-cell normalized expression of selected genes, to plot under fitted curves.
+
+    ``fit`` is a :class:`GeneDynamicsResult` (``genes`` defaults to its genes and
+    ``lineage_weights`` to the fit's) or a tradeSeq input directory. Counts are
+    scaled to the reference library size used by
+    :func:`predict_gene_dynamics` (``count * s_ref / sf``, with ``sf`` the
+    normalized full-library sizes and ``s_ref`` their geometric mean), so points
+    and curves share one scale. Pseudotime 0-1 is mapped to 0-``time_max``
+    minutes. Returns one row per gene and cell with ``gene``, ``cell_id``, ``t``,
+    ``expr_log1p``, ``weight`` (the cell's weight in ``lineage``: 1 for a
+    single-lineage fit, else its normalized ``lineage_weights`` column, a CSV in
+    the input directory as in :func:`fit_gene_dynamics`) and ``assigned`` (True
+    when ``lineage`` is the cell's highest-weight lineage).
+    """
+    if isinstance(fit, GeneDynamicsResult):
+        input_dir = Path(fit.metadata["input_dir"])
+        genes = fit.selected_genes if genes is None else genes
+        if lineage_weights is None:
+            lineage_weights = fit.metadata.get("lineage_weights")
+    else:
+        input_dir = Path(fit)
+        if genes is None:
+            raise ValueError("genes is required when fit is an input directory.")
+    genes = [str(g) for g in ([genes] if isinstance(genes, str) else genes)]
+
+    wanted = set(genes)
+    chunks = []
+    for chunk in pd.read_csv(input_dir / "counts_genes_x_cells.csv.gz", index_col=0, chunksize=2000):
+        chunk.index = chunk.index.astype(str)
+        chunks.append(chunk[chunk.index.isin(wanted)])
+    counts = pd.concat(chunks)
+    missing = [g for g in genes if g not in counts.index]
+    if missing:
+        raise ChronoPackError(f"Genes not in the tradeSeq inputs: {', '.join(missing)}")
+    counts = counts.loc[genes]
+    cells = counts.columns.astype(str)
+
+    times = pd.read_csv(input_dir / "cell_times.csv.gz", index_col="cell_id")["time"]
+    times.index = times.index.astype(str)
+    time = times.reindex(cells).to_numpy(float)
+    pt = (time - np.nanmin(time)) / (np.nanmax(time) - np.nanmin(time))
+    libsize = pd.read_csv(input_dir / "cell_libsize_full.csv", index_col="cell_id")["libsize_full"]
+    libsize.index = libsize.index.astype(str)
+    sf = libsize.reindex(cells).to_numpy(float)
+    sf = sf / sf.mean()
+    scale = np.exp(np.mean(np.log(sf))) / sf
+
+    if lineage_weights is None:
+        if lineage != 1:
+            raise ValueError("lineage must be 1 without lineage_weights.")
+        weight, assigned = np.ones(len(cells)), np.ones(len(cells), dtype=bool)
+    else:
+        if isinstance(lineage_weights, pd.DataFrame):
+            cw = lineage_weights.copy()
+        else:
+            cw = pd.read_csv(input_dir / lineage_weights, index_col=0)
+        cw.index = cw.index.astype(str)
+        cw = cw.reindex(cells).to_numpy(float)
+        if np.isnan(cw).any():
+            raise ChronoPackError("lineage_weights is missing cells of the tradeSeq inputs.")
+        if not 1 <= lineage <= cw.shape[1]:
+            raise ValueError(f"lineage must be between 1 and {cw.shape[1]}.")
+        # As in the backend: rows normalized to 1, tiny weights treated as "not in the lineage".
+        cw = cw / cw.sum(axis=1, keepdims=True)
+        cw[cw < 1e-6] = 0
+        weight, assigned = cw[:, lineage - 1], cw.argmax(axis=1) == lineage - 1
+
+    expr = np.log1p(counts.to_numpy(float) * scale)
+    n_genes, n_cells = expr.shape
+    return pd.DataFrame(
+        {
+            "gene": np.repeat(genes, n_cells),
+            "cell_id": np.tile(cells.to_numpy(), n_genes),
+            "t": np.tile(pt * float(time_max), n_genes),
+            "expr_log1p": expr.ravel(),
+            "weight": np.tile(weight, n_genes),
+            "assigned": np.tile(assigned, n_genes),
+        }
+    )
+
+
 def signed_max_log2fc_from_start(
     fit,
     genes=None,
@@ -787,7 +879,7 @@ def signed_max_log2fc_from_start(
     import tempfile
 
     if isinstance(fit, GeneDynamicsResult):
-        sce_path = Path(fit.sidecar_paths["sce"]) if sce_file is None else Path(fit.metadata["input_dir"]) / sce_file
+        sce_path = Path(fit.metadata["input_dir"]) / sce_file
         if genes is None and fit.association is not None:
             genes = fit.association.index
     else:
@@ -810,8 +902,64 @@ def signed_max_log2fc_from_start(
                      name="signedMaxLog2FC_start")
 
 
+
+def combine_context_associations(
+    asso_1: pd.DataFrame,
+    asso_2: pd.DataFrame,
+    *,
+    wald_col: str = "waldStat_1",
+    log2fc_col: str = "signedMaxLog2FC_start",
+    pvalue_col: str = "pvalue_1",
+    qval_col: str = "qval_1",
+    qval_fun: str = "max",
+    keep_only_common: bool = True,
+    fill_missing: bool = False,
+    arrange_by_wald_1: bool = True,
+) -> pd.DataFrame:
+    """Pair two contexts' single-lineage association tables by gene (VolcanoPlot ``make_combined_from_pc_df``).
+
+    ``asso_1`` / ``asso_2`` are indexed by gene, e.g. ``asso_df.1trajectory.nknots4.csv``
+    with ``signedMaxLog2FC_start`` added. Returns ``waldStat_1``, ``waldStat_2``,
+    ``qval`` (``qval_fun`` = ``"max"`` or ``"min"`` of the two q-values, ignoring
+    missing ones), ``log2FC_t1``, ``log2FC_t2``, ``pvalue_1``, ``pvalue_2``, indexed by
+    gene, the input of :func:`chronopack.pl.response_specificity_volcano`. Genes in
+    both tables are kept, or all genes with ``keep_only_common=False``;
+    ``fill_missing=True`` keeps all genes and gives a gene missing from one context
+    Wald 0, log2FC 0 and p- and q-value 1 there (as do missing values). Sorted by ``waldStat_1``
+    (descending) unless ``arrange_by_wald_1=False``.
+    """
+    if qval_fun not in ("max", "min"):
+        raise ValueError("qval_fun must be 'max' or 'min'.")
+    cols = {pvalue_col: "pvalue", wald_col: "waldStat", log2fc_col: "log2FC_t", qval_col: "qval_tmp"}
+    parts = []
+    for i, asso in enumerate((asso_1, asso_2), start=1):
+        missing = [c for c in cols if c not in asso]
+        if missing:
+            raise KeyError(f"Association table {i} is missing column(s): {', '.join(missing)}.")
+        part = asso.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce")
+        part.columns = [f"{name}{'' if name == 'log2FC_t' else '_'}{i}" for name in cols.values()]
+        part.index = part.index.astype(str)
+        parts.append(part)
+    how = "outer" if (fill_missing or not keep_only_common) else "inner"
+    combined = parts[0].join(parts[1], how=how, sort=False)
+    if how == "outer":
+        combined = combined.reindex(list(dict.fromkeys([*parts[0].index, *parts[1].index])))
+    if fill_missing:
+        fill = {}
+        for i in (1, 2):
+            fill.update({f"waldStat_{i}": 0.0, f"log2FC_t{i}": 0.0, f"pvalue_{i}": 1.0, f"qval_tmp_{i}": 1.0})
+        combined = combined.fillna(fill)
+    q = combined[["qval_tmp_1", "qval_tmp_2"]]
+    combined["qval"] = q.max(axis=1) if qval_fun == "max" else q.min(axis=1)
+    combined = combined[["waldStat_1", "waldStat_2", "qval", "log2FC_t1", "log2FC_t2", "pvalue_1", "pvalue_2"]]
+    if arrange_by_wald_1:
+        combined = combined.sort_values("waldStat_1", ascending=False, kind="stable")
+    combined.index.name = "gene"
+    return combined
+
 __all__ = [
     "GeneDynamicsResult",
+    "combine_context_associations",
     "compute_smooth_correlations",
     "filter_tag_bias_candidates",
     "fit_gene_dynamics",

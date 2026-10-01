@@ -2,6 +2,13 @@
 
 Status: package-backed cross-context mode comparison slice complete.
 
+> **Removed 2026-10-01:** `cp.tl.mode_conservation()`, `cp.tl.mode_switchers()`,
+> `ModeConservationResult` and `cp.pl.mode_conservation()` (R
+> `chronopack_plot_mode_conservation_csv`) were removed; no analysis notebook used
+> them. The sections below describe them historically. Cross-context comparisons now
+> use `cp.pl.mode_proportions()`, `cp.pl.mode_sankey()`, `cp.pl.mode_chord()` and
+> `cp.tl.topk_mode_recovery()` (see the update at the end).
+
 This pass migrated reusable cross-context dynamic-mode analysis and its direct
 visualization primitives. It did not migrate GRN, C2C, or any new scientific
 methodology.
@@ -189,7 +196,7 @@ Full lightweight suite after this migration: `51 passed, 1 warning`.
 ## Update 2026-10-01: TESTING.ipynb plotting port
 
 `03_ModeConservation` was removed; its figures are part of
-`02_ClusterVisualization`. `cp.pl.mode_sankey()` and `cp.pl.mode_chord()` now
+`02_ClusterVisualization` (since merged into `01_GeneTrajectoryClustering`). `cp.pl.mode_sankey()` and `cp.pl.mode_chord()` now
 take the gene-trajectory AnnData and draw with the TESTING
 `plot_cluster_reassignment_sankey()` / `plot_cluster_reassignment_chord_pairwise()`
 (context pairs or a context list, top-k by `waldStat_1`), replacing the
@@ -198,3 +205,13 @@ transition-table renderers. New: `cp.pl.mode_proportions()` (pie charts),
 `cp.tl.topk_mode_recovery()` (`calc_topk_mode_recovery()`). `cp.tl.mode_conservation()`,
 `cp.tl.mode_switchers()` and `cp.pl.mode_conservation()` are kept (per-mode,
 bidirectional statistic and switcher tables; not used by the notebooks).
+
+## Update 2026-10-01: removal of the conservation statistic
+
+`cp.tl.mode_conservation()`, `cp.tl.mode_switchers()`, `ModeConservationResult`,
+`cp.pl.mode_conservation()` and the R `chronopack_plot_mode_conservation_csv` were
+removed, together with the helpers that only served them (`mode_annotation_table`,
+`CANONICAL_DYNAMIC_MODES`, `MISSING_LABEL`). `chronopack.tl._mode_conservation` now
+holds only `MODE_DIRECTIONS` and `cp.tl.topk_mode_recovery()`; their tests were
+removed from `tests/test_mode_conservation.py`. The gene-clustering figures moved
+into `analyses/gene_clustering/01_GeneTrajectoryClustering.ipynb`.

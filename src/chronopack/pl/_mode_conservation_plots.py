@@ -21,18 +21,9 @@ from chronopack.pl._gene_trajectory_plots import (
     _draw,
     _obs_table,
     _r_to_pandas,
-    _render,
 )
 
 LOW_SIGNIFICANCE_LABEL = "low_significance"
-
-
-def _result_table(result_or_table, name: str) -> pd.DataFrame:
-    if isinstance(result_or_table, pd.DataFrame):
-        return result_or_table.copy()
-    if hasattr(result_or_table, name):
-        return getattr(result_or_table, name).copy()
-    raise TypeError(f"Expected a DataFrame or an object with attribute '{name}'.")
 
 
 def _mode_table(adata, groupby: str, extra=()) -> pd.DataFrame:
@@ -46,27 +37,6 @@ def _mode_palette(modes) -> dict[str, str]:
     if LOW_SIGNIFICANCE_LABEL in modes:
         palette[LOW_SIGNIFICANCE_LABEL] = LOW_SIGNIFICANCE_COLOR
     return palette
-
-
-def mode_conservation(
-    result,
-    *,
-    output: str | Path | None = None,
-    width: float = 7,
-    height: float = 4,
-    title: str | None = None,
-) -> RPlotResult:
-    """Plot bidirectional dynamic-mode conservation scores."""
-    data = _result_table(result, "conservation_scores")
-    rendered, preview = _render(
-        "chronopack_plot_mode_conservation_csv",
-        data,
-        output,
-        width=float(width),
-        height=float(height),
-        title="" if title is None else str(title),
-    )
-    return RPlotResult("mode_conservation", data=data, output=rendered, preview_png=preview)
 
 
 def mode_proportions(
@@ -382,7 +352,6 @@ __all__ = [
     "cluster_pair_representative_genes",
     "cluster_violin",
     "mode_chord",
-    "mode_conservation",
     "mode_proportions",
     "mode_sankey",
 ]

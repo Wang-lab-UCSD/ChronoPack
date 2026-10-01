@@ -18,6 +18,9 @@ def read_r_plotting_resource(name="dimred_plotting_helpers.R"):
 def __getattr__(name):
     if name in {
         "RPlotResult",
+        "association_volcano",
+        "response_specificity_volcano",
+        "fdr_wald_break",
         "MODE_COLORS",
         "MODE_ORDER",
         "CATEGORICAL_COLORS",
@@ -31,7 +34,6 @@ def __getattr__(name):
 
         return getattr(_gene_trajectory_plots, name)
     if name in {
-        "mode_conservation",
         "mode_proportions",
         "mode_sankey",
         "mode_chord",
@@ -41,6 +43,10 @@ def __getattr__(name):
         from . import _mode_conservation_plots
 
         return getattr(_mode_conservation_plots, name)
+    if name == "gene_dynamics_curves":
+        from ._gene_dynamics_plots import gene_dynamics_curves
+
+        return gene_dynamics_curves
     if name == "c2c":
         import importlib
 
@@ -58,18 +64,21 @@ __all__ = [
     "MODE_COLORS",
     "MODE_ORDER",
     "RPlotResult",
+    "association_volcano",
     "cluster_medoids_and_top_genes",
     "cluster_pair_representative_genes",
     "cluster_violin",
     "clustering_metrics",
+    "fdr_wald_break",
+    "gene_dynamics_curves",
     "gene_trajectory",
     "mode_chord",
-    "mode_conservation",
     "mode_proportions",
     "mode_sankey",
     "c2c",
     "cell_trajectories",
     "r_plotting_resource_path",
     "read_r_plotting_resource",
+    "response_specificity_volcano",
     "trajectory_features",
 ]

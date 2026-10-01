@@ -23,11 +23,12 @@ Recommended public imports:
   - `fit_gene_dynamics`
   - `characterize_gene_trajectories`
   - `cluster_gene_trajectories`
-  - `mode_conservation`, `mode_switchers`
+  - `topk_mode_recovery`
   - `CellStateTrajectoryResult`, `GeneDynamicsResult`
   - `GeneTrajectoryCharacterizationResult`
   - `GeneTrajectoryClusteringResult`
-  - `ModeConservationResult`
+  - (removed 2026-10-01: `mode_conservation`, `mode_switchers`,
+    `ModeConservationResult`, `cp.pl.mode_conservation`)
 - `chronopack.tl.grn`
   - `infer`, `rank_regulators`, `score_targets`
   - `GRNResult`, `TargetGeneScoreResult`
@@ -37,7 +38,7 @@ Recommended public imports:
 - `chronopack.pl`
   - `gene_trajectory`, `trajectory_features`,
     `cluster_medoids_and_top_genes`, `clustering_metrics`
-  - `mode_conservation`, `mode_proportions`, `mode_sankey`, `mode_chord`,
+  - `mode_proportions`, `mode_sankey`, `mode_chord`,
     `cluster_pair_representative_genes`, `cluster_violin`
   - `RPlotResult`
 - `chronopack.pl.c2c`

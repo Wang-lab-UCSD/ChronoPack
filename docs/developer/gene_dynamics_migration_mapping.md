@@ -78,8 +78,11 @@ Python-side preparation writes:
   `adata.layers["counts"]`.
 - `cell_times.csv.gz`: `cell_id`, numeric `time`.
 - `subset_genes.csv`: filtered genes used by the screen fit.
-- `cell_libsize_full.csv`: full-object `total_counts`, written from the
-  `tag="full"` object and used for size factors.
+- `cell_libsize_full.csv`: per-cell library size over all genes, from
+  `adata.obs["total_counts"]` (set by `sc.pp.calculate_qc_metrics` in
+  preprocessing; gene filtering does not change it), used for size factors.
+  Since 2026-09-30 there is no `full_adata` argument and no `*.full.*` copies of
+  the counts / times / gene list (nothing read them).
 - optional compatibility filename variants through the current helper.
 
 R-side fitting reads these files, aligns by cell IDs, constructs:
@@ -249,7 +252,6 @@ cp.tl.fit_gene_dynamics(
     key_added="gene_dynamics",
     input_dir=None,
     output_dir=None,
-    full_adata=None,
     prepare_inputs=False,
     run_backend=True,
     n_points=9,

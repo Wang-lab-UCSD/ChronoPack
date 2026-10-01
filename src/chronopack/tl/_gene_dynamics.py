@@ -302,14 +302,25 @@ def prepare_tradeseq_inputs(
     adata,
     output_dir,
     *,
-    full_adata=None,
     layer="counts",
     time_key="time",
     gene_subset=None,
+    cell_weights=None,
     tag="",
 ):
-    """Write the current tradeSeq CSV inputs from an AnnData object."""
+    """Write the tradeSeq CSV inputs from an AnnData object.
+
+    Writes the ``layer`` counts (genes x cells), cell times and gene list, plus
+    ``cell_libsize_full.csv`` from ``obs["total_counts"]``: the per-cell library
+    size over all genes (set by ``sc.pp.calculate_qc_metrics`` before gene
+    filtering; gene subsetting does not change it), which the backend turns into
+    size-factor offsets. ``cell_weights`` (cells x lineages, e.g. from
+    ``cp.tl.trajectory_soft_memberships``) is written to ``cell_weights.csv`` for a
+    multi-lineage fit (``fit_gene_dynamics(lineage_weights="cell_weights.csv")``).
+    """
     validate_adata(adata, time_key=time_key, layer=layer)
+    if "total_counts" not in adata.obs:
+        raise ChronoPackError("tradeSeq inputs need per-cell library sizes in obs['total_counts'].")
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -352,19 +363,22 @@ def prepare_tradeseq_inputs(
     time_df.to_csv(paths["cell_times"], index=False)
     pd.Series(genes, name="gene").to_csv(paths["subset_genes"], index=False)
 
-    if tag == "full":
-        lib_source = full_adata if full_adata is not None else adata
-        if "total_counts" not in lib_source.obs:
-            raise ChronoPackError("Writing full tradeSeq inputs requires obs['total_counts'].")
-        lib_obs = lib_source.obs.loc[cells]
-        lib_df = pd.DataFrame(
-            {
-                "cell_id": cells,
-                "libsize_full": lib_obs["total_counts"].to_numpy(),
-            }
-        )
-        paths["cell_libsize_full"] = output_dir / "cell_libsize_full.csv"
-        lib_df.to_csv(paths["cell_libsize_full"], index=False)
+    paths["cell_libsize_full"] = output_dir / "cell_libsize_full.csv"
+    pd.DataFrame({"cell_id": cells, "libsize_full": adata.obs["total_counts"].to_numpy()}).to_csv(
+        paths["cell_libsize_full"], index=False
+    )
+
+    if cell_weights is not None:
+        weights = pd.DataFrame(cell_weights)
+        weights.index = weights.index.astype(str)
+        missing = pd.Index(cells).difference(weights.index)
+        if len(missing):
+            raise ChronoPackError(f"cell_weights is missing {len(missing)} cells, e.g. {list(missing[:3])}.")
+        weights = weights.loc[cells]
+        if weights.shape[1] < 2 or (weights.to_numpy(float) < 0).any() or (weights.sum(axis=1) <= 0).any():
+            raise ChronoPackError("cell_weights needs >= 2 lineage columns of non-negative weights per cell.")
+        paths["cell_weights"] = output_dir / "cell_weights.csv"
+        weights.to_csv(paths["cell_weights"], index_label="cell_id")
 
     return {key: str(path) for key, path in paths.items()}
 
@@ -410,6 +424,7 @@ def _run_tradeseq_backend(
     legacy_outputs,
     tag,
     verbose,
+    lineage_weights=None,
 ):
     try:
         from rpy2.robjects import StrVector, r
@@ -418,8 +433,12 @@ def _run_tradeseq_backend(
 
     source_r_resource("tradeseq_helpers.R")
     r["load_chronopack_tradeseq_libraries"]()
-    run = r["run_tradeseq_single_lineage"]
+    if lineage_weights is None:
+        run, extra = r["run_tradeseq_single_lineage"], {}
+    else:
+        run, extra = r["run_tradeseq_weighted_lineages"], {"weights_file": str(lineage_weights)}
     return run(
+        **extra,
         input_dir=str(input_dir),
         n_points=int(n_points),
         workers=int(workers),
@@ -464,8 +483,9 @@ def fit_gene_dynamics(
     key_added=GENE_DYNAMICS_KEY,
     input_dir=None,
     output_dir=None,
-    full_adata=None,
     prepare_inputs=False,
+    cell_weights=None,
+    lineage_weights=None,
     run_backend=True,
     n_points=9,
     workers=4,
@@ -481,6 +501,14 @@ def fit_gene_dynamics(
 ):
     """Fit gene dynamics with the tradeSeq backend.
 
+    By default one lineage is fitted along time: a ``screen_nknots`` screen of
+    all genes with a per-gene association test, then a ``final_nknots`` refit of
+    genes with p < ``p_threshold``. With ``lineage_weights`` (a cell-weights CSV in
+    ``input_dir``, written by ``prepare_inputs=True`` with ``cell_weights``), one
+    lineage per weight column is fitted along the same time axis, with global and
+    per-lineage association tests; genes with p < ``p_threshold`` in any of them
+    are refitted, and outputs are named ``*.{n}trajectory.*``.
+
     tradeSeq SingleCellExperiment objects are retained as sidecar RDS files.
     Scalar association-test outputs are written to ``adata.var`` when
     ``adata`` is supplied.
@@ -492,14 +520,30 @@ def fit_gene_dynamics(
     if target is not None:
         validate_adata(target, time_key=time_key, layer=layer)
 
+    if output_dir is not None and input_dir is None:
+        input_dir = output_dir
+    if input_dir is None:
+        raise ValueError("input_dir or output_dir must be provided.")
+    input_dir = Path(input_dir)
+
     if outputs is None:
+        n = "1trajectory"
+        if lineage_weights is not None and run_backend:
+            weights_path = input_dir / lineage_weights
+            if not weights_path.exists() and not prepare_inputs:
+                raise FileNotFoundError(f"Missing lineage weights file {weights_path}.")
+            n_lineages = (
+                pd.DataFrame(cell_weights).shape[1] if cell_weights is not None
+                else len(pd.read_csv(weights_path, nrows=0).columns) - 1
+            )
+            n = f"{n_lineages}trajectory"
         outputs = {
-            "association": "asso_df.1trajectory.nknots4.csv",
-            "significant": "sig_df.1trajectory.nknots4.csv",
-            "sce_screen": "sce_screen.1trajectory.nknots4.rds",
-            "sce": "sce.1trajectory.nknots8.rds",
-            "screen_genes": "screen_genes.1trajectory.nknots4.csv",
-            "session_info": "sessionInfo.tradeSeqFits.txt",
+            "association": f"asso_df.{n}.nknots4.csv",
+            "significant": f"sig_df.{n}.nknots4.csv",
+            "sce_screen": f"sce_screen.{n}.nknots4.rds",
+            "sce": f"sce.{n}.nknots8.rds",
+            "screen_genes": f"screen_genes.{n}.nknots4.csv",
+            "session_info": "sessionInfo.tradeSeqFits.txt" if n == "1trajectory" else f"sessionInfo.tradeSeqFits.{n}.txt",
         }
     if legacy_outputs is None:
         legacy_outputs = {
@@ -510,12 +554,6 @@ def fit_gene_dynamics(
             "screen_genes": [],
         }
 
-    if output_dir is not None and input_dir is None:
-        input_dir = output_dir
-    if input_dir is None:
-        raise ValueError("input_dir or output_dir must be provided.")
-    input_dir = Path(input_dir)
-
     prepared_paths = {}
     if prepare_inputs:
         if target is None:
@@ -524,25 +562,11 @@ def fit_gene_dynamics(
             prepare_tradeseq_inputs(
                 target,
                 input_dir,
-                full_adata=full_adata,
                 layer=layer,
                 time_key=time_key,
+                cell_weights=cell_weights,
                 tag="",
             )
-        )
-        full_source = full_adata if full_adata is not None else target
-        prepared_paths.update(
-            {
-                f"full_{key}": value
-                for key, value in prepare_tradeseq_inputs(
-                    full_source,
-                    input_dir,
-                    full_adata=full_source,
-                    layer=layer,
-                    time_key=time_key,
-                    tag="full",
-                ).items()
-            }
         )
 
     metadata = {
@@ -556,6 +580,7 @@ def fit_gene_dynamics(
         "p_threshold": p_threshold,
         "outputs": outputs,
         "legacy_outputs": legacy_outputs,
+        "lineage_weights": lineage_weights,
         "prepared_paths": prepared_paths,
     }
 
@@ -577,6 +602,7 @@ def fit_gene_dynamics(
             legacy_outputs=legacy_outputs,
             tag=tag,
             verbose=verbose,
+            lineage_weights=lineage_weights,
         )
         association, significant, selected_genes, sidecar_paths = _read_tradeseq_outputs(
             backend_result,
@@ -618,6 +644,65 @@ def fit_gene_dynamics(
     return result if return_model else None
 
 
+def predict_gene_dynamics(
+    input_dir: str | Path,
+    genes,
+    *,
+    n_points: int = 100,
+    time_max: float = 165.0,
+    sce_file: str = "sce_screen.1trajectory.nknots4.rds",
+) -> pd.DataFrame:
+    """Fitted tradeSeq curves for selected genes on an even time grid.
+
+    Reads a single-lineage fit written by :func:`fit_gene_dynamics` in
+    ``input_dir`` (by default the 4-knot screen fit, which covers every tested
+    gene) and predicts each gene at the reference library size, the geometric
+    mean of the normalized full-library sizes. Pseudotime 0-1 is mapped to
+    0-``time_max`` minutes. Returns one row per gene and time point with
+    ``gene``, ``t`` (minutes) and ``mu_log1p`` / ``lo_log1p`` / ``hi_log1p``
+    (log1p of the predicted mean count and its 95% band).
+    """
+    import tempfile
+
+    input_dir = Path(input_dir)
+    genes = [str(g) for g in ([genes] if isinstance(genes, str) else genes)]
+    libsize = pd.read_csv(input_dir / "cell_libsize_full.csv")["libsize_full"].to_numpy(float)
+    off_ref = float(np.mean(np.log(libsize / libsize.mean())))
+
+    source_r_resource("dimred_plotting_helpers.R")  # predict_tradeSeq_sce_with_se()
+    try:
+        from rpy2.robjects import StrVector, r
+    except ImportError as exc:
+        raise ImportError("Predicting tradeSeq curves requires the optional 'rpy2' dependency.") from exc
+    predict = r(
+        """
+        function(sce_path, genes, n_points, off_ref, out) {
+          # rownames()/rowData() on the SCE only dispatch correctly with the package attached.
+          suppressPackageStartupMessages(library(SingleCellExperiment))
+          sce <- readRDS(sce_path)
+          missing <- setdiff(genes, rownames(sce))
+          if (length(missing)) stop("Genes not in the tradeSeq fit: ", paste(missing, collapse = ", "))
+          res <- do.call(rbind, lapply(genes, function(g)
+            predict_tradeSeq_sce_with_se(sce, g, lineageId = 1, nPoints = n_points, off_ref = off_ref)))
+          write.csv(res, out, row.names = FALSE)
+        }
+        """
+    )
+    with tempfile.TemporaryDirectory(prefix="chronopack-curves-") as tmp:
+        out = Path(tmp) / "curves.csv"
+        predict(str(input_dir / sce_file), StrVector(genes), int(n_points), off_ref, str(out))
+        curves = pd.read_csv(out)
+    return pd.DataFrame(
+        {
+            "gene": curves["gene"],
+            "t": curves["pt"] * float(time_max),
+            "mu_log1p": curves["mu"],
+            "lo_log1p": curves["lo"],
+            "hi_log1p": curves["hi"],
+        }
+    )
+
+
 __all__ = [
     "GeneDynamicsResult",
     "compute_smooth_correlations",
@@ -625,6 +710,7 @@ __all__ = [
     "fit_gene_dynamics",
     "identify_tag_bias_candidates",
     "load_negative_control_logcpm",
+    "predict_gene_dynamics",
     "prepare_tradeseq_inputs",
     "refilter_tag_bias_candidates",
     "smooth_series",

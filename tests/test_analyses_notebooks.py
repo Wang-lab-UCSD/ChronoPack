@@ -9,6 +9,7 @@ GET_TRAJECTORIES = [f"{e}/02_GetTrajectories.ipynb" for e in EXPERIMENTS]
 PREPARE = [f"{e}/03_PrepareForTradeSeq.ipynb" for e in EXPERIMENTS]
 TRADESEQ_FITS = [
     "k562-tnfa.hg38.rep/04_TradeSeqFits.ipynb",
+    "k562-tnfa.hg38.rep/04_TradeSeqFits.TwoLineage.ipynb",
     "thp1-k562-lps.hg38.rep/04_TradeSeqFits.K562.ipynb",
     "thp1-k562-lps.hg38.rep/04_TradeSeqFits.THP1.ipynb",
 ]
@@ -66,7 +67,7 @@ def test_preprocess_notebooks_use_loader_and_qc_helper():
         assert "cp.io.annotate_qc_metrics" not in joined, path
         assert "cp.io.filter_cells_by_qc" not in joined, path
         assert "cp.io.initialize_expression_layers" not in joined, path
-        assert "cp.io.validate_preprocessed_adata" in joined, path
+        assert "cp.io.validate_preprocessed_adata" not in joined, path
 
 
 def test_wot_notebooks_use_workflow_helper():
@@ -116,7 +117,7 @@ def test_prepare_tradeseq_notebooks_use_gene_dynamics_backend():
         assert "WriteTradeSeqInputsFromAnnData" not in joined, path
 
 
-PIPELINE_NOTEBOOKS = NOTEBOOKS + TRADESEQ_FITS + GENE_CLUSTERING
+PIPELINE_NOTEBOOKS = NOTEBOOKS + TRADESEQ_FITS + GENE_CLUSTERING + ["c2c/CellCommunication.ipynb", "grn/GRNInference.ipynb"]
 # Notebooks whose analysis logic must come from the package (the plotting
 # notebooks may define small row-selection helpers).
 ANALYSIS_NOTEBOOKS = NOTEBOOKS + TRADESEQ_FITS + GENE_CLUSTERING[:1]
@@ -144,6 +145,18 @@ def test_pipeline_notebooks_read_and_write_under_the_data_dir():
     for path in PIPELINE_NOTEBOOKS:
         joined = "\n".join(_code_sources(path))
         assert 'DATA_DIR = Path(os.environ.get("CHRONOPACK_DATA_DIR", "../data"))' in joined, path
-        assert not re.search(r"""['"]\.\./(input|intmd|output|\.\.)""", joined), path
+        assert not re.search(r"""['"]\.\./(input/|intmd/|output/|\.\./)""", joined), path
         assert "/new-stg/" not in joined, path
         assert "puro" not in joined.lower(), path
+
+
+def test_notebook_inputs_and_resources_resolve_inside_the_repo():
+    import re
+
+    for path in PIPELINE_NOTEBOOKS:
+        joined = "\n".join(_code_sources(path))
+        for rel in re.findall(r"""['"](\.\./resources/[^'"]+)['"]""", joined):
+            assert (ROOT / path).parent.joinpath(rel).exists(), (path, rel)
+        # analyses/inputs/ is not in git; only check the layout of the references.
+        for rel in re.findall(r"""['"](\.\./inputs/[^'"]+)['"]""", joined):
+            assert rel.count("/") >= 2, (path, rel)

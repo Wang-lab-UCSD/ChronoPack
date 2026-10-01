@@ -70,7 +70,7 @@ DataFrame directly (the diffusion convergence history is not returned).
 | `build_omnipath_tf_graph()` | construct signed TF graph | `cp.tl.grn` / legacy compatibility | public |
 | `rank_omnipath_tfs()` / diffusion cells | context-specific TF prioritization | `cp.tl.grn.rank_regulators()` | public task API |
 | `calculate_lfdr_recalibration()` R helper | fdrtool/BUM target-gene scores | `cp.tl.grn.score_targets()` using packaged R resource | public task API |
-| `load_chronopack_beta_lfdr()` | TF-target outer-product scoring | `cp.tl.grn.infer()` internals | public task behavior |
+| `load_chronopack_beta_lfdr()` | TF-target outer-product scoring | `cp.tl.grn.infer()` (`tl/grn/_inference.py`) | public task behavior |
 | `build_chronopack_ranked_edges()` | historical ranked edge CSV | compatibility wrapper | temporary compatibility |
 | TRRUST/ENCODE reference TF filter | benchmark-era TF-universe restriction | compatibility wrapper only | not public GRN inference API |
 | benchmark comparisons/evaluation | method benchmarking | outside ChronoPack | out of scope |

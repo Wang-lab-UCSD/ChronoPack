@@ -9,12 +9,12 @@ Recommended public imports:
 
 - `chronopack.io`
   - `read_time_tagged_dge`, `load_time_tagged_anndata`
-  - `initialize_expression_layers`
-  - `annotate_qc_metrics`, `annotate_qc_flags`
-  - `filter_cells_by_qc`, `filter_technical_genes`,
-    `filter_low_count_genes`
+  - `filter_technical_genes`, `filter_low_count_genes`
   - `add_time_metadata`, `map_time_to_group`, `score_cell_cycle`
-  - `validate`, `validate_preprocessed_adata`
+  - `validate`
+  - (Standard QC, cell filtering and layer setup use Scanpy directly;
+    `annotate_qc_metrics`, `filter_cells_by_qc`, `initialize_expression_layers`
+    and `validate_preprocessed_adata` were removed on 2026-09-30.)
   - `read_h5ad`, `write_h5ad`
 - `chronopack.tl`
   - `get_trajectories`

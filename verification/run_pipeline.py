@@ -6,8 +6,8 @@
                                               [--mem 90G] [--allow-bigcompute]
     python verification/run_pipeline.py promote RUN_NAME
 
-``setup`` creates ``verification_runs/RUN_NAME/`` with a fresh data folder
-(raw inputs symlinked from SOURCE_DATA) and records code provenance.
+``setup`` creates ``verification_runs/RUN_NAME/`` with an empty data folder
+(raw inputs are read from ``analyses/inputs/``) and records code provenance.
 ``stage`` submits one Slurm job per notebook of a stage. Each job executes the
 notebook straight from ``analyses/`` (``CHRONOPACK_DATA_DIR`` pointed at the
 run's data folder) and saves the executed copy, with outputs, under
@@ -36,11 +36,7 @@ ENV = Path("/new-stg/home/alex/miniconda3/envs/chronopack-install-test")
 GIT = "/new-stg/home/alex/miniconda3/envs/metacellR/bin/git"
 SUCCESS_MARKER = "CHRONOPACK_STAGE_OK"
 
-# Raw inputs of each experiment (read-only; symlinked into every run).
-SOURCE_DATA = Path("/new-stg/home/alex/projects/chrono_seq/analyses")
 EXPERIMENTS = ["k562-tnfa.hg38.rep", "thp1-k562-lps.hg38.rep"]
-# Pre-computed K562 negative-control pseudobulk read by both PrepareForTradeSeq notebooks.
-NEGATIVE_CONTROL = "thp1-k562-lps.hg38.rep/intmd/k562_neg-ctrl_mtx-agg.pkl"
 
 K, T = EXPERIMENTS
 # stage -> notebooks (relative to analyses/). Notebooks listed in one tuple run
@@ -54,11 +50,16 @@ STAGES = {
         (f"{T}/04_TradeSeqFits.K562.ipynb",),
         (f"{T}/04_TradeSeqFits.THP1.ipynb",),
     ],
+    # Optional: the two-lineage K562 + TNF-alpha fit (not used downstream). Needs
+    # more memory than 90G; run with --mem 160G --allow-bigcompute.
+    "TradeSeqFitsTwoLineage": [(f"{K}/04_TradeSeqFits.TwoLineage.ipynb",)],
     "GeneClustering": [(
         "gene_clustering/01_DimensionalityReduction&Clustering.ipynb",
         "gene_clustering/02_ClusterVisualization.ipynb",
         "gene_clustering/03_ModeConservation.ipynb",
     )],
+    "CellCommunication": [("c2c/CellCommunication.ipynb",)],
+    "GRNInference": [("grn/GRNInference.ipynb",)],
 }
 
 
@@ -69,14 +70,8 @@ def git(*args: str) -> str:
 def setup(run: Path) -> None:
     if run.exists():
         raise SystemExit(f"Refusing to overwrite existing run directory: {run}")
-    for exp in EXPERIMENTS:
-        exp_dir = run / "data" / exp
-        for sub in ("intmd", "output"):
-            (exp_dir / sub).mkdir(parents=True)
-        (exp_dir / "input").symlink_to(SOURCE_DATA / exp / "input")
-    (run / "data" / NEGATIVE_CONTROL).symlink_to(SOURCE_DATA / NEGATIVE_CONTROL)
-    for sub in ("executed", "logs", "tmp"):
-        (run / sub).mkdir()
+    for sub in ("data", "executed", "logs", "tmp"):
+        (run / sub).mkdir(parents=True)
 
     pip = subprocess.run([str(ENV / "bin/python"), "-m", "pip", "show", "-f", "chronopack"],
                          text=True, capture_output=True, check=True).stdout
@@ -165,7 +160,7 @@ def main() -> None:
     stage = sub.add_parser("stage")
     stage.add_argument("name", choices=list(STAGES))
     stage.add_argument("run")
-    stage.add_argument("--experiment", choices=EXPERIMENTS + ["gene_clustering"])
+    stage.add_argument("--experiment", choices=EXPERIMENTS + ["gene_clustering", "c2c", "grn"])
     stage.add_argument("--notebook", help="only this notebook (path relative to analyses/)")
     # 96G+ requests only fit bigcompute on this cluster; the largest other nodes allow ~94G.
     stage.add_argument("--mem", default="90G")

@@ -40,5 +40,7 @@ __pycache__/
 
 # Analysis data (CHRONOPACK_DATA_DIR default) and verification run records
 analyses/data/
+# Raw experiment inputs (time-tagged DGE tables, negative-control pseudobulk); not in git
+analyses/inputs/
 verification_runs/
 .github/workflows/ci.yml

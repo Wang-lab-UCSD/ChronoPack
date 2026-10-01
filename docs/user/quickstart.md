@@ -6,16 +6,23 @@ manuscript reproduction.
 ```python
 import chronopack as cp
 
+import scanpy as sc
+
 adata = cp.io.read_time_tagged_dge(
     sample_paths=["sample_a_dge.csv", "sample_b_dge.csv"],
     sample_names=["sample_a", "sample_b"],
     time_col="TIME_TAG",
 )
 
-cp.io.initialize_expression_layers(adata, counts_layer="counts")
-cp.io.annotate_qc_metrics(adata)
-cp.io.filter_technical_genes(adata)
-cp.io.validate_preprocessed_adata(adata)
+# Standard Scanpy QC and normalization; ChronoPack expects counts / cpm / log1p layers.
+adata.var["mt"] = adata.var_names.str.startswith(("MT-", "mt-"))
+adata.var["rb"] = adata.var_names.str.startswith(("RPS", "RPL"))
+sc.pp.calculate_qc_metrics(adata, qc_vars=["mt", "rb"], percent_top=None, log1p=False, inplace=True)
+adata.layers["counts"] = adata.X.copy()
+sc.pp.normalize_total(adata, target_sum=1e4)
+adata.layers["cpm"] = adata.X.copy()
+sc.pp.log1p(adata)
+adata.layers["log1p"] = adata.X.copy()
 ```
 
 Cell-state trajectory and fate workflows mutate AnnData where outputs are

@@ -1,7 +1,7 @@
 import networkx as nx
 import pandas as pd
 
-from chronopack._legacy.omnipath_tf import run_tf_diffusion_ranking
+from chronopack.tl.grn._omnipath import run_tf_diffusion_ranking
 
 
 def test_signed_diffusion_absorbs_positive_and_negative_tf_mass():

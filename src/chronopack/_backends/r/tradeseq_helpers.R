@@ -428,3 +428,139 @@ run_tradeseq_single_lineage <- function(input_dir,
     significant = fdr_sig_df
   )
 }
+
+prepare_weighted_lineages <- function(counts_sub, time_vec, sf, weights_path, min_weight = 1e-6) {
+  pt01 <- (time_vec - min(time_vec, na.rm = TRUE)) /
+    diff(range(time_vec, na.rm = TRUE))
+  weights <- read.csv(weights_path, row.names = 1, check.names = FALSE)
+  missing <- setdiff(colnames(counts_sub), rownames(weights))
+  if (length(missing)) {
+    stop("Cell weights are missing ", length(missing), " cells, e.g. ", paste(head(missing, 3), collapse = ", "))
+  }
+  CW <- as.matrix(weights[colnames(counts_sub), , drop = FALSE])
+  if (ncol(CW) < 2) stop("Cell weights need at least two lineage columns.")
+  rs <- rowSums(CW)
+  if (any(!is.finite(rs) | rs <= 0)) stop("Every cell needs a positive total lineage weight.")
+  if (any(abs(rs - 1) > 1e-8)) {
+    CW <- sweep(CW, 1, rs, "/")
+  }
+  # Weights this small are treated as "not in the lineage".
+  CW[CW < min_weight] <- 0
+  PT <- matrix(pt01, nrow = length(pt01), ncol = ncol(CW),
+               dimnames = list(colnames(counts_sub), colnames(CW)))
+  list(PT = PT, CW = CW, offset_vec = make_offset_vector(sf))
+}
+
+run_tradeseq_weighted_lineages <- function(input_dir,
+                                           weights_file = "cell_weights.csv",
+                                           n_points = 9,
+                                           workers = 4,
+                                           screen_nknots = 4,
+                                           final_nknots = 8,
+                                           p_threshold = 0.05,
+                                           output_association = "asso_df.2trajectory.nknots4.csv",
+                                           output_significant = "sig_df.2trajectory.nknots4.csv",
+                                           output_sce = "sce.2trajectory.nknots8.rds",
+                                           output_sce_screen = "sce_screen.2trajectory.nknots4.rds",
+                                           output_screen_genes = "screen_genes.2trajectory.nknots4.csv",
+                                           output_session_info = "sessionInfo.tradeSeqFits.2trajectory.txt",
+                                           association_aliases = character(),
+                                           significant_aliases = character(),
+                                           sce_aliases = character(),
+                                           sce_screen_aliases = character(),
+                                           screen_genes_aliases = character(),
+                                           tag = "",
+                                           seed = 123,
+                                           verbose = TRUE) {
+  old_wd <- getwd()
+  on.exit(setwd(old_wd), add = TRUE)
+  set_tradeseq_workdir(input_dir)
+
+  inputs <- read_tradeseq_inputs(tag = tag)
+  counts_sub <- inputs$counts_sub
+  time_vec <- inputs$time_vec
+  sf <- inputs$sf
+  stopifnot(identical(colnames(counts_sub), names(time_vec)), length(sf) == ncol(counts_sub))
+
+  lineages <- prepare_weighted_lineages(counts_sub, time_vec, sf, weights_file)
+  PT <- lineages$PT
+  CW <- lineages$CW
+  offset_vec <- lineages$offset_vec
+
+  set.seed(seed)
+  sce_screen <- fit_tradeseq_sce(
+    counts_sub = counts_sub,
+    pseudotime = PT,
+    cell_weights = CW,
+    offset = offset_vec,
+    nknots = screen_nknots,
+    workers = workers,
+    verbose = verbose
+  )
+  asso_df <- association_df_multilineage(sce_screen, n_points = n_points)
+  wald_cols <- grep("^waldStat", names(asso_df), value = TRUE)
+  asso_df <- asso_df[rowSums(!is.na(asso_df[, wald_cols, drop = FALSE])) > 0, , drop = FALSE]
+  stat_cols <- grep("^(waldStat|pvalue|qval|meanLogFC)", names(asso_df), value = TRUE)
+  sce_screen <- annotate_sce_association(sce_screen, asso_df, fields = stat_cols)
+  sce_screen_paths <- save_rds_with_aliases(sce_screen, output_sce_screen, sce_screen_aliases)
+
+  # Significant: q < 0.05 in the global or any per-lineage test.
+  fdr_sig_df <- asso_df[significant_multilineage(asso_df, q_threshold = 0.05), , drop = FALSE]
+  fdr_sig_df <- fdr_sig_df[order(-fdr_sig_df$waldStat), , drop = FALSE]
+
+  # Refit: p < p_threshold in the global or any per-lineage test.
+  p_cols <- grep("^pvalue", names(asso_df), value = TRUE)
+  in_screen <- Reduce(`|`, lapply(p_cols, function(col) !is.na(asso_df[[col]]) & asso_df[[col]] < p_threshold))
+  screen_genes <- rownames(asso_df)[in_screen]
+
+  write_csv_with_aliases(asso_df, output_association, association_aliases)
+  write_csv_with_aliases(fdr_sig_df, output_significant, significant_aliases)
+  write_csv_with_aliases(
+    data.frame(gene = screen_genes, stringsAsFactors = FALSE),
+    output_screen_genes,
+    screen_genes_aliases,
+    row.names = FALSE
+  )
+
+  counts_sub2 <- counts_sub[screen_genes, , drop = FALSE]
+  set.seed(seed)
+  sce_final <- fit_tradeseq_sce(
+    counts_sub = counts_sub2,
+    pseudotime = PT,
+    cell_weights = CW,
+    offset = offset_vec,
+    nknots = final_nknots,
+    workers = workers,
+    verbose = verbose
+  )
+  sce_final <- annotate_sce_association(sce_final, asso_df, fields = stat_cols)
+  sce_paths <- save_rds_with_aliases(sce_final, output_sce, sce_aliases)
+
+  writeLines(c(
+    paste0("tradeSeq: ", as.character(utils::packageVersion("tradeSeq"))),
+    paste0("mgcv: ", as.character(utils::packageVersion("mgcv"))),
+    paste0("lineages: ", paste(colnames(CW), collapse = ", ")),
+    capture.output(utils::sessionInfo())
+  ), con = output_session_info)
+
+  list(
+    input_dir = normalizePath(getwd(), mustWork = TRUE),
+    counts_sub_dim = dim(counts_sub),
+    final_counts_dim = dim(counts_sub2),
+    lineages = colnames(CW),
+    n_tested = nrow(asso_df),
+    n_qval_significant = nrow(fdr_sig_df),
+    n_pvalue_significant = length(screen_genes),
+    genes_keep = screen_genes,
+    screen_genes = screen_genes,
+    association_path = normalizePath(output_association, mustWork = FALSE),
+    significant_path = normalizePath(output_significant, mustWork = FALSE),
+    sce_path = normalizePath(output_sce, mustWork = FALSE),
+    sce_final_path = normalizePath(output_sce, mustWork = FALSE),
+    sce_screen_path = normalizePath(output_sce_screen, mustWork = FALSE),
+    screen_genes_path = normalizePath(output_screen_genes, mustWork = FALSE),
+    session_info_path = normalizePath(output_session_info, mustWork = FALSE),
+    sce_paths = sce_paths,
+    sce_screen_paths = sce_screen_paths
+  )
+}

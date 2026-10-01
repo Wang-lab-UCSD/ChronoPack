@@ -126,3 +126,17 @@ def test_grn_r_resource_smoke():
     assert np.all(np.isfinite(prepared))
     assert prepared[0] > 0
     assert prepared[-1] < 1
+
+
+def test_infer_breaks_equal_target_scores_by_wald_statistic():
+    import chronopack as cp
+
+    # Three targets with the same local FDR (equal edge weights), listed out of Wald order.
+    targets = pd.DataFrame(
+        {"gene": ["LOW", "HIGH", "MID"], "lfdr_bum": [0.0, 0.0, 0.0], "waldStat_1": [5.0, 50.0, 20.0]}
+    )
+    tfs = pd.DataFrame({"TF": ["TF1"], "priority_act": [1.0]})
+
+    edges = cp.tl.grn.infer(targets, tfs, valid_targets=["LOW", "HIGH", "MID"]).edges
+
+    assert edges.sort_values("rank")["target"].tolist() == ["HIGH", "MID", "LOW"]

@@ -3,7 +3,7 @@
 from ._keys import CHRONOPACK_UNS_KEY
 from ._provenance import record_provenance
 from ._schema import PREPROCESSING_SCHEMA
-from ._validation import ChronoPackError, validate_adata, validate_preprocessed_adata
+from ._validation import ChronoPackError, validate_adata
 
 __all__ = [
     "CHRONOPACK_UNS_KEY",
@@ -11,5 +11,4 @@ __all__ = [
     "PREPROCESSING_SCHEMA",
     "record_provenance",
     "validate_adata",
-    "validate_preprocessed_adata",
 ]

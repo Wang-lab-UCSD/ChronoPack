@@ -43,6 +43,54 @@ manuscript env and the puromycin experiment refer to the old layout.
   - `02_ClusterVisualization` / `03_ModeConservation` were stale (read the old
     genes-in-var layout and `PC1`/`PC2`, never run in r8); now read `adata.obs`,
     and the feature-space plot uses `t_peak` vs `peak_log2fc`.
+- After r9 (not rerun, by user decision): removed `cp.io.annotate_qc_metrics`,
+  `filter_cells_by_qc`, `initialize_expression_layers` and
+  `validate_preprocessed_adata` (plus its helper `validate_numeric_obs`) from the
+  package; the two `01_PreprocessDatasets` notebooks no longer call the validator
+  (check-only, so saved outputs are unaffected). The `chronopack-install-test`
+  wheel (`dist_fix4`) predates this; rebuild it before the next verification run.
+- Also after r9 (not rerun): raw inputs copied (byte-identical) into
+  `analyses/inputs/` (gitignored: 8 DGE tables + `k562_neg-ctrl_mtx-agg.pkl`) and
+  reference files into `analyses/resources/` (CellChatDB, `hs_tfs.txt`,
+  `protein_coding_genes.csv`). Notebooks read them via `../inputs/…` /
+  `../resources/…`; `CHRONOPACK_DATA_DIR` now only receives outputs, and
+  `run_pipeline.py setup` no longer symlinks anything. c2c/grn still read older
+  tradeSeq intermediates from `~/projects/…` and `~/tmp/grn_inference_v2/…`.
+- `_legacy/` dissolved (not rerun): `c2c.py` -> `tl/c2c/_helpers.py` (compute) +
+  `pl/c2c/_plots.py` (plots); `omnipath_tf.py` -> `tl/grn/_omnipath.py` (TF list /
+  LR table now required args, no `/new-stg` defaults); `grn_inference.py` ->
+  `tl/grn/_edges.py`. Removed unused: `_legacy/{preprocessing,trajectories,tradeseq}.py`,
+  `cp.io.write_tradeseq_inputs`, `_utils/`, and the uncalled helpers
+  `score_lr_pairs`, `plot_avg_vs_logp`, `load_secreted_cellchat_pairs`,
+  `filter_expressed_secreted_lr_catalog`, `all_expressed`, and the duplicate
+  `load_chronopack_beta_lfdr` / `build_` / `write_chronopack_ranked_edges` in the
+  old edge module.
+- C2C / GRN now read pipeline outputs via `CHRONOPACK_DATA_DIR` and write to
+  `DATA_DIR/{c2c,grn}` (runner stages `CellCommunication`, `GRNInference`):
+  - C2C: r9-style `adata_full.chk1.h5ad` (identical results to the Jan 21 file) and
+    the THP1 screen-fit association (`pvalue_1`; `infer` constant changed from
+    `pvalue_2`) instead of the joint two-trajectory fit: same top 10 ligands and
+    labeled pair, 100 vs 189 pairs (ligands < 10 THP1 counts untested).
+  - TNF overlay: `cp.tl.predict_gene_dynamics` on the THP1/K562 screen SCEs
+    (user: "option b for now", expects to change it). `load_tradeseq_grid_exports`
+    removed.
+  - GRN: `score_targets` refits the BUM local FDR from `pvalue_1`, so r9's
+    `asso_df.1trajectory.nknots4.csv` is used directly (R loader fixed for an empty
+    first header / no `lfdr` column). Shared-gene ordering identical; more targets
+    pass lfdr < 0.05 (smaller tested universe). Comparison:
+    `verification_runs/c2c_grn_r9_inputs_20260930/`.
+  - Install-test wheel rebuilt: `install_test_20260925/dist_fix5/`.
+- `fit_gene_dynamics` / `prepare_tradeseq_inputs` lost `full_adata`: library sizes
+  always come from `adata.obs["total_counts"]` (unchanged by gene filtering) and the
+  unused `*.full.*` input copies are no longer written. `predict_gene_dynamics` fixed
+  to attach SingleCellExperiment (rownames() was empty otherwise). Wheel: `dist_fix6`.
+- User's simplified `03_PrepareForTradeSeq` notebooks (both experiments) verified
+  against r9 GetTrajectories outputs (`verification_runs/prepare_edits_check_20260930_b/`):
+  prefiltered h5ad, counts, cell times, gene lists, library sizes, memberships all
+  identical; exclusion list same 1025 genes (set order differs). C2C and GRN
+  notebooks run on r9 data (`r9/data/{c2c,grn}`), matching the comparison job
+  exactly. These four notebooks were promoted with outputs; TradeSeqFits onward
+  not rerun (inputs identical).
 
 ## Update (2026-09-24, evening): tradeSeq blocker resolved, staged reruns started
 

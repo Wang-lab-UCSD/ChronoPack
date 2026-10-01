@@ -15,16 +15,22 @@ load_valid_targets <- function(valid_targets_path) {
 
 load_gene_table <- function(label, path, valid_targets) {
   df <- read.csv(path, check.names = FALSE, stringsAsFactors = FALSE)
-  gene_col <- if ("X" %in% names(df)) "X" else names(df)[1]
-  df <- df[df[[gene_col]] %in% valid_targets & is.finite(df$pvalue_1), ]
-  data.frame(
+  # Gene names: an "X" column if present, otherwise the first column (which may have an empty header).
+  genes <- if ("X" %in% names(df)) df[["X"]] else df[[1]]
+  keep <- genes %in% valid_targets & is.finite(df$pvalue_1)
+  df <- df[keep, , drop = FALSE]
+  out <- data.frame(
     dataset = label,
-    gene = df[[gene_col]],
+    gene = genes[keep],
     p_raw = df$pvalue_1,
     p = prepare_p(df$pvalue_1),
-    stored_lfdr = df$lfdr,
     stringsAsFactors = FALSE
   )
+  # Carried along: the tradeSeq Wald statistic (tie-breaker for equally scored
+  # targets in GRN edges) and an optional previously stored local FDR.
+  if ("waldStat_1" %in% names(df)) out$waldStat_1 <- df$waldStat_1
+  if ("lfdr" %in% names(df)) out$stored_lfdr <- df$lfdr
+  out
 }
 
 safe_fdrtool <- function(p, cutoff_method) {

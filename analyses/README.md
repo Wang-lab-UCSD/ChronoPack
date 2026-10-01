@@ -8,42 +8,49 @@ latest verified run (see `verification/`).
 
 | Folder | Notebooks, in order |
 |---|---|
-| `k562-tnfa.hg38.rep/` (K562 + TNF-α) | `01_PreprocessDatasets` → `02_GetTrajectories` → `03_PrepareForTradeSeq` → `04_TradeSeqFits` |
+| `k562-tnfa.hg38.rep/` (K562 + TNF-α) | `01_PreprocessDatasets` → `02_GetTrajectories` → `03_PrepareForTradeSeq` → `04_TradeSeqFits` (and optionally `04_TradeSeqFits.TwoLineage`, not used downstream) |
 | `thp1-k562-lps.hg38.rep/` (THP-1 + K562 + LPS) | `01_PreprocessDatasets` → `02_GetTrajectories` → `03_PrepareForTradeSeq` → `04_TradeSeqFits.K562`, `04_TradeSeqFits.THP1` |
 | `gene_clustering/` (both experiments) | `01_DimensionalityReduction&Clustering` → `02_ClusterVisualization`, `03_ModeConservation` |
 | `c2c/` | `CellCommunication` |
 | `grn/` | `GRNInference` |
 
-Run both experiments through `04_TradeSeqFits*` before `gene_clustering/`.
-The K562 + TNF-α `03_PrepareForTradeSeq` also reads the K562 negative-control
-pseudobulk from the THP-1 + K562 + LPS folder (see below). `c2c/` and `grn/`
-currently read their inputs from fixed paths set at the top of each notebook,
-not from the data folder.
+Run both experiments through `04_TradeSeqFits*` before `gene_clustering/` and
+`grn/`; `c2c/` needs the THP-1 + K562 + LPS folder through `04_TradeSeqFits*`.
 
-`resources/` holds small reference files the notebooks read (the Regev lab
-cell-cycle gene list). `archive/` holds older exploratory notebooks that are
-not part of the pipeline.
+## Inputs and resources
+
+Paths are relative to each notebook's folder, so they resolve when the
+notebook runs from its own folder (as Jupyter does).
+
+- `inputs/` (not in git): the raw data.
+  - `k562-tnfa.hg38.rep/N70{1-4}_*.dge.time_tags.csv.gz`: time-tagged DGE tables
+  - `thp1-k562-lps.hg38.rep/N70{1-4}_*.dge.time_tags.csv.gz`: time-tagged DGE tables
+  - `k562_neg-ctrl_mtx-agg.pkl`: pre-computed K562 negative-control pseudobulk,
+    read by both `03_PrepareForTradeSeq` notebooks
+- `resources/` (in git): small reference files.
+  - `regev_lab_cell_cycle_genes.txt`: cell-cycle genes (S then G2/M)
+  - `interaction_input_CellChatDB.csv`: CellChatDB human ligand-receptor table
+    (`c2c/`, `grn/`)
+  - `hs_tfs.txt`: human transcription factors (`grn/`)
+  - `protein_coding_genes.csv`: hg38 protein-coding genes (`grn/`)
+- `archive/`: older exploratory notebooks that are not part of the pipeline.
 
 ## Data folder
 
-The pipeline notebooks read and write everything under one data folder, set
-by the `CHRONOPACK_DATA_DIR` environment variable (default: `analyses/data/`,
-which git ignores):
+The pipeline notebooks write their intermediate and final results under one
+data folder, set by the `CHRONOPACK_DATA_DIR` environment variable (default:
+`analyses/data/`, which git ignores). The `01_PreprocessDatasets` notebooks
+create it:
 
 ```
 $CHRONOPACK_DATA_DIR/
-  k562-tnfa.hg38.rep/
-    input/            raw time-tagged DGE tables (N701…N704 *.dge.time_tags.csv.gz)
-    intmd/  output/   written by the notebooks
-  thp1-k562-lps.hg38.rep/
-    input/            raw time-tagged DGE tables
-    intmd/k562_neg-ctrl_mtx-agg.pkl   K562 negative-control pseudobulk (provided)
-    intmd/  output/   written by the notebooks
-  gene_clustering/    written by gene_clustering/
+  k562-tnfa.hg38.rep/{intmd,output}/
+  thp1-k562-lps.hg38.rep/{intmd,output}/
+  gene_clustering/  c2c/  grn/
 ```
 
-Put the raw inputs (and the negative-control pickle) in place, then start
-Jupyter with the ChronoPack environment, for example:
+With `inputs/` in place, start Jupyter with the ChronoPack environment, for
+example:
 
 ```bash
 export CHRONOPACK_DATA_DIR=/path/to/chronopack_data

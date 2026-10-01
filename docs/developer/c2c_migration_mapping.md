@@ -22,14 +22,23 @@ benchmark-specific preprocessing/plots.
     significance;
   - returns `C2CResult`.
 
-Reusable lower-level helpers remain available in `cp.tl.c2c`, including:
+`cp.tl.c2c` also exports the helpers the C2C notebook uses for the TNF callout:
+`split_by_cell_type` and `build_pair_series` (implementation in
+`tl/c2c/_helpers.py`); `cp.pl.c2c` exports `plot_pair_overlay` and
+`plot_genes_over_time` (`pl/c2c/_plots.py`). The callout's fitted curves come
+from `cp.tl.predict_gene_dynamics` on the THP1 and K562 screen fits
+(provisional; it replaced the joint two-trajectory grid export).
+`load_secreted_cellchat_pairs`, `filter_expressed_secreted_lr_catalog`,
+`score_lr_pairs`, `plot_avg_vs_logp` and `load_tradeseq_grid_exports` were
+removed on 2026-09-30.
 
-- `load_secreted_cellchat_pairs`;
-- `load_tradeseq_grid_exports`;
-- `filter_expressed_secreted_lr_catalog`;
-- `build_pair_series`;
-- `score_lr_pairs`;
-- `plot_pair_overlay` for notebook-local callouts.
+Inputs (since 2026-09-30) are pipeline outputs: the THP1 + K562 + LPS
+`adata_full.chk1.h5ad` and the THP1 screen-fit association table
+(`sc-THP1_to_tradeSeq.fixed/asso_df.1trajectory.nknots4.csv`, `pvalue_1`),
+replacing the joint THP1+K562 two-trajectory fit (`pvalue_2`). Checked against
+the joint fit: same top 10 ligands and labeled pair; 100 vs 189 candidate pairs,
+because ligands with < 10 THP1 counts are not tested in the THP1 fit
+(`verification_runs/c2c_grn_r9_inputs_20260930/`).
 
 ## Result Object
 
@@ -82,7 +91,7 @@ mean times that number: pair ranks are unchanged, and ligand ranks are
 unchanged because `max_lr_activity` enters the composite only through a
 z-score. Only the activity scale (x4 for the default window) changes, so an
 activity threshold of 0.1 on the old mean corresponds to 0.4 on the sum.
-The legacy `score_lr_pairs` helper still computes the historical mean `avg`.
+The historical mean-based `score_lr_pairs` helper has been removed.
 
 ## Current Workflow Mapping
 
@@ -90,11 +99,11 @@ The legacy `score_lr_pairs` helper still computes the historical mean `avg`.
 | --- | --- | --- | --- |
 | CellChat CSV loading and secreted filtering | LR resource loading | `cp.tl.c2c.infer()` / helper | public task behavior |
 | `split_by_cell_type()` | sender/receiver split | `cp.tl.c2c` helper | temporary public helper |
-| `filter_expressed_secreted_lr_catalog()` | expression eligibility | `cp.tl.c2c.infer()` internals | public task behavior |
+| `filter_expressed_secreted_lr_catalog()` | expression eligibility | `cp.tl.c2c.infer()` internals (`_expressed_pairs`) | public task behavior |
 | `restrict_ligands_to_association()` | target ligand universe | `cp.tl.c2c.infer()` internals | public task behavior |
 | `time_series()` / `module_series()` | temporal expression extraction | `cp.tl.c2c` helper | temporary public helper |
 | `lr_activity()` / `build_pair_series()` | LR activity + receiver response profiles | `cp.tl.c2c.infer()` internals | public task behavior |
-| `score_lr_pairs()` | early-window pair and ligand scoring | `cp.tl.c2c.infer()` internals | public task behavior |
+| `score_lr_pairs()` | early-window pair and ligand scoring | `cp.tl.c2c.infer()` internals (`_score_pairs`) | public task behavior |
 | LR scatter plot | pair score visualization | `cp.pl.c2c.interaction_scatter()` | public plotting |
 | LR/response overlay | manuscript callout helper | `cp.pl.c2c.pair_overlay()` for result profiles; legacy helper for custom fitted callouts | public plotting/helper |
 | selected genes over time | reusable raw-expression plot | `cp.pl.c2c.plot_genes_over_time()` | public plotting |
@@ -106,8 +115,8 @@ External resources remain caller-provided:
 
 - CellChatDB-style ligand-receptor table;
 - AnnData object containing expression, cell type, and time metadata;
-- tradeSeq grid exports where fitted trajectories are requested;
-- ligand association table.
+- the sender's single-lineage tradeSeq association table;
+- the THP1 and K562 tradeSeq screen fits for the TNF callout curves.
 
 No large ligand-receptor resource was bundled into ChronoPack.
 

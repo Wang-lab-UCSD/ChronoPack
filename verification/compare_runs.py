@@ -128,7 +128,8 @@ def compare_tradeseq_inputs(new_root, ref_root):
     for d in TRADESEQ_INPUT_DIRS:
         print(f"\n== {d}")
         new_dir, ref_dir = new_root / d, ref_root / d
-        names = sorted(p.name for p in ref_dir.iterdir() if p.suffix in {".csv", ".gz"})
+        # ``*.full.*`` copies were unused and are no longer written (2026-09-30).
+        names = sorted(p.name for p in ref_dir.iterdir() if p.suffix in {".csv", ".gz"} and ".full." not in p.name)
         for name in names:
             new, ref = new_dir / name, ref_dir / name
             if not new.exists():

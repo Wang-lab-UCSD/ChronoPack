@@ -49,8 +49,8 @@ class OmniPathTfGraph:
 
 def load_omnipath_tf_resources(
     *,
-    human_tf_path: str | Path = "/new-stg/home/alex/ref/gene_sets/hs_tfs.txt",
-    ligand_receptor_path: str | Path = "/new-stg/home/alex/ref/cellchatdb/hs/interaction_input_CellChatDB.csv",
+    human_tf_path: str | Path,
+    ligand_receptor_path: str | Path,
     organism: str = "human",
 ) -> OmniPathTfResources:
     """Load OmniPath signaling/TF tables and local TF/LR reference files."""

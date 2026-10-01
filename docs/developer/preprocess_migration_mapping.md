@@ -12,13 +12,13 @@ dataset-independent conventions into ChronoPack.
 | `load_time_tagged_anndata()` reading sample DGE tables, prefixing cell IDs, splitting metadata/counts, adding `sample` and time metadata | `chronopack.io.read_time_tagged_dge()` | Public |
 | `map_time_to_group()` and `TIME_GROUP_CATEGORIES` | `chronopack._core._schema` constants, re-exported where needed | Internal constants, compatibility re-export |
 | `add_time_metadata()` from `FINAL TIME TAG` to `obs['time']` and `obs['time_group']` | `chronopack.io.add_time_metadata()` | Public |
-| `annotate_qc_flags()` adding `var['mt']`, `var['rb']`, and Scanpy QC metrics | `chronopack.io.annotate_qc_metrics()` | Public |
-| `filter_cells_by_qc()` explicit combined cell mask over total counts, mt percent, and detected genes | `chronopack.io.filter_cells_by_qc()` | Public |
+| `annotate_qc_flags()` adding `var['mt']`, `var['rb']`, and Scanpy QC metrics | Scanpy directly in the notebooks (`chronopack.io.annotate_qc_metrics()` removed 2026-09-30) | Not in ChronoPack |
+| `filter_cells_by_qc()` explicit combined cell mask over total counts, mt percent, and detected genes | Explicit mask in the notebooks (`chronopack.io.filter_cells_by_qc()` removed 2026-09-30) | Not in ChronoPack |
 | `filter_technical_genes()` excluding explicit genes, MT genes, ENSG-only genes, and ribosomal genes | `chronopack.io.filter_technical_genes()` | Public |
 | `filter_low_count_genes()` using total count threshold from a count layer or `X` | `chronopack.io.filter_low_count_genes()` | Public |
 | `score_cell_cycle()` Regev gene list parsing plus Scanpy scoring | `chronopack.io.score_cell_cycle()` | Public helper; delegates scoring to Scanpy |
 | AnnData contract checks for unique IDs, time metadata, count layer, and matrix dimensions | `chronopack._core._schema` and `chronopack._core._validation` | Internal |
-| WOT/tradeSeq handoff expectations such as `obs['time']`, `obs['sample']`, `layers['counts']`, `layers['cpm']`, `layers['log1p']`, and optional `layers['corrected']` | `chronopack._core._schema` and `chronopack.io.validate_preprocessed_adata()` | Public validation wrapper plus internal schema |
+| WOT/tradeSeq handoff expectations such as `obs['time']`, `obs['sample']`, `layers['counts']`, `layers['cpm']`, `layers['log1p']`, and optional `layers['corrected']` | `chronopack._core._schema` (`chronopack.io.validate_preprocessed_adata()` removed 2026-09-30) | Internal schema |
 
 ## Notebook-Specific Code To Keep Outside The Package
 

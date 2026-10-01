@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from chronopack._legacy.c2c import plot_genes_over_time, plot_pair_overlay
+from ._plots import plot_genes_over_time, plot_pair_overlay
 from chronopack.tl.c2c import C2CResult
 
 
@@ -122,4 +122,4 @@ def pair_overlay(result: C2CResult, pair: tuple[str, str], *, response=None, **k
     return plot_pair_overlay({pair: (activity.loc[common], response.loc[common])}, pair=pair, **kwargs)
 
 
-__all__ = ["interaction_scatter", "pair_overlay", "plot_genes_over_time"]
+__all__ = ["interaction_scatter", "pair_overlay", "plot_genes_over_time", "plot_pair_overlay"]

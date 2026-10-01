@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from chronopack._legacy import c2c as _legacy
+from . import _helpers
 
 
 @dataclass
@@ -73,7 +73,7 @@ CELL_TYPE_KEY = "cell_type"
 TIME_KEY = "time"
 COUNTS_LAYER = "counts"  # detection (expressed / not expressed)
 EXPRESSION_LAYER = "log1p"  # LR activity time series
-ASSOCIATION_P_COL = "pvalue_2"  # sender-lineage tradeSeq association p-value of the ligand
+ASSOCIATION_P_COL = "pvalue_1"  # time-association p-value of the ligand in the sender's own tradeSeq fit
 P_PSEUDOCOUNT = 1e-3
 
 
@@ -92,8 +92,8 @@ def _expressed_pairs(interactions: pd.DataFrame, sender_adata, receiver_adata, m
     def detected(genes, cells):
         return bool(genes) and all(gene in cells.index and cells[gene] >= min_cells for gene in genes)
 
-    ligand_components = interactions["ligand"].apply(_legacy.split_genes)
-    receptor_components = interactions["receptor"].apply(_legacy.split_genes)
+    ligand_components = interactions["ligand"].apply(_helpers.split_genes)
+    receptor_components = interactions["receptor"].apply(_helpers.split_genes)
     keep = ligand_components.apply(lambda g: detected(g, sender_cells)) & receptor_components.apply(
         lambda g: detected(g, receiver_cells)
     )
@@ -139,8 +139,8 @@ def _score_pairs(activities, association_df, receiver_detection, causal_window):
         )
         .merge(current_ligand_rank[["ligand", "current_ligand_rank"]], on="ligand", how="left")
     )
-    ligand_scores["z_ligand_significance"] = _legacy.zscore(ligand_scores["ligand_significance"])
-    ligand_scores["z_max_lr_activity"] = _legacy.zscore(ligand_scores["max_lr_activity"])
+    ligand_scores["z_ligand_significance"] = _helpers.zscore(ligand_scores["ligand_significance"])
+    ligand_scores["z_max_lr_activity"] = _helpers.zscore(ligand_scores["max_lr_activity"])
     ligand_scores["composite_score"] = ligand_scores["z_ligand_significance"] + ligand_scores["z_max_lr_activity"]
     ligand_scores = ligand_scores.sort_values("composite_score", ascending=False).reset_index(drop=True)
     ligand_scores["zscore_composite_rank"] = np.arange(1, len(ligand_scores) + 1)
@@ -162,8 +162,9 @@ def infer(
     ``adata`` needs ``obs["cell_type"]`` and ``obs["time"]`` plus ``counts`` and
     ``log1p`` layers. ``lr_resource`` is a CellChat-style table (``ligand``,
     ``receptor``, optionally ``annotation``; only ``Secreted Signaling`` pairs are
-    used). ``association`` is a tradeSeq association table indexed by gene with a
-    ``pvalue_2`` column (the sender lineage).
+    used). ``association`` is the sender cell type's single-lineage tradeSeq
+    association table (indexed by gene, ``pvalue_1`` column), e.g. the
+    ``asso_df.1trajectory.nknots4.csv`` written by ``fit_gene_dynamics``.
 
     LR pairs are kept when every ligand gene is detected in at least ``min_cells``
     sender cells and every receptor gene in at least ``min_cells`` receiver
@@ -185,7 +186,7 @@ def infer(
         raise ValueError(f"LR resource is missing required columns: {sorted(missing)}")
 
     association_df = _read_association(association)
-    sender_adata, receiver_adata = _legacy.split_by_cell_type(
+    sender_adata, receiver_adata = _helpers.split_by_cell_type(
         adata, cell_type_key=CELL_TYPE_KEY, sender=sender, receiver=receiver
     )
     if sender_adata.n_obs == 0:
@@ -194,11 +195,11 @@ def infer(
         raise ValueError(f"No cells found for receiver={receiver!r}.")
 
     lr_expressed = _expressed_pairs(interactions, sender_adata, receiver_adata, min_cells)
-    lr_scored = _legacy.restrict_ligands_to_association(lr_expressed, association_df)
+    lr_scored = _helpers.restrict_ligands_to_association(lr_expressed, association_df)
 
     activities = {}
     for ligand, receptor in zip(lr_scored["ligand"], lr_scored["receptor"]):
-        activity = _legacy.lr_activity(
+        activity = _helpers.lr_activity(
             sender_adata, receiver_adata, ligand, receptor, time_key=TIME_KEY, layer=EXPRESSION_LAYER
         )
         if activity is not None:
@@ -209,7 +210,7 @@ def infer(
             "and the ligand association filter."
         )
 
-    receiver_detection = _legacy.detection_series(receiver_adata, layer=COUNTS_LAYER)
+    receiver_detection = _helpers.detection_series(receiver_adata, layer=COUNTS_LAYER)
     pair_scores, ligand_scores = _score_pairs(activities, association_df, receiver_detection, causal_window)
     pair_scores = pair_scores.assign(sender=sender, receiver=receiver)
     front = ["sender", "receiver", "ligand", "receptor", "pair"]
@@ -238,7 +239,7 @@ def infer(
         temporal_profiles=temporal_profiles,
         candidate_interactions=lr_scored.reset_index(drop=True),
         detection={
-            "sender": _legacy.detection_series(sender_adata, layer=COUNTS_LAYER),
+            "sender": _helpers.detection_series(sender_adata, layer=COUNTS_LAYER),
             "receiver": receiver_detection,
         },
         parameters={

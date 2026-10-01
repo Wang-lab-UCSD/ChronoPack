@@ -158,3 +158,28 @@ def test_fate_probabilities_plot_writes_fate_summaries(tmp_path, monkeypatch):
     np.testing.assert_allclose(adata.obs["fate_1"], [0.0, 0.5, 0.8])
     np.testing.assert_allclose(adata.obs["fate_maxprob"], [1.0, 0.5, 0.8])
     assert adata.obs["fate_entropy"].iloc[1] == np.float32(1.0)
+
+
+def test_trajectory_soft_memberships_from_mass_retention():
+    import anndata as ad
+    import numpy as np
+    import pandas as pd
+
+    import chronopack as cp
+
+    obs = pd.DataFrame(
+        {
+            "traj_clusters": pd.Categorical(["0", "0", "1", "1"]),
+            "traj_clusters_mass_ret_cell": [0.9, np.nan, 0.6, 1.2],  # NaN = last time point; > 1 is clipped
+        },
+        index=["a", "b", "c", "d"],
+    )
+    adata = ad.AnnData(np.zeros((4, 1)), obs=obs)
+
+    weights = cp.tl.trajectory_soft_memberships(adata)
+
+    np.testing.assert_allclose(weights["0"], [0.9, 1.0, 0.4, 0.0], rtol=1e-6)
+    np.testing.assert_allclose(weights["1"], [0.1, 0.0, 0.6, 1.0], rtol=1e-6)
+    assert list(weights.columns) == ["0", "1"]
+    assert adata.obs["softmem_argmax"].tolist() == ["0", "0", "1", "1"]
+    np.testing.assert_allclose(adata.obs["softmem_entropy"], [0.469, 0.0, 0.971, 0.0], atol=1e-3)

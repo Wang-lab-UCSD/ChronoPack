@@ -769,6 +769,54 @@ def PlotHardClusterMassProportionsOverTime(adata, cluster_key="traj_clusters", t
     plt.show()
 
 
+def trajectory_soft_memberships(
+    adata,
+    *,
+    cluster_key: str = CELL_STATE_TRAJECTORY_CLUSTER_KEY,
+    retention_key: str | None = None,
+    key_added: str = "softmem",
+) -> pd.DataFrame:
+    """Soft memberships of two trajectory clusters from per-cell mass retention.
+
+    ``obs[retention_key]`` (default ``f"{cluster_key}_mass_ret_cell"``, written by
+    ``cp.pl.cell_trajectories.mass_retention``) is the fraction of a cell's forward
+    transport mass that stays in its own cluster. It becomes the cell's membership
+    of its own cluster and ``1 - retention`` that of the other cluster; cells without
+    a retention value (the last time point) get full membership of their own
+    cluster. Adds ``{key_added}_{cluster}`` for each cluster plus
+    ``{key_added}_maxprob``, ``{key_added}_argmax`` and ``{key_added}_entropy``
+    (bits) to ``adata.obs``, and returns the memberships (cells x clusters, in
+    cluster order), e.g. as cell weights for a two-lineage tradeSeq fit.
+    """
+    retention_key = retention_key or f"{cluster_key}_mass_ret_cell"
+    for key in (cluster_key, retention_key):
+        if key not in adata.obs:
+            raise KeyError(f"Missing adata.obs[{key!r}].")
+    labels = adata.obs[cluster_key].astype(str).to_numpy()
+    clusters = pd.Categorical(adata.obs[cluster_key].astype(str)).categories.tolist()
+    if len(clusters) != 2:
+        raise ValueError(f"Expected exactly 2 clusters in obs[{cluster_key!r}], got {len(clusters)}: {clusters}")
+
+    p_self = adata.obs[retention_key].astype(float).to_numpy()
+    p_self = np.clip(np.where(np.isfinite(p_self), p_self, 1.0), 0.0, 1.0)
+    p_other = 1.0 - p_self
+    P = np.column_stack([np.where(labels == cluster, p_self, p_other) for cluster in clusters])
+
+    for j, cluster in enumerate(clusters):
+        adata.obs[f"{key_added}_{cluster}"] = P[:, j].astype(np.float32)
+    adata.obs[f"{key_added}_maxprob"] = P.max(axis=1).astype(np.float32)
+    adata.obs[f"{key_added}_argmax"] = pd.Categorical(
+        np.where(P[:, 1] > P[:, 0], clusters[1], clusters[0]), categories=clusters
+    )
+    entropy = -(P * np.log(P + 1e-12)).sum(axis=1) / np.log(2.0)
+    adata.obs[f"{key_added}_entropy"] = entropy.astype(np.float32)
+
+    return pd.DataFrame(
+        {cluster: adata.obs[f"{key_added}_{cluster}"].to_numpy() for cluster in clusters},
+        index=adata.obs_names.astype(str),
+    )
+
+
 __all__ = [
     "CalculateTerminalFatesAcrossCells",
     "CellStateTrajectoryResult",
@@ -791,4 +839,5 @@ __all__ = [
     "terminal_fate_trajectory_clustering",
     "terminal_fates_from_terminal_clusters",
     "topk_csr_rows",
+    "trajectory_soft_memberships",
 ]

@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 
 from chronopack._backends.r._bridge import source_r_resource
-from chronopack._legacy import grn_inference as _legacy_edges
-from chronopack._legacy.omnipath_tf import (
+from . import _edges
+from ._omnipath import (
     OmniPathTfGraph,
     OmniPathTfResources,
     build_omnipath_tf_graph,
@@ -118,7 +118,7 @@ def _load_valid_targets(valid_targets: str | Path | Iterable[str] | pd.DataFrame
     if valid_targets is None:
         return None
     if isinstance(valid_targets, (str, Path)):
-        return _legacy_edges.load_valid_targets(valid_targets)
+        return _edges.load_valid_targets(valid_targets)
     if isinstance(valid_targets, pd.DataFrame):
         values = valid_targets.iloc[:, 0].astype(str)
     else:
@@ -129,6 +129,7 @@ def _load_valid_targets(valid_targets: str | Path | Iterable[str] | pd.DataFrame
 # Column conventions of the inputs to infer().
 TARGET_GENE_COLUMN = "gene"
 TARGET_LFDR_COLUMN = "lfdr_bum"  # beta-uniform-mixture local FDR from score_targets()
+TARGET_TIEBREAK_COLUMN = "waldStat_1"  # orders equally scored targets (higher first)
 TF_COLUMN = "TF"
 TF_SCORE_COLUMN = "priority_act"  # net activating mass from rank_regulators()
 
@@ -148,7 +149,12 @@ def _context_edges(
     if missing:
         raise ValueError(f"TF scores are missing required columns: {sorted(missing)}")
 
-    genes = gene_scores[[TARGET_GENE_COLUMN, TARGET_LFDR_COLUMN]].copy()
+    genes = gene_scores.copy()
+    if TARGET_TIEBREAK_COLUMN in genes.columns:
+        # Edges with equal weights keep the target order (stable sorts below),
+        # so ordering targets by the tradeSeq Wald statistic breaks those ties.
+        genes = genes.sort_values(TARGET_TIEBREAK_COLUMN, ascending=False, kind="mergesort", na_position="last")
+    genes = genes[[TARGET_GENE_COLUMN, TARGET_LFDR_COLUMN]]
     genes = genes.rename(columns={TARGET_GENE_COLUMN: "target", TARGET_LFDR_COLUMN: "lfdr"})
     genes["gene_score"] = 1.0 - pd.to_numeric(genes["lfdr"], errors="coerce")
     genes = genes[np.isfinite(genes["gene_score"]) & (genes["gene_score"] > 0)].copy()
@@ -178,8 +184,8 @@ def _context_edges(
             "EdgeWeight": edge_weight.ravel(),
         }
     )
-    rows = _legacy_edges.normalize_edges(rows, method, valid_targets or set(genes["target"].astype(str)))
-    rows = _legacy_edges.break_ties(rows)
+    rows = _edges.normalize_edges(rows, method, valid_targets or set(genes["target"].astype(str)))
+    rows = _edges.break_ties(rows)
     return rows, tfs, genes
 
 
@@ -197,8 +203,9 @@ def infer(
     ``gene`` and ``lfdr_bum`` columns); ``tfs`` is the ranking from
     :func:`rank_regulators` (``TF`` and ``priority_act`` columns). Each edge is
     weighted by the TF's share of the total priority times the target's
-    ``1 - lfdr``, restricted to ``valid_targets``, then ranked with a
-    deterministic tie-breaker. ``name`` fills the edges' ``method`` column.
+    ``1 - lfdr``, restricted to ``valid_targets``, then ranked. Equal weights
+    are ordered by TF priority, then by the target's tradeSeq ``waldStat_1``
+    (higher first) when the target scores carry it. ``name`` fills the edges' ``method`` column.
     ``tf_universe`` optionally restricts the regulators (benchmark use).
     """
     gene_scores = targets.scores if isinstance(targets, TargetGeneScoreResult) else _read_table(targets)
@@ -319,7 +326,7 @@ def build_chronopack_ranked_edges(
     ``gene_scores_path`` is the combined K562/THP1 target-score table with a
     ``dataset`` column, as written by the former multi-context workflow.
     """
-    valid_targets = _legacy_edges.load_valid_targets(valid_targets_path)
+    valid_targets = _edges.load_valid_targets(valid_targets_path)
     gene_scores = _read_table(gene_scores_path)
     parts = []
     for dataset, tf_path in (("K562", k562_tf_scores_path), ("THP1", thp1_tf_scores_path)):
@@ -332,7 +339,7 @@ def build_chronopack_ranked_edges(
         parts.append(result.to_legacy_edges())
     edges = pd.concat(parts, ignore_index=True)
     if trrust_path is not None and chip_encode_gt_path is not None:
-        tf_universe = _legacy_edges.load_reference_tfs(
+        tf_universe = _edges.load_reference_tfs(
             valid_targets,
             trrust_path=trrust_path,
             chip_encode_gt_path=chip_encode_gt_path,

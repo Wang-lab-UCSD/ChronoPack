@@ -4,7 +4,8 @@ import anndata as ad
 import scipy.sparse as sp
 
 import chronopack as cp
-from chronopack.tl.c2c import score_lr_pairs, split_genes, zscore
+from chronopack.tl.c2c._helpers import split_genes, zscore
+from chronopack.tl.c2c._inference import _score_pairs
 
 
 def test_split_genes_expands_receptor_shorthand():
@@ -18,23 +19,19 @@ def test_zscore_handles_constant_values():
     assert np.allclose(out.to_numpy(), 0.0)
 
 
-def test_score_lr_pairs_ranks_pairs_and_ligands():
-    pair_series = {
-        ("TNF", "TNFRSF1A"): (
-            pd.Series([1.0, 3.0, 5.0], index=[0, 15, 30]),
-            pd.Series([0.0, 1.0, 2.0], index=[0, 15, 30]),
-        ),
-        ("CCL2", "CCR2"): (
-            pd.Series([1.0, 1.5, 2.0], index=[0, 15, 30]),
-            pd.Series([0.0, 0.2, 0.4], index=[0, 15, 30]),
-        ),
+def test_score_pairs_ranks_pairs_and_ligands():
+    activities = {
+        ("TNF", "TNFRSF1A"): pd.Series([1.0, 3.0, 5.0], index=[0.0, 15.0, 30.0]),
+        ("CCL2", "CCR2"): pd.Series([1.0, 1.5, 2.0], index=[0.0, 15.0, 30.0]),
     }
-    association = pd.DataFrame({"pvalue_2": [1e-6, 0.05]}, index=["TNF", "CCL2"])
+    association = pd.DataFrame({"pvalue_1": [1e-6, 0.05]}, index=["TNF", "CCL2"])
     detection = pd.Series({"TNFRSF1A": 0.5, "CCR2": 0.2})
 
-    pair_scores, ligand_scores = score_lr_pairs(pair_series, association, detection)
+    pair_scores, ligand_scores = _score_pairs(activities, association, detection, (0.0, 45.0))
 
     assert pair_scores.iloc[0]["pair"] == "TNF->TNFRSF1A"
+    # activity relative to t=0, summed over the window: 0 + 2 + 4
+    assert pair_scores.iloc[0]["activity_sum"] == 6.0
     assert ligand_scores.iloc[0]["ligand"] == "TNF"
     assert {"composite_score", "zscore_composite_rank"}.issubset(ligand_scores.columns)
 
@@ -73,7 +70,7 @@ def test_c2c_infer_returns_result_and_filters_missing_receptor(tmp_path):
             "annotation": ["Secreted Signaling", "Secreted Signaling"],
         }
     )
-    association = pd.DataFrame({"pvalue_2": [1e-4]}, index=["LIG"])
+    association = pd.DataFrame({"pvalue_1": [1e-4]}, index=["LIG"])
 
     result = cp.tl.c2c.infer(
         adata=adata,
@@ -108,7 +105,7 @@ def test_c2c_infer_returns_result_and_filters_missing_receptor(tmp_path):
 def test_c2c_infer_missing_sender_has_clear_error():
     adata = _tiny_c2c_adata()
     lr = pd.DataFrame({"ligand": ["LIG"], "receptor": ["REC"]})
-    association = pd.DataFrame({"pvalue_2": [1e-4]}, index=["LIG"])
+    association = pd.DataFrame({"pvalue_1": [1e-4]}, index=["LIG"])
 
     try:
         cp.tl.c2c.infer(
@@ -127,7 +124,7 @@ def test_c2c_infer_missing_sender_has_clear_error():
 def test_c2c_plotting_smoke(tmp_path):
     adata = _tiny_c2c_adata()
     lr = pd.DataFrame({"ligand": ["LIG"], "receptor": ["REC"], "annotation": ["Secreted Signaling"]})
-    association = pd.DataFrame({"pvalue_2": [1e-4]}, index=["LIG"])
+    association = pd.DataFrame({"pvalue_1": [1e-4]}, index=["LIG"])
     result = cp.tl.c2c.infer(
         adata=adata,
         lr_resource=lr,
@@ -154,7 +151,7 @@ def test_c2c_min_cells_requires_detection_in_sender_and_receiver_cells():
     # (Underscores in receptor names are split into components, so avoid them here.)
     adata.var_names = ["LIG", "REC", "RESP", "NOREC"]
     lr = pd.DataFrame({"ligand": ["LIG", "LIG"], "receptor": ["REC", "NOREC"]})
-    association = pd.DataFrame({"pvalue_2": [1e-4]}, index=["LIG"])
+    association = pd.DataFrame({"pvalue_1": [1e-4]}, index=["LIG"])
 
     def pairs(**kwargs):
         res = cp.tl.c2c.infer(adata=adata, lr_resource=lr, association=association, sender="S", receiver="R", **kwargs)
@@ -172,7 +169,7 @@ def test_c2c_min_cells_requires_detection_in_sender_and_receiver_cells():
 def test_c2c_causal_window_limits_summed_time_points():
     adata = _tiny_c2c_adata()
     lr = pd.DataFrame({"ligand": ["LIG"], "receptor": ["REC"], "annotation": ["Secreted Signaling"]})
-    association = pd.DataFrame({"pvalue_2": [1e-4]}, index=["LIG"])
+    association = pd.DataFrame({"pvalue_1": [1e-4]}, index=["LIG"])
     kwargs = dict(adata=adata, lr_resource=lr, association=association, sender="S", receiver="R")
 
     full = cp.tl.c2c.infer(**kwargs).interactions.iloc[0]

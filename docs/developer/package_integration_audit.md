@@ -73,17 +73,14 @@ visualization:
 - preprocessing helpers:
   - `read_time_tagged_dge`
   - `add_time_metadata`
-  - `annotate_qc_metrics`
-  - `filter_cells_by_qc`
   - `filter_technical_genes`
   - `filter_low_count_genes`
   - `score_cell_cycle`
-  - `initialize_expression_layers`
 - validation:
   - `validate_adata`
-  - `validate_preprocessed_adata`
-- temporary compatibility:
-  - `write_tradeseq_inputs(...)`
+- (removed 2026-09-30: `annotate_qc_metrics`, `filter_cells_by_qc`,
+  `initialize_expression_layers`, `validate_preprocessed_adata`, and the
+  `write_tradeseq_inputs(...)` compatibility wrapper)
 
 ### `cp.tl`
 
@@ -130,12 +127,11 @@ visualization:
 ### `cp.tl.c2c`
 
 - `infer(...) -> C2CResult`
-- temporary helper exports:
-  - LR parsing/filtering helpers;
-  - time-series helpers;
-  - `build_pair_series`;
-  - `score_lr_pairs`;
-  - legacy plotting helpers used by active notebooks.
+- helper exports used by the C2C notebook: `split_by_cell_type`,
+  `build_pair_series` (plots in `cp.pl.c2c`).
+  The `_legacy/` package was dissolved on 2026-09-30: its live code moved to
+  `tl/c2c/_helpers.py`, `pl/c2c/_plots.py`, `tl/grn/_omnipath.py` and
+  `tl/grn/_edges.py`.
 
 ## Standardized AnnData / Result Schema
 

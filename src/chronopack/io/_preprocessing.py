@@ -13,9 +13,6 @@ import scanpy as sc
 from chronopack._core._keys import DEFAULT_COUNTS_LAYER, DEFAULT_TIME_KEY
 from chronopack._core._provenance import record_provenance
 from chronopack._core._schema import (
-    CPM_LAYER,
-    LOG1P_LAYER,
-    PREPROCESSING_SCHEMA,
     SAMPLE_KEY,
     TIME_GROUP_CATEGORIES,
     TIME_GROUP_KEY,
@@ -130,79 +127,6 @@ def add_time_metadata(
     return out
 
 
-def annotate_qc_metrics(
-    adata,
-    *,
-    mt_prefixes: tuple[str, ...] = ("MT-", "mt-"),
-    rb_prefixes: tuple[str, ...] = ("RPS", "RPL"),
-    copy: bool = False,
-):
-    """Add mitochondrial/ribosomal flags and Scanpy QC metrics."""
-    out = _target(adata, copy)
-    out.var[PREPROCESSING_SCHEMA.mito_flag_key] = out.var_names.str.startswith(mt_prefixes)
-    out.var[PREPROCESSING_SCHEMA.ribosomal_flag_key] = out.var_names.str.startswith(rb_prefixes)
-    sc.pp.calculate_qc_metrics(
-        out,
-        qc_vars=[PREPROCESSING_SCHEMA.mito_flag_key, PREPROCESSING_SCHEMA.ribosomal_flag_key],
-        percent_top=None,
-        log1p=False,
-        inplace=True,
-    )
-    record_provenance(
-        out,
-        "annotate_qc_metrics",
-        analysis="preprocessing.annotate_qc_metrics",
-        parameters={"mt_prefixes": mt_prefixes, "rb_prefixes": rb_prefixes},
-        result_keys={
-            "var": [PREPROCESSING_SCHEMA.mito_flag_key, PREPROCESSING_SCHEMA.ribosomal_flag_key],
-            "obs": ["total_counts", "n_genes_by_counts", "pct_counts_mt", "pct_counts_rb"],
-        },
-    )
-    return out
-
-
-def filter_cells_by_qc(
-    adata,
-    *,
-    min_counts: float | None = None,
-    max_counts: float | None = None,
-    max_pct_mt: float | None = None,
-    min_genes: float | None = None,
-    copy: bool = False,
-):
-    """Filter cells with the existing combined QC mask."""
-    out = _target(adata, copy)
-    required = ["total_counts", "pct_counts_mt", "n_genes_by_counts"]
-    missing = [col for col in required if col not in out.obs]
-    if missing:
-        raise ChronoPackError(f"Missing QC columns in adata.obs: {missing}.")
-
-    mask = np.ones(out.n_obs, dtype=bool)
-    if min_counts is not None:
-        mask &= out.obs["total_counts"].to_numpy() >= min_counts
-    if max_counts is not None:
-        mask &= out.obs["total_counts"].to_numpy() <= max_counts
-    if max_pct_mt is not None:
-        mask &= out.obs["pct_counts_mt"].to_numpy() < max_pct_mt
-    if min_genes is not None:
-        mask &= out.obs["n_genes_by_counts"].to_numpy() >= min_genes
-
-    out._inplace_subset_obs(mask)
-    record_provenance(
-        out,
-        "filter_cells_by_qc",
-        analysis="preprocessing.filter_cells_by_qc",
-        parameters={
-            "min_counts": min_counts,
-            "max_counts": max_counts,
-            "max_pct_mt": max_pct_mt,
-            "min_genes": min_genes,
-        },
-        result_keys={"n_obs": out.n_obs},
-    )
-    return out
-
-
 def filter_technical_genes(
     adata,
     *,
@@ -274,36 +198,6 @@ def score_cell_cycle(
         analysis="preprocessing.score_cell_cycle",
         parameters={"gene_set_path": str(gene_set_path), "n_s_genes": len(s_genes), "n_g2m_genes": len(g2m_genes)},
         result_keys={"obs": ["S_score", "G2M_score", "phase"]},
-    )
-    return out
-
-
-def initialize_expression_layers(
-    adata,
-    *,
-    counts_layer: str = DEFAULT_COUNTS_LAYER,
-    cpm_layer: str = CPM_LAYER,
-    log1p_layer: str = LOG1P_LAYER,
-    target_sum: float = 1e4,
-    copy: bool = False,
-):
-    """Create the standard counts, normalized, and log1p layers.
-
-    This wraps the recurring notebook idiom while preserving Scanpy for the
-    actual normalization and log transform.
-    """
-    out = _target(adata, copy)
-    out.layers[counts_layer] = out.X.copy()
-    sc.pp.normalize_total(out, target_sum=target_sum)
-    out.layers[cpm_layer] = out.X.copy()
-    sc.pp.log1p(out)
-    out.layers[log1p_layer] = out.X.copy()
-    record_provenance(
-        out,
-        "initialize_expression_layers",
-        analysis="preprocessing.initialize_expression_layers",
-        parameters={"target_sum": target_sum},
-        result_keys={"layers": [counts_layer, cpm_layer, log1p_layer]},
     )
     return out
 

@@ -22,8 +22,7 @@ benchmark-specific preprocessing/plots.
     significance;
   - returns `C2CResult`.
 
-Reusable lower-level helpers remain available temporarily in `cp.tl.c2c` and
-the top-level `chronopack.c2c` compatibility shim, including:
+Reusable lower-level helpers remain available in `cp.tl.c2c`, including:
 
 - `load_secreted_cellchat_pairs`;
 - `load_tradeseq_grid_exports`;
@@ -83,8 +82,7 @@ mean times that number: pair ranks are unchanged, and ligand ranks are
 unchanged because `max_lr_activity` enters the composite only through a
 z-score. Only the activity scale (x4 for the default window) changes, so an
 activity threshold of 0.1 on the old mean corresponds to 0.4 on the sum.
-The legacy `score_lr_pairs` helper still computes the mean `avg` for the
-frozen manuscript notebooks.
+The legacy `score_lr_pairs` helper still computes the historical mean `avg`.
 
 ## Current Workflow Mapping
 

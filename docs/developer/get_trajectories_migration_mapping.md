@@ -81,8 +81,9 @@ These are carried by `CellStateTrajectoryResult` or by explicit sidecar files.
   notebook-configured and unchanged.
 - The mixed THP1/K562 workflow still runs WOT separately per cell type and
   embeds the resulting square blocks into the full AnnData cell axis.
-- Existing compatibility import paths remain temporarily:
-  `chronopack.trajectories` and `chronopack._legacy.trajectories`.
+- The internal `chronopack._legacy.trajectories` module still holds the
+  migrated helpers (the top-level `chronopack.trajectories` shim was removed
+  on 2026-09-30).
 - The older function name `terminal_fate_trajectory_clustering()` remains as a
   compatibility shim, but new code should prefer
   `cluster_cell_state_trajectories()` to avoid confusing this workflow with

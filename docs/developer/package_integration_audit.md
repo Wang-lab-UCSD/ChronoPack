@@ -316,12 +316,7 @@ Documented compatibility issues:
 
 | Item | Classification | Keep for now? | Notes |
 | --- | --- | --- | --- |
-| `chronopack.preprocessing` | compatibility shim | yes | old imports during notebook transition |
-| `chronopack.trajectories` | compatibility shim | yes | active/reference notebooks and old helper names |
-| `chronopack.tradeseq` | compatibility shim | yes | R/tradeSeq transition and old notebooks |
-| `chronopack.grn_inference` | compatibility shim | yes | old GRN notebook/script imports |
-| `chronopack.omnipath_tf` | compatibility shim | yes | old OmniPath TF ranking imports |
-| `chronopack.c2c` | compatibility shim | yes | old C2C notebook/tests |
+| `chronopack.{preprocessing,trajectories,tradeseq,grn_inference,omnipath_tf,c2c}` | compatibility shims | removed 2026-09-30 | last used by the frozen manuscript notebooks |
 | `cp.tl.grn.build_chronopack_ranked_edges` | compatibility export | yes | reproduces old edge artifact, including explicit caller-supplied TF universe |
 | `pc_df.new.csv/rds` | compatibility/export sidecar | yes | legacy downstream tables and regression comparison |
 | `gene_trajectory_fit.csv`, `gene_trajectory_X_pca.csv` | generated sidecars | yes | useful for language-neutral export and artifact migration |

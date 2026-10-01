@@ -51,6 +51,15 @@ Cluster-specific packed-environment deployment is documented separately in
 
 See `docs/user/quickstart.md` for a compact walkthrough of the intended API.
 
+## Analyses
+
+`analyses/` holds the manuscript analysis notebooks (preprocessing through
+gene-trajectory clustering, cell-cell communication and GRN inference), each
+using the installed package and keeping the outputs of the latest verified
+run. `analyses/README.md` describes the data folder and run order.
+`verification/` holds the scripts that re-run those notebooks stage by stage
+on the cluster and compare the results with a reference run.
+
 ## License
 
 ChronoPack is currently distributed under the repository license in `LICENSE`.

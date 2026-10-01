@@ -148,8 +148,8 @@ Verified reference prefix:
 Additional direct dependency discovered during verification:
 
 - `cluster` is used by retained R plotting code (`cluster::silhouette`) and is
-  now declared as `r-cluster` in `env/environment.yml` and `cluster` in
-  `r/chronopackR/DESCRIPTION`.
+  now declared as `r-cluster` in `env/environment.yml` and listed with the
+  other R backend packages in `docs/user/installation.md`.
 
 Phase E smoke-test results:
 
@@ -202,6 +202,9 @@ Deployment decision:
 
 - Keep `env/environment.yml`, `env/conda-linux-64.lock`, and
   `env/pip-freeze.txt` as the canonical environment definition.
+- (Removed 2026-09-30, unused since this audit: the packed-archive deployment
+  below, `env/activate_chronopack_hpc.sh` and
+  `jobs/verify_chronopack_packed_env.slurm`.)
 - Use a packed conda environment as the immediate HPC deployment artifact.
 - Store the packed archive on persistent NFS, but hydrate runtime prefixes onto
   node-local scratch for each allocation/job.

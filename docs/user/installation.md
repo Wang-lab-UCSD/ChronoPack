@@ -25,15 +25,19 @@ pytest
 
 - `pyproject.toml` defines the Python package metadata and Python runtime
   dependencies.
-- `r/chronopackR/DESCRIPTION` records the R-backend dependency intent.
+- The R backend (`src/chronopack/_backends/r/`) needs these R packages, all
+  provided by `env/environment.yml`: BiocParallel, Matrix, RColorBrewer,
+  SingleCellExperiment, SummarizedExperiment, circlize, cluster, dplyr,
+  fdrtool, ggplot2, ggrepel, matrixStats, patchwork, purrr, scales,
+  shadowtext, slingshot, tibble, tidyr and tradeSeq (testthat for R-side
+  tests).
 - `env/environment.yml` and lock/snapshot files define the verified mixed
   Python/R workflow environment.
 
 The Python package does not assume that `pip` can install the R/Bioconductor
 backend.
 
-## HPC Deployment
+## Checking the Environment
 
-The Wang-cluster packed-environment workflow is developer infrastructure, not a
-package API. It is documented in `env/README.md` and hydrates a verified packed
-environment onto node-local scratch inside Slurm allocations.
+`env/README.md` describes the environment files and a smoke test for an
+activated environment.

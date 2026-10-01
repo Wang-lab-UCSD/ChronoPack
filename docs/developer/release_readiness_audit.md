@@ -47,19 +47,13 @@ are not part of the recommended public API unless listed above.
 
 ## Compatibility and Deprecation Policy
 
-The following top-level modules remain for the first release as compatibility
-interfaces:
-
-- `chronopack.preprocessing` -> prefer `chronopack.io`
-- `chronopack.trajectories` -> prefer `chronopack.tl`
-- `chronopack.tradeseq` -> prefer `chronopack.tl.fit_gene_dynamics`
-- `chronopack.grn_inference` -> prefer `chronopack.tl.grn`
-- `chronopack.omnipath_tf` -> prefer `chronopack.tl.grn.rank_regulators`
-- `chronopack.c2c` -> prefer `chronopack.tl.c2c` and `chronopack.pl.c2c`
-
-These modules now emit `FutureWarning` on import. They should be removed only
-after active notebooks and downstream users have migrated to the public API in
-a later release.
+The former top-level compatibility modules (`chronopack.preprocessing`,
+`chronopack.trajectories`, `chronopack.tradeseq`, `chronopack.grn_inference`,
+`chronopack.omnipath_tf`, `chronopack.c2c`) and the flat source-checkout
+`chronopack/` package were removed on 2026-09-30, together with the frozen
+manuscript environment whose notebooks were their last users. Use
+`chronopack.io`, `chronopack.tl` (including `cp.tl.grn` and `cp.tl.c2c`) and
+`chronopack.pl`.
 
 ## Stale Artifact Resolution
 

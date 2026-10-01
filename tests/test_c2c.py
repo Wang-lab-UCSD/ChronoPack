@@ -4,7 +4,7 @@ import anndata as ad
 import scipy.sparse as sp
 
 import chronopack as cp
-from chronopack.c2c import score_lr_pairs, split_genes, zscore
+from chronopack.tl.c2c import score_lr_pairs, split_genes, zscore
 
 
 def test_split_genes_expands_receptor_shorthand():

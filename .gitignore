@@ -22,8 +22,9 @@
 !r/chronopackR/DESCRIPTION
 !src/**
 !tests/**
-# Barcode list read by k562-tnfa.hg38.rep/PreprocessDatasets.ipynb
-!k562-tnfa.hg38.rep/exclude_leiden_clusters.manuscript.csv
+# Small inputs read by the analyses/ notebooks
+!analyses/resources/*
+!analyses/k562-tnfa.hg38.rep/exclude_leiden_clusters.manuscript.csv
 
 __pycache__/
 *.py[cod]
@@ -36,6 +37,8 @@ __pycache__/
 
 # Don't track Jupyter checkpoint notebooks
 .ipynb_checkpoints/
-k562-tnfa-puromycin.hg38/DimensionalityReductionClustering.Old.ipynb
-k562-tnfa-puromycin.hg38/reference/DimensionalityReductionClustering.Old.ipynb
+
+# Analysis data (CHRONOPACK_DATA_DIR default) and verification run records
+analyses/data/
+verification_runs/
 .github/workflows/ci.yml

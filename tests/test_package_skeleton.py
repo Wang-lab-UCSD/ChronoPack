@@ -12,12 +12,14 @@ def test_public_namespaces_importable():
     assert hasattr(cp.tl, "cluster_gene_trajectories")
 
 
-def test_legacy_imports_still_available():
-    from chronopack.tradeseq import WriteTradeSeqInputsFromAnnData
-    from chronopack.c2c import score_lr_pairs
+def test_legacy_compatibility_modules_are_gone():
+    import importlib
 
-    assert callable(WriteTradeSeqInputsFromAnnData)
-    assert callable(score_lr_pairs)
+    import pytest
+
+    for name in ["c2c", "tradeseq", "grn_inference", "omnipath_tf", "preprocessing", "trajectories"]:
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(f"chronopack.{name}")
 
 
 def test_bundled_r_resources_accessible():

@@ -38,11 +38,9 @@ Compatibility:
 
 - `cp.tl.grn.build_chronopack_ranked_edges(...)`
 - `cp.tl.grn.write_chronopack_ranked_edges(...)`
-- top-level `chronopack.grn_inference`
-- top-level `chronopack.omnipath_tf`
 
-These preserve old imports while active notebooks migrate to the public
-`cp.tl.grn` namespace.
+(The top-level `chronopack.grn_inference` / `chronopack.omnipath_tf` modules
+were removed on 2026-09-30.)
 
 ## Result Objects
 

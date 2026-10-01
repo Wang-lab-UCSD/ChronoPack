@@ -111,6 +111,5 @@ c2c.write("c2c_results")
 fig, ax = cp.pl.c2c.interaction_scatter(c2c, x_thresh=0.4)
 ```
 
-Legacy modules such as `chronopack.tradeseq` and `chronopack.c2c` remain for
-compatibility, but new workflows should use `chronopack.io`, `chronopack.tl`,
-and `chronopack.pl`.
+The complete analysis notebooks, with outputs from the latest verified run,
+are in `analyses/` (see `analyses/README.md`).

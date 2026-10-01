@@ -201,7 +201,7 @@ association_df_single <- function(sce, n_points = 9) {
     inverse = "Chol",
     nPoints = n_points
   )
-  asso_res <- asso_res[order(asso_res[, "waldStat_1"], decreasing = TRUE), ]
+  asso_res <- asso_res[order(asso_res[, "waldStat_1"], decreasing = TRUE), , drop = FALSE]
   asso_df <- as.data.frame(asso_res)
   if (!"meanLogFC" %in% names(asso_df) && ncol(asso_df) == 4) {
     names(asso_df) <- c("waldStat_1", "df_1", "pvalue_1", "meanLogFC")
@@ -240,7 +240,7 @@ association_df_multilineage <- function(sce, n_points = 9) {
     inverse = "Chol",
     nPoints = n_points
   )
-  asso_res <- asso_res[order(asso_res[, "waldStat_1"], decreasing = TRUE), ]
+  asso_res <- asso_res[order(asso_res[, "waldStat_1"], decreasing = TRUE), , drop = FALSE]
   asso_df <- as.data.frame(asso_res)
   if ("pvalue" %in% names(asso_df)) {
     asso_df$qval <- p.adjust(asso_df$pvalue, method = "BH")
@@ -563,4 +563,69 @@ run_tradeseq_weighted_lineages <- function(input_dir,
     sce_paths = sce_paths,
     sce_screen_paths = sce_screen_paths
   )
+}
+
+# Fit only `genes` (no screen), with the same inputs, offsets and lineage set-up
+# as the full runners above; tradeSeq fits genes independently, so each gene's
+# fit equals its fit in a full run with the same knots. Writes the SCE and its
+# association table to `out_dir` (not the input directory).
+fit_tradeseq_genes <- function(input_dir,
+                               genes,
+                               out_dir,
+                               nknots = 8,
+                               weights_file = NULL,
+                               n_points = 9,
+                               workers = 1,
+                               tag = "",
+                               seed = 123,
+                               verbose = FALSE) {
+  old_wd <- getwd()
+  on.exit(setwd(old_wd), add = TRUE)
+  out_dir <- normalizePath(out_dir, mustWork = TRUE)
+  set_tradeseq_workdir(input_dir)
+
+  inputs <- read_tradeseq_inputs(tag = tag)
+  counts_sub <- inputs$counts_sub
+  missing <- setdiff(genes, rownames(counts_sub))
+  if (length(missing)) {
+    stop("Genes not among the tradeSeq input genes: ", paste(missing, collapse = ", "))
+  }
+  setup <- if (is.null(weights_file)) {
+    prepare_single_lineage(counts_sub, inputs$time_vec, inputs$sf)
+  } else {
+    prepare_weighted_lineages(counts_sub, inputs$time_vec, inputs$sf, weights_file)
+  }
+
+  # tradeSeq::fitGAM fails on a one-gene count matrix; fit one more input gene
+  # alongside (genes are fitted independently) and drop it afterwards.
+  fit_genes <- if (length(genes) == 1) c(genes, setdiff(rownames(counts_sub), genes)[1]) else genes
+
+  set.seed(seed)
+  sce <- fit_tradeseq_sce(
+    counts_sub = counts_sub[fit_genes, , drop = FALSE],
+    pseudotime = setup$PT,
+    cell_weights = setup$CW,
+    offset = setup$offset_vec,
+    nknots = nknots,
+    workers = workers,
+    verbose = verbose
+  )
+  asso_df <- if (is.null(weights_file)) {
+    association_df_single(sce, n_points = n_points)
+  } else {
+    association_df_multilineage(sce, n_points = n_points)
+  }
+  sce <- sce[genes, ]
+  asso_df <- asso_df[genes, , drop = FALSE]
+  for (p_col in grep("^pvalue", names(asso_df), value = TRUE)) {
+    asso_df[[sub("^pvalue", "qval", p_col)]] <- p.adjust(asso_df[[p_col]], method = "BH")
+  }
+  stat_cols <- grep("^(waldStat|pvalue|qval|meanLogFC)", names(asso_df), value = TRUE)
+  sce <- annotate_sce_association(sce, asso_df, fields = stat_cols)
+
+  sce_path <- file.path(out_dir, paste0("sce.", ncol(setup$CW), "trajectory.nknots", nknots, ".rds"))
+  association_path <- file.path(out_dir, "asso_df.csv")
+  saveRDS(sce, sce_path)
+  write.csv(asso_df, association_path, row.names = TRUE)
+  list(sce_path = sce_path, association_path = association_path, genes_keep = genes)
 }

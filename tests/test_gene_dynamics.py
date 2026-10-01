@@ -184,3 +184,25 @@ def test_fit_gene_dynamics_weighted_lineages_use_multilineage_runner_and_names(t
     assert seen["lineage_weights"] == "cell_weights.csv"
     assert seen["outputs"]["association"] == "asso_df.2trajectory.nknots4.csv"
     assert seen["outputs"]["sce"] == "sce.2trajectory.nknots8.rds"
+
+
+def test_fit_gene_dynamics_with_genes_fits_only_those_genes(tmp_path, monkeypatch):
+    calls = {}
+
+    def fake_fit_selected(**kwargs):
+        calls.update(kwargs)
+        association = pd.DataFrame({"waldStat_1": [3.0], "pvalue_1": [0.01]}, index=["g1"])
+        return association, ["g1"], {"sce": str(tmp_path / "sce.rds")}
+
+    def no_full_run(**kwargs):
+        raise AssertionError("the full screen + refit must not run")
+
+    monkeypatch.setattr(_gene_dynamics, "_fit_selected_genes", fake_fit_selected)
+    monkeypatch.setattr(_gene_dynamics, "_run_tradeseq_backend", no_full_run)
+
+    fit = cp.tl.fit_gene_dynamics(input_dir=tmp_path, genes=["g1"], final_nknots=8)
+
+    assert calls["genes"] == ["g1"] and calls["nknots"] == 8
+    assert fit.selected_genes == ["g1"]
+    assert fit.sidecar_paths["sce"].endswith("sce.rds")
+    assert list(fit.association.index) == ["g1"]

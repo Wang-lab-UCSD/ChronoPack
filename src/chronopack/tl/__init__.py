@@ -18,10 +18,8 @@ __all__ = [
     "merge_trajectory_graphs",
     "trajectory_soft_memberships",
     "align_gene_trajectories",
-    "association_paths_from_dimred_roots",
     "compute_gene_trajectory_descriptors",
     "cluster_gene_trajectories",
-    "sce_paths_from_dimred_roots",
     "standardize_gene_trajectories",
     "mode_conservation",
     "mode_switchers",
@@ -57,11 +55,9 @@ def __getattr__(name):
         return getattr(_gene_dynamics, name)
     if name in {
         "align_gene_trajectories",
-        "association_paths_from_dimred_roots",
-        "compute_gene_trajectory_descriptors",
+            "compute_gene_trajectory_descriptors",
         "cluster_gene_trajectories",
-        "sce_paths_from_dimred_roots",
-        "standardize_gene_trajectories",
+            "standardize_gene_trajectories",
     }:
         from . import _gene_clustering
 

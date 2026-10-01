@@ -95,62 +95,6 @@ def _r_optional_path_dict(values: dict[str, Any] | None):
     return ListVector({str(k): StrVector([str(v)]) for k, v in values.items() if v is not None})
 
 
-def _default_dimred_paths(output_dir):
-    output_dir = Path(output_dir)
-    return {
-        "fit": output_dir / "gene_trajectory_fit.csv",
-        "time_grid": output_dir / "gene_trajectory_time_grid.csv",
-        "pc_df": output_dir / "pc_df.new.csv",
-        "pc_df_rds": output_dir / "pc_df.new.rds",
-        "fit_z": output_dir / "gene_trajectory_fit_z.csv",
-        "fit_ddt_z": output_dir / "gene_trajectory_fit_ddt_z.csv",
-        "x_pca": output_dir / "gene_trajectory_X_pca.csv",
-        "xd_pca": output_dir / "gene_trajectory_Xd_pca.csv",
-        "induced_metrics": output_dir / "cluster_metrics.induced.csv",
-        "repressed_metrics": output_dir / "cluster_metrics.repressed.csv",
-    }
-
-
-def dimred_config(root_puro, root_k562a, root_lps):
-    """Return the current fixed-sidecar configuration for DimensionalityReduction."""
-    from rpy2.robjects import r
-
-    source_r_resource("dimred_clustering_helpers.R")
-    return r["chronopack_dimred_config"](str(root_puro), str(root_k562a), str(root_lps))
-
-
-def sce_paths_from_dimred_roots(root_puro, root_k562a, root_lps) -> dict[str, str]:
-    """Resolve the fitted tradeSeq SCE files used by the DimensionalityReduction notebook."""
-    cfg = dimred_config(root_puro, root_k562a, root_lps)
-    out: dict[str, str] = {}
-    for key in cfg.names:
-        entry = cfg.rx2(key)
-        root = Path(str(entry.rx2("dir")[0]))
-        for candidate in entry.rx2("sce"):
-            path = root / str(candidate)
-            if path.exists():
-                out[str(key)] = str(path)
-                break
-        else:
-            raise FileNotFoundError(f"Could not find fitted SCE for {key} under {root}.")
-    return out
-
-
-def association_paths_from_dimred_roots(root_puro, root_k562a, root_lps) -> dict[str, str]:
-    """Resolve legacy association CSVs for one-time SCE rowData migration."""
-    cfg = dimred_config(root_puro, root_k562a, root_lps)
-    out: dict[str, str] = {}
-    for key in cfg.names:
-        entry = cfg.rx2(key)
-        root = Path(str(entry.rx2("dir")[0]))
-        for candidate in entry.rx2("asso"):
-            path = root / str(candidate)
-            if path.exists():
-                out[str(key)] = str(path)
-                break
-    return out
-
-
 def _make_traj_adata(
     *,
     fit: pd.DataFrame,
@@ -189,18 +133,14 @@ def _make_traj_adata(
 
 
 def align_gene_trajectories(
-    sce_dict: dict[str, Any] | None = None,
+    sce_dict: dict[str, Any],
     *,
-    output_dir: str | Path | None = None,
     key_added: str = GENE_TRAJECTORY_KEY,
-    keys=("K562a", "K562_puro", "K562b", "THP1"),
+    keys=None,
     time_map=None,
     offset_map=None,
     scale_map=None,
     association_paths: dict[str, Any] | None = None,
-    root_puro=None,
-    root_k562a=None,
-    root_lps=None,
     lineage_pick: int = 1,
     embed_raw_max_bytes: int = 100_000_000,
 ):
@@ -210,28 +150,17 @@ def align_gene_trajectories(
     except ImportError as exc:
         raise ImportError("Gene-trajectory alignment requires optional dependency 'rpy2'.") from exc
 
-    if sce_dict is None:
-        if root_puro is None or root_k562a is None or root_lps is None:
-            raise ValueError("Provide sce_dict or root_puro/root_k562a/root_lps.")
-        sce_dict = sce_paths_from_dimred_roots(root_puro, root_k562a, root_lps)
-        if association_paths is None:
-            association_paths = association_paths_from_dimred_roots(root_puro, root_k562a, root_lps)
-
-    time_map = time_map or {"K562a": 110, "K562_puro": 110, "K562b": 165, "THP1": 165}
-    offset_map = offset_map or {"K562a": 0, "K562_puro": 0, "K562b": -68, "THP1": -10}
+    time_map = time_map or {"K562a": 110, "K562b": 165, "THP1": 165}
+    offset_map = offset_map or {"K562a": 0, "K562b": -68, "THP1": -10}
     scale_map = scale_map or {"THP1": 0.65}
-    keys = tuple(k for k in keys if k in sce_dict)
+    # Contexts: every sce_dict entry, in order, unless a subset is requested.
+    keys = tuple(sce_dict) if keys is None else tuple(k for k in keys if k in sce_dict)
     if not keys:
         raise ValueError("No requested keys are present in sce_dict.")
 
     source_r_resource("dimred_clustering_helpers.R")
-    if output_dir is None:
-        tmp_ctx = TemporaryDirectory()
-        work_dir = Path(tmp_ctx.name)
-    else:
-        tmp_ctx = None
-        work_dir = Path(output_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
+    tmp_ctx = TemporaryDirectory()  # R hand-off files only
+    work_dir = Path(tmp_ctx.name)
     try:
         # rpy2 cannot convert None; omit association_paths so R uses its NULL default.
         optional = {}
@@ -299,8 +228,7 @@ def align_gene_trajectories(
             key_added=key_added,
         )
     finally:
-        if tmp_ctx is not None:
-            tmp_ctx.cleanup()
+        tmp_ctx.cleanup()
     return traj
 
 
@@ -308,7 +236,6 @@ def compute_gene_trajectory_descriptors(
     traj,
     *,
     inplace: bool = True,
-    output_dir: str | Path | None = None,
     descriptor_args: dict[str, Any] | None = None,
     key_added: str = GENE_TRAJECTORY_KEY,
 ):
@@ -323,13 +250,8 @@ def compute_gene_trajectory_descriptors(
     time_grid = np.asarray(target.var["time"], dtype=float)
     source_r_resource("dimred_clustering_helpers.R")
 
-    if output_dir is None:
-        tmp_ctx = TemporaryDirectory()
-        work_dir = Path(tmp_ctx.name)
-    else:
-        tmp_ctx = None
-        work_dir = Path(output_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
+    tmp_ctx = TemporaryDirectory()  # R hand-off files only
+    work_dir = Path(tmp_ctx.name)
     try:
         traj_path = work_dir / "descriptor_input_fit.csv"
         time_path = work_dir / "descriptor_input_time.csv"
@@ -360,8 +282,7 @@ def compute_gene_trajectory_descriptors(
         desc = pd.read_csv(desc_path, index_col=0)
         desc = desc.loc[target.obs_names]
     finally:
-        if tmp_ctx is not None:
-            tmp_ctx.cleanup()
+        tmp_ctx.cleanup()
 
     for col in desc.columns:
         target.obs[col] = desc[col].to_numpy()
@@ -390,7 +311,6 @@ def cluster_gene_trajectories(
     k=range(3, 20),
     alpha: float,
     reference=None,
-    output_dir: str | Path | None = None,
     key_added: str = GENE_TRAJECTORY_CLUSTERING_KEY,
     wss_fraction: float = 0.95,
     variance_threshold: float = 0.99,
@@ -410,13 +330,8 @@ def cluster_gene_trajectories(
         raise ValueError("At least one candidate k is required.")
 
     source_r_resource("dimred_clustering_helpers.R")
-    if output_dir is None:
-        tmp_ctx = TemporaryDirectory()
-        work_dir = Path(tmp_ctx.name)
-    else:
-        tmp_ctx = None
-        work_dir = Path(output_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
+    tmp_ctx = TemporaryDirectory()  # R hand-off files only
+    work_dir = Path(tmp_ctx.name)
     try:
         fit_path, time_path = _write_subset_matrix(traj, work_dir, "cluster_input")
         reference_path = None
@@ -442,8 +357,7 @@ def cluster_gene_trajectories(
         distances_df = _read_matrix(work_dir / "cluster_centroid_distances.csv")
         pca = _read_matrix(work_dir / "gene_trajectory_X_pca.csv")
     finally:
-        if tmp_ctx is not None:
-            tmp_ctx.cleanup()
+        tmp_ctx.cleanup()
 
     expected_index = pd.Index(traj.obs_names.astype(str))
     assignments: dict[int, pd.Series] = {}
@@ -505,10 +419,7 @@ def standardize_gene_trajectories(traj):
 __all__ = [
     "GeneTrajectoryClusteringResult",
     "align_gene_trajectories",
-    "association_paths_from_dimred_roots",
     "cluster_gene_trajectories",
     "compute_gene_trajectory_descriptors",
-    "dimred_config",
-    "sce_paths_from_dimred_roots",
     "standardize_gene_trajectories",
 ]

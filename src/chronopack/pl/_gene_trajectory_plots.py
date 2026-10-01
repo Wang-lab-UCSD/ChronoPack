@@ -194,6 +194,7 @@ def trajectory_features(
     x: str = "PC1",
     y: str = "PC2",
     color: str = "broad_cluster",
+    basis: str | None = None,
     clustering_key: str = GENE_TRAJECTORY_CLUSTERING_KEY,
     fit_key: str = GENE_TRAJECTORY_KEY,
     output: str | Path | None = None,
@@ -201,13 +202,26 @@ def trajectory_features(
     height: float = 5,
     title: str | None = None,
 ) -> RPlotResult:
-    """Plot gene trajectory descriptors or PCA coordinates stored in ``traj.obs``."""
+    """Plot two trajectory features against each other, coloured by ``color``.
+
+    ``x`` and ``y`` are ``traj.obs`` columns (descriptors), or with ``basis`` the
+    components (``"PC1"``, ``"PC2"``, ...) of ``traj.obsm[basis]``, e.g. the
+    ``X_pca`` coordinates stored by the clustering notebook; trajectories
+    without coordinates there (NaN) are left out.
+    """
     del clustering_key, fit_key
     data = _gene_labels(adata).reset_index(drop=True)
-    for name in dict.fromkeys([x, y, color]):
+    for name in dict.fromkeys([x, y, color] if basis is None else [color]):
         if name not in adata.obs:
             raise KeyError(f"Trajectory observation column '{name}' is not available.")
         data[name] = adata.obs[name].to_numpy()
+    if basis is not None:
+        if basis not in adata.obsm:
+            raise KeyError(f"Trajectory embedding adata.obsm['{basis}'] is not available.")
+        coords = np.asarray(adata.obsm[basis], dtype=float)
+        for name in (x, y):
+            data[name] = coords[:, int(str(name).removeprefix("PC")) - 1]
+        data = data.dropna(subset=[x, y]).reset_index(drop=True)
     rendered = _render(
         "chronopack_plot_trajectory_features_csv",
         data,

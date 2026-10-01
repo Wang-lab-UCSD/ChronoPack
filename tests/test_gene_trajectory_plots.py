@@ -121,3 +121,17 @@ def test_r_backed_plot_rendering_smoke(tmp_path):
     assert result.output == str(out)
     assert out.exists()
     assert out.stat().st_size > 0
+
+
+def test_trajectory_features_reads_obsm_components_and_skips_missing_rows():
+    import chronopack as cp
+
+    adata = _synthetic_gene_trajectory_adata()
+    # Induced-only PCA: the two repressed rows have no coordinates.
+    adata.obsm["X_pca_induced"] = np.array([[1.0, 2.0], [3.0, 4.0], [np.nan, np.nan], [np.nan, np.nan]])
+
+    result = cp.pl.trajectory_features(adata, basis="X_pca_induced", x="PC1", y="PC2", color="broad_cluster")
+
+    assert result.data["gene"].tolist() == ["g0", "g1"]
+    assert result.data["PC1"].tolist() == [1.0, 3.0]
+    assert result.data["PC2"].tolist() == [2.0, 4.0]

@@ -466,35 +466,6 @@ calculate_trajectory_clustering_metrics <- function(
 }
 
 
-chronopack_dimred_config <- function(root_puro, root_k562a, root_lps) {
-  list(
-    K562_puro = list(
-      dir = file.path(root_puro, "intmd", "sc-K562-1e6-to-tradeSeq.fixed"),
-      asso = c("asso_df.1trajectory.nknots4.csv"),
-      sig = c("sig_df.1trajectory.nknots4.csv"),
-      sce = c("sce.1trajectory.nknots8.rds")
-    ),
-    K562a = list(
-      dir = file.path(root_k562a, "intmd", "sc-K562-1e4_to_tradeSeq.fixed"),
-      asso = c("asso_df.1trajectory.nknots4.csv", "asso_df.1trajectory.csv"),
-      sig = c("sig_df.1trajectory.nknots4.csv", "sig_df.1trajectory.csv"),
-      sce = c("sce.1trajectory.nknots8.rds")
-    ),
-    K562b = list(
-      dir = file.path(root_lps, "intmd", "sc-K562_to_tradeSeq.fixed"),
-      asso = c("asso_df.1trajectory.nknots4.csv", "asso_df.k562.1trajectory.nknots4.expanded.csv"),
-      sig = c("sig_df.1trajectory.nknots4.csv", "sig_df.k562.1trajectory.nknots4.expanded.csv"),
-      sce = c("sce.1trajectory.nknots8.rds")
-    ),
-    THP1 = list(
-      dir = file.path(root_lps, "intmd", "sc-THP1_to_tradeSeq.fixed"),
-      asso = c("asso_df.1trajectory.nknots4.csv", "asso_df.thp1.1trajectory.nknots4.expanded.csv"),
-      sig = c("sig_df.1trajectory.nknots4.csv", "sig_df.thp1.1trajectory.nknots4.expanded.csv"),
-      sce = c("sce.1trajectory.nknots8.rds")
-    )
-  )
-}
-
 compute_tradeSeq_reference_offset <- function(sizeFactors = NULL, off_ref = NULL, dm = NULL, X = NULL) {
   if (!is.null(off_ref)) return(as.numeric(off_ref)[1])
   if (!is.null(dm)) {
@@ -1272,7 +1243,7 @@ rename_dimred_broad_clusters <- function(pc_df) {
   pc_df
 }
 
-finalize_dimred_pc_df <- function(pc_df, cell_type_order = c("K562a", "K562b", "K562_puro", "THP1")) {
+finalize_dimred_pc_df <- function(pc_df, cell_type_order = c("K562a", "K562b", "THP1")) {
   pc_df <- rename_dimred_broad_clusters(pc_df)
   pc_df$broad_cluster <- factor(ifelse(
     pc_df$cluster_broad_induced != "-1",
@@ -1293,8 +1264,8 @@ chronopack_align_sce_trajectories_to_files <- function(
   sce_dict,
   output_dir,
   keys = names(sce_dict),
-  time_map = c(K562a = 110, K562_puro = 110, K562b = 165, THP1 = 165),
-  offset_map = c(K562a = 0, K562_puro = 0, K562b = -68, THP1 = -10),
+  time_map = c(K562a = 110, K562b = 165, THP1 = 165),
+  offset_map = c(K562a = 0, K562b = -68, THP1 = -10),
   scale_map = c(THP1 = 0.65),
   association_paths = NULL,
   lineage_pick = 1,
@@ -1527,10 +1498,10 @@ dimred_log <- function(...) {
 chronopack_align_gene_trajectories <- function(
   cfg,
   output_dir,
-  keys = c("K562a", "K562_puro", "K562b", "THP1"),
-  t_interval_map = c(K562a = 10, K562_puro = 10, K562b = 15, THP1 = 15),
-  time_map = c(K562a = 110, K562_puro = 110, K562b = 165, THP1 = 165),
-  offset_map = c(K562a = 0, K562_puro = 0, K562b = -68, THP1 = -10),
+  keys = c("K562a", "K562b", "THP1"),
+  t_interval_map = c(K562a = 10, K562b = 15, THP1 = 15),
+  time_map = c(K562a = 110, K562b = 165, THP1 = 165),
+  offset_map = c(K562a = 0, K562b = -68, THP1 = -10),
   scale_map = c(THP1 = 0.65),
   pvalue_threshold = 0.05,
   lineage_pick = 1,
@@ -1685,10 +1656,10 @@ chronopack_compute_gene_trajectory_descriptors <- function(
 chronopack_characterize_gene_trajectories <- function(
   cfg,
   output_dir,
-  keys = c("K562a", "K562_puro", "K562b", "THP1"),
-  t_interval_map = c(K562a = 10, K562_puro = 10, K562b = 15, THP1 = 15),
-  time_map = c(K562a = 110, K562_puro = 110, K562b = 165, THP1 = 165),
-  offset_map = c(K562a = 0, K562_puro = 0, K562b = -68, THP1 = -10),
+  keys = c("K562a", "K562b", "THP1"),
+  t_interval_map = c(K562a = 10, K562b = 15, THP1 = 15),
+  time_map = c(K562a = 110, K562b = 165, THP1 = 165),
+  offset_map = c(K562a = 0, K562b = -68, THP1 = -10),
   scale_map = c(THP1 = 0.65),
   pvalue_threshold = 0.05,
   descriptor_args = NULL,
@@ -1810,7 +1781,7 @@ chronopack_finalize_gene_trajectory_clusters <- function(
   characterization,
   clustering_results,
   output_dir,
-  cell_type_order = c("K562a", "K562b", "K562_puro", "THP1"),
+  cell_type_order = c("K562a", "K562b", "THP1"),
   write_outputs = TRUE
 ) {
   output_dir <- normalizePath(output_dir, mustWork = FALSE)

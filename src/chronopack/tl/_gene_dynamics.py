@@ -461,6 +461,34 @@ def _run_tradeseq_backend(
     )
 
 
+def _fit_selected_genes(*, input_dir, genes, nknots, n_points, lineage_weights, workers, tag, verbose):
+    import tempfile
+
+    try:
+        from rpy2.robjects import NULL, StrVector, r
+    except ImportError as exc:
+        raise ImportError("tradeSeq backend execution requires the optional 'rpy2' dependency.") from exc
+
+    genes = [str(g) for g in ([genes] if isinstance(genes, str) else genes)]
+    out_dir = tempfile.mkdtemp(prefix="chronopack-gene-fit-")
+    source_r_resource("tradeseq_helpers.R")
+    r["load_chronopack_tradeseq_libraries"]()
+    result = r["fit_tradeseq_genes"](
+        input_dir=str(input_dir),
+        genes=StrVector(genes),
+        out_dir=out_dir,
+        nknots=int(nknots),
+        weights_file=NULL if lineage_weights is None else str(lineage_weights),
+        n_points=int(n_points),
+        workers=int(workers),
+        tag=str(tag),
+        verbose=bool(verbose),
+    )
+    association_path = str(result.rx2("association_path")[0])
+    association = pd.read_csv(association_path, index_col=0)
+    return association, genes, {"sce": str(result.rx2("sce_path")[0]), "association": association_path}
+
+
 def _write_association_to_var(adata, association, selected_genes, key_added):
     selected = set(map(str, selected_genes))
     for col in association.columns:
@@ -486,6 +514,7 @@ def fit_gene_dynamics(
     prepare_inputs=False,
     cell_weights=None,
     lineage_weights=None,
+    genes=None,
     run_backend=True,
     n_points=9,
     workers=4,
@@ -508,6 +537,13 @@ def fit_gene_dynamics(
     lineage per weight column is fitted along the same time axis, with global and
     per-lineage association tests; genes with p < ``p_threshold`` in any of them
     are refitted, and outputs are named ``*.{n}trajectory.*``.
+
+    With ``genes``, only those genes are fitted, at ``final_nknots`` and without a
+    screen (e.g. for a few genes to plot). The fit uses the same inputs, offsets and
+    lineages as a full run (a gene's fit equals its fit there), is written to a
+    temporary folder rather than ``input_dir``, and can be passed to
+    :func:`predict_gene_dynamics`. Its association table covers only those genes,
+    so q-values are adjusted over them alone.
 
     tradeSeq SingleCellExperiment objects are retained as sidecar RDS files.
     Scalar association-test outputs are written to ``adata.var`` when
@@ -590,7 +626,21 @@ def fit_gene_dynamics(
     sidecar_paths = {}
     backend_result = None
 
-    if run_backend:
+    if run_backend and genes is not None:
+        association, selected_genes, sidecar_paths = _fit_selected_genes(
+            input_dir=input_dir,
+            genes=genes,
+            nknots=final_nknots,
+            n_points=n_points,
+            lineage_weights=lineage_weights,
+            workers=workers,
+            tag=tag,
+            verbose=verbose,
+        )
+        metadata["genes"] = selected_genes
+        if target is not None:
+            _write_association_to_var(target, association, selected_genes, key_added)
+    elif run_backend:
         backend_result = _run_tradeseq_backend(
             input_dir=input_dir,
             n_points=n_points,
@@ -645,26 +695,37 @@ def fit_gene_dynamics(
 
 
 def predict_gene_dynamics(
-    input_dir: str | Path,
-    genes,
+    fit,
+    genes=None,
     *,
+    lineage: int = 1,
     n_points: int = 100,
     time_max: float = 165.0,
     sce_file: str = "sce_screen.1trajectory.nknots4.rds",
 ) -> pd.DataFrame:
     """Fitted tradeSeq curves for selected genes on an even time grid.
 
-    Reads a single-lineage fit written by :func:`fit_gene_dynamics` in
-    ``input_dir`` (by default the 4-knot screen fit, which covers every tested
-    gene) and predicts each gene at the reference library size, the geometric
-    mean of the normalized full-library sizes. Pseudotime 0-1 is mapped to
-    0-``time_max`` minutes. Returns one row per gene and time point with
-    ``gene``, ``t`` (minutes) and ``mu_log1p`` / ``lo_log1p`` / ``hi_log1p``
-    (log1p of the predicted mean count and its 95% band).
+    ``fit`` is either a :class:`GeneDynamicsResult` from
+    ``fit_gene_dynamics(..., genes=[...])`` (``genes`` defaults to its genes) or a
+    tradeSeq input directory, whose ``sce_file`` is read (by default the 4-knot
+    screen fit, which covers every tested gene). Each gene is predicted for
+    ``lineage`` at the reference library size, the geometric mean of the
+    normalized full-library sizes. Pseudotime 0-1 is mapped to 0-``time_max``
+    minutes. Returns one row per gene and time point with ``gene``, ``t``
+    (minutes) and ``mu_log1p`` / ``lo_log1p`` / ``hi_log1p`` (log1p of the
+    predicted mean count and its 95% band).
     """
     import tempfile
 
-    input_dir = Path(input_dir)
+    if isinstance(fit, GeneDynamicsResult):
+        input_dir = Path(fit.metadata["input_dir"])
+        sce_path = Path(fit.sidecar_paths["sce"])
+        genes = fit.selected_genes if genes is None else genes
+    else:
+        input_dir = Path(fit)
+        sce_path = input_dir / sce_file
+        if genes is None:
+            raise ValueError("genes is required when fit is an input directory.")
     genes = [str(g) for g in ([genes] if isinstance(genes, str) else genes)]
     libsize = pd.read_csv(input_dir / "cell_libsize_full.csv")["libsize_full"].to_numpy(float)
     off_ref = float(np.mean(np.log(libsize / libsize.mean())))
@@ -676,21 +737,21 @@ def predict_gene_dynamics(
         raise ImportError("Predicting tradeSeq curves requires the optional 'rpy2' dependency.") from exc
     predict = r(
         """
-        function(sce_path, genes, n_points, off_ref, out) {
+        function(sce_path, genes, lineage, n_points, off_ref, out) {
           # rownames()/rowData() on the SCE only dispatch correctly with the package attached.
           suppressPackageStartupMessages(library(SingleCellExperiment))
           sce <- readRDS(sce_path)
           missing <- setdiff(genes, rownames(sce))
           if (length(missing)) stop("Genes not in the tradeSeq fit: ", paste(missing, collapse = ", "))
           res <- do.call(rbind, lapply(genes, function(g)
-            predict_tradeSeq_sce_with_se(sce, g, lineageId = 1, nPoints = n_points, off_ref = off_ref)))
+            predict_tradeSeq_sce_with_se(sce, g, lineageId = lineage, nPoints = n_points, off_ref = off_ref)))
           write.csv(res, out, row.names = FALSE)
         }
         """
     )
     with tempfile.TemporaryDirectory(prefix="chronopack-curves-") as tmp:
         out = Path(tmp) / "curves.csv"
-        predict(str(input_dir / sce_file), StrVector(genes), int(n_points), off_ref, str(out))
+        predict(str(sce_path), StrVector(genes), int(lineage), int(n_points), off_ref, str(out))
         curves = pd.read_csv(out)
     return pd.DataFrame(
         {

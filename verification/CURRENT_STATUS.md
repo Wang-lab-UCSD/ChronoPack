@@ -91,6 +91,15 @@ manuscript env and the puromycin experiment refer to the old layout.
   notebooks run on r9 data (`r9/data/{c2c,grn}`), matching the comparison job
   exactly. These four notebooks were promoted with outputs; TradeSeqFits onward
   not rerun (inputs identical).
+- 2026-10-01: soft memberships modularized (`cp.tl.trajectory_soft_memberships`);
+  K562+TNF `03_PrepareForTradeSeq` writes `cell_weights.csv` (identical to the old
+  `cluster_memberships.retentions.csv`); new `04_TradeSeqFits.TwoLineage.ipynb`
+  (`lineage_weights=`, runner stage `TradeSeqFitsTwoLineage`, 160G bigcompute)
+  verified on r9 inputs (`verification_runs/two_lineage_check_20260930/`: 11864
+  genes tested, 1830 refit). GRN ties now broken explicitly by `waldStat_1` (same
+  edges as before). C2C overlay uses ad hoc 8-knot fits (`fit_gene_dynamics(genes=)`)
+  matching the full refit to 1e-14 (`verification_runs/c2c_adhoc_fit_check_20261001/`).
+  Wheel: `dist_fix8`.
 
 ## Update (2026-09-24, evening): tradeSeq blocker resolved, staged reruns started
 
@@ -855,3 +864,29 @@ Before making more changes, inspect the current `git status --short` carefully.
 - Do not delete old failed verification directories/logs unless the user explicitly asks.
 - Do not resubmit more full runs until the tradeSeq cell-level-offset SCE blocker is understood.
 
+
+### 2026-10-01: gene-clustering notebook refactor
+
+- `01_DimensionalityReduction&Clustering` rewritten around one `traj` object:
+  `compute_gene_trajectory_descriptors(..., inplace=False)`; writes only
+  `gene_trajectory_characterization.h5ad`, `gene_trajectory_clusters.h5ad`, the two
+  `cluster_metrics.*.csv` and metric plots (no `pc_df.*`, `gene_trajectory_fit*.csv`,
+  `trajectory_payload/`, `cluster_candidates/`); separate induced / repressed sections
+  (cluster -> metrics plot -> pick k -> labels into `traj.obs`), then one combine cell.
+- Package: `output_dir` removed from `align_gene_trajectories`,
+  `compute_gene_trajectory_descriptors`, `cluster_gene_trajectories` (R hand-off now
+  always temporary); unused `_default_dimred_paths` removed; `align_gene_trajectories`
+  contexts default to the `sce_dict` keys (was a fixed tuple incl. `K562_puro`, which
+  rejected other context names). `compare_runs.py GeneClustering` reads
+  `gene_trajectory_clusters.h5ad` obs (falls back to `pc_df.new.csv`).
+- Verified on r9 fits (`verification_runs/gene_clustering_refactor_check_20261001/`):
+  all broad/fine assignments identical, numeric <= 9e-10, mode conservation identical.
+  Wheel: `dist_fix9`.
+- Removed the old three-experiment layout API: `cp.tl.sce_paths_from_dimred_roots`,
+  `cp.tl.association_paths_from_dimred_roots`, `dimred_config`, R
+  `chronopack_dimred_config`, and `align_gene_trajectories(root_puro=, root_k562a=,
+  root_lps=)` (`sce_dict` is now required); `K562_puro` dropped from R default maps.
+- `traj.obsm["X_pca"]`: the PCA of trajectory shapes used for clustering (4 components;
+  fitted on the reference = all significant trajectories, so induced and repressed
+  clusterings share it). `cp.pl.trajectory_features(..., basis="X_pca")` plots it;
+  `02_ClusterVisualization` uses it. Clusters unchanged vs r9. Wheel: `dist_fix10`.

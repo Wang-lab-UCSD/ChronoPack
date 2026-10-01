@@ -24,7 +24,7 @@ def _active_code():
 def test_notebook_exists_and_writes_expected_outputs():
     assert NOTEBOOK.exists()
     active = _active_code()
-    assert 'pc_df.new.csv' in active
+    assert "pc_df" not in active  # traj.obs holds every per-trajectory column
     assert "gene_trajectory_characterization.h5ad" in active
     assert "gene_trajectory_clusters.h5ad" in active
 

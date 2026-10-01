@@ -392,3 +392,23 @@ DimensionalityReductionClustering migration.
 - mode conservation.
 - GRN.
 - C2C.
+
+## Additions (2026-10-01)
+
+- `cp.tl.trajectory_soft_memberships(adata, cluster_key="traj_clusters")`:
+  two-cluster soft memberships from per-cell mass retention (the K562 + TNF-alpha
+  notebook calculation, unchanged), stored as `obs["softmem_*"]` and returned as
+  cell weights.
+- `fit_gene_dynamics(..., cell_weights=...)` with `prepare_inputs=True` writes
+  `cell_weights.csv`; `fit_gene_dynamics(input_dir=..., lineage_weights="cell_weights.csv")`
+  fits one lineage per weight column along the same time axis
+  (`run_tradeseq_weighted_lineages`): rows renormalised, weights < 1e-6 set to 0,
+  4-knot screen with global and per-lineage association tests, 8-knot refit of
+  genes with p < 0.05 in any test, outputs `*.{n}trajectory.*`. Used by
+  `analyses/k562-tnfa.hg38.rep/04_TradeSeqFits.TwoLineage.ipynb`. Unlike the
+  original notebook, the refit set does not include the one-lineage screen genes.
+- `fit_gene_dynamics(input_dir=..., genes=[...])`: fits only those genes at
+  `final_nknots` (no screen), in a temporary folder, equal to their fits in a full
+  run; `predict_gene_dynamics(fit)` predicts curves from the result. tradeSeq's
+  `fitGAM` fails on a one-gene matrix, so a single gene is fitted alongside one
+  other input gene that is then dropped.

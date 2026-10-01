@@ -26,8 +26,10 @@ benchmark-specific preprocessing/plots.
 `split_by_cell_type` and `build_pair_series` (implementation in
 `tl/c2c/_helpers.py`); `cp.pl.c2c` exports `plot_pair_overlay` and
 `plot_genes_over_time` (`pl/c2c/_plots.py`). The callout's fitted curves come
-from `cp.tl.predict_gene_dynamics` on the THP1 and K562 screen fits
-(provisional; it replaced the joint two-trajectory grid export).
+from ad hoc 8-knot fits of just the plotted genes
+(`cp.tl.fit_gene_dynamics(input_dir=..., genes=[...])` then
+`cp.tl.predict_gene_dynamics(fit)`), identical to those genes' fits in the full
+8-knot refits (provisional; it replaced the joint two-trajectory grid export).
 `load_secreted_cellchat_pairs`, `filter_expressed_secreted_lr_catalog`,
 `score_lr_pairs`, `plot_avg_vs_logp` and `load_tradeseq_grid_exports` were
 removed on 2026-09-30.

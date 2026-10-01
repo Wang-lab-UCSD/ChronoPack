@@ -148,9 +148,18 @@ def compare_tradeseq_inputs(new_root, ref_root):
             print(f"    only in new run: {extra}")
 
 
+def _trajectory_obs(folder):
+    """Per-trajectory table: obs of gene_trajectory_clusters.h5ad, or pc_df.new.csv for older runs."""
+    h5ad = folder / "gene_trajectory_clusters.h5ad"
+    if h5ad.exists():
+        with h5py.File(h5ad, "r") as handle:
+            return read_elem(handle["obs"])
+    return pd.read_csv(folder / "pc_df.new.csv", index_col=0)
+
+
 def compare_gene_clustering(new_dir, ref_dir):
-    new = pd.read_csv(new_dir / "pc_df.new.csv", index_col=0)
-    ref = pd.read_csv(ref_dir / "pc_df.new.csv", index_col=0)
+    new = _trajectory_obs(new_dir)
+    ref = _trajectory_obs(ref_dir)
     print(f"rows by cell_type: new {new['cell_type'].value_counts().to_dict()} | ref {ref['cell_type'].value_counts().to_dict()}")
     common = new.index.intersection(ref.index)
     print(f"rows: new {len(new)}, ref {len(ref)}, common {len(common)}, same set {set(new.index) == set(ref.index)}")

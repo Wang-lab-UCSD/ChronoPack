@@ -42,29 +42,24 @@ cp.tl.compute_terminal_fate_probabilities(
 )
 ```
 
-Gene dynamics and dynamic-mode analysis write standardized gene-level outputs
-to `adata.var`, `adata.varm`, and `adata.uns["chronopack"]`:
+Gene dynamics write the tradeSeq inputs and fits to a folder (association
+statistics also go to `adata.var`); dynamic-mode analysis works on a
+gene-trajectory AnnData built from the fits:
 
 ```python
-fit = cp.tl.fit_gene_dynamics(
-    adata,
-    pseudotime_key="pseudotime",
-    cell_weights_key="cell_weights",
-    counts_layer="counts",
-    key_added="gene_dynamics",
-)
+# One tradeSeq lineage along time: 4-knot screen, then an 8-knot refit of genes with p < 0.05.
+fit = cp.tl.fit_gene_dynamics(adata, output_dir="tradeseq_k562", prepare_inputs=True)
 
-char = cp.tl.characterize_gene_trajectories(
-    adata,
-    output_dir="gene_trajectories",
-    key_added="gene_trajectories",
+# Gene-trajectory AnnData from the fitted SCE(s), then descriptors and dynamic-mode clusters.
+traj = cp.tl.align_gene_trajectories(
+    {"K562": "tradeseq_k562/sce.1trajectory.nknots8.rds"},
+    time_map={"K562": 165},
+    offset_map={"K562": 0},
 )
-
-clusters = cp.tl.cluster_gene_trajectories(
-    adata,
-    output_dir="gene_trajectories",
-    key_added="gene_trajectory_clusters",
-)
+traj = cp.tl.compute_gene_trajectory_descriptors(traj, inplace=False)
+sig = traj[traj.obs["pvalue_1"] < 0.05].copy()
+clusters = cp.tl.cluster_gene_trajectories(sig, k=range(2, 21), alpha=0.1)
+labels = clusters.assignments[3]  # cluster labels for k = 3
 ```
 
 Reusable plots consume standardized AnnData state and render R-backed figures

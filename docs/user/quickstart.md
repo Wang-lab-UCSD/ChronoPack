@@ -85,7 +85,15 @@ mode_res = cp.tl.mode_conservation(
     target_label="THP1_LPS",
 )
 
-cp.pl.mode_sankey(mode_res, output="mode_switches.svg")
+cp.pl.mode_conservation(mode_res, output="mode_conservation.svg")
+```
+
+Mode reassignment between contexts is plotted from the gene-trajectory AnnData
+(one row per gene and context, with `broad_cluster` in `obs`):
+
+```python
+cp.pl.mode_sankey(traj, pairs=[("K562a", "THP1")], top_k=100, output="mode_switches.svg")
+cp.tl.topk_mode_recovery(traj, pairs=[("K562a", "THP1")], k=100)
 ```
 
 GRN and C2C workflows also return transparent result objects:

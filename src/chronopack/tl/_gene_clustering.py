@@ -27,6 +27,8 @@ class GeneTrajectoryClusteringResult:
     assignments: dict[int, pd.Series]
     centroid_distances: dict[int, pd.Series] = field(default_factory=dict)
     pca: pd.DataFrame | None = None
+    # Joint shape + derivative features (rows = trajectories) the distances are computed on.
+    features: pd.DataFrame | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     key_added: str = GENE_TRAJECTORY_CLUSTERING_KEY
 
@@ -356,6 +358,7 @@ def cluster_gene_trajectories(
         assignments_df = _read_matrix(work_dir / "cluster_assignments.csv")
         distances_df = _read_matrix(work_dir / "cluster_centroid_distances.csv")
         pca = _read_matrix(work_dir / "gene_trajectory_X_pca.csv")
+        features = _read_matrix(work_dir / "cluster_features.csv").loc[traj.obs_names.astype(str)]
     finally:
         tmp_ctx.cleanup()
 
@@ -385,6 +388,7 @@ def cluster_gene_trajectories(
         assignments=assignments,
         centroid_distances=centroid_distances,
         pca=pca,
+        features=features,
         metadata=metadata,
         key_added=key_added,
     )

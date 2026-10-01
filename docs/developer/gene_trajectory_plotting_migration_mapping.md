@@ -126,3 +126,16 @@ The final clustering AnnData must retain
 `adata.varm["gene_trajectories_fit"]`; `cp.tl.cluster_gene_trajectories()`
 now preserves the characterization AnnData when a characterization result is
 provided.
+
+
+## Update 2026-10-01: TESTING.ipynb plotting port
+
+The gene-clustering figures now follow the manuscript `TESTING.ipynb`
+notebook. `cp.pl.cluster_trajectories()` (median-curve overlay) and
+`chronopack_plot_cluster_trajectories_csv()` were removed: broad and fine modes
+are drawn by `cp.pl.cluster_medoids_and_top_genes()`
+(`plot_cluster_medoids_and_top_genes()`, TESTING version, via
+`chronopack_plot_cluster_medoids_csv()`). `cp.pl.trajectory_features()` now
+draws with `feature_plot_pc_simple()`. Medoids and silhouettes use the joint
+clustering features, returned as `GeneTrajectoryClusteringResult.features` and
+stored by the clustering notebook in `traj.obsm["X_cluster_features"]`.

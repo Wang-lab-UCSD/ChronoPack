@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -24,6 +24,24 @@ class RPlotResult:
     backend: str = "R/ggplot2"
     metadata: dict[str, Any] | None = None
     figure: Any | None = None
+    preview_png: bytes | None = field(default=None, repr=False)
+
+    def __repr__(self) -> str:
+        return f"RPlotResult(plot_type={self.plot_type!r}, output={self.output!r})"
+
+    # Inline display width relative to the rendered image (high-dpi PNGs look too large at 1:1).
+    display_scale: float = field(default=0.5, repr=False)
+
+    # Jupyter shows the plot inline from a PNG preview: unlike SVG, PNG outputs are
+    # displayed even in notebooks Jupyter does not trust (e.g. executed by a script).
+    def _repr_png_(self):
+        png = self.preview_png
+        if png is None and self.output and Path(self.output).suffix.lower() == ".png" and Path(self.output).exists():
+            png = Path(self.output).read_bytes()
+        if png is None:
+            return None
+        width_px = int.from_bytes(png[16:20], "big")  # PNG IHDR width
+        return png, {"width": max(1, int(width_px * self.display_scale))}
 
 
 def _trajectory_matrix(adata) -> np.ndarray:
@@ -100,21 +118,113 @@ def _trajectory_long(adata, *, rows: pd.Index, normalize: bool) -> pd.DataFrame:
     return out.merge(meta, on="row_id", how="left")
 
 
-def _render(plot_function: str, data: pd.DataFrame, output, **kwargs) -> str | None:
-    if output is None:
+# Default palettes of TESTING.ipynb: `cluster_colors` (named dynamic modes, also the R
+# chronopack_mode_palette), the grey of `low_significance`, and `cat_colors` (numbered clusters).
+MODE_ORDER = ("impulse-up_1", "impulse-up_2", "trend-up", "transient-down", "trend-down_1", "trend-down_2")
+MODE_COLORS = {
+    "impulse-up_1": "#F8766D",
+    "impulse-up_2": "#D84A42",
+    "trend-up": "#C29A33",
+    "transient-down": "#8B78C6",
+    "trend-down_1": "#619CFF",
+    "trend-down_2": "#3C6FB6",
+}
+LOW_SIGNIFICANCE_COLOR = "#D1D1D1"
+CATEGORICAL_COLORS = (
+    "#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#F0E442", "#8C564B", "#6A3D9A", "#66A61E",
+    "#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#A65628", "#F781BF", "#999999", "#1B9E77", "#7570B3",
+    "#E7298A", "#A6761D", "#D95F02", "#17BECF", "#BCBD22", "#AEC7E8", "#FF9896", "#98DF8A", "#C5B0D5", "#C49C94",
+)
+
+
+def _default_colors(labels) -> dict[str, str] | list[str]:
+    """``MODE_COLORS`` when every label is a named dynamic mode, else ``CATEGORICAL_COLORS`` in label order."""
+    levels = pd.unique(pd.Series(labels).dropna().astype(str))
+    if set(levels) <= set(MODE_COLORS):
+        return dict(MODE_COLORS)
+    n = max(60, len(levels))
+    return [CATEGORICAL_COLORS[i % len(CATEGORICAL_COLORS)] for i in range(n)]
+
+
+def _to_r(value):
+    """Convert a Python argument to an R vector (dicts become named vectors)."""
+    from rpy2.robjects import BoolVector, FloatVector, IntVector, StrVector
+
+    if isinstance(value, dict):
+        vec = _to_r(list(value.values()))
+        vec.names = StrVector([str(k) for k in value])
+        return vec
+    if isinstance(value, (bool, np.bool_)):
+        return BoolVector([bool(value)])
+    if isinstance(value, (int, np.integer)):
+        return IntVector([int(value)])
+    if isinstance(value, (float, np.floating)):
+        return FloatVector([float(value)])
+    if isinstance(value, (str, Path)):
+        return StrVector([str(value)])
+    if isinstance(value, (list, tuple, np.ndarray, pd.Index, pd.Series)):
+        values = list(value)
+        if all(isinstance(v, (bool, np.bool_)) for v in values) and values:
+            return BoolVector([bool(v) for v in values])
+        if all(isinstance(v, (int, float, np.integer, np.floating)) for v in values) and values:
+            return FloatVector([float(v) for v in values])
+        return StrVector([str(v) for v in values])
+    return value
+
+
+def _r_to_pandas(value) -> pd.DataFrame | None:
+    from rpy2.robjects import conversion, default_converter, pandas2ri
+    from rpy2.robjects.vectors import DataFrame as RDataFrame
+
+    if not isinstance(value, RDataFrame):
         return None
+    with conversion.localconverter(default_converter + pandas2ri.converter):
+        out = conversion.rpy2py(value)
+    return out.reset_index(drop=True)
+
+
+def _draw(
+    plot_function: str,
+    output,
+    *,
+    tables: dict[str, pd.DataFrame],
+    resource: str = "dimred_plotting_helpers.R",
+    **kwargs,
+):
+    """Draw R ``plot_function`` to ``output`` and a PNG preview in one call.
+
+    Each table is passed as a CSV file (argument ``<name>_path``); other arguments are
+    converted with ``_to_r`` (``None`` leaves the R default). Returns the output path,
+    the preview PNG bytes and the R return value; nothing is drawn without ``output``.
+    """
+    if output is None:
+        return None, None, None
     output = str(Path(output))
     Path(output).parent.mkdir(parents=True, exist_ok=True)
     try:
-        from rpy2.robjects import r
+        from rpy2.robjects import StrVector, r
     except ImportError as exc:
         raise ImportError("R-backed plotting requires optional dependency 'rpy2'.") from exc
-    source_r_resource("dimred_plotting_helpers.R")
+    source_r_resource(resource)
     with TemporaryDirectory() as tmpdir:
-        data_path = Path(tmpdir) / "plot_data.csv"
-        data.to_csv(data_path, index=False)
-        r[plot_function](str(data_path), output, **kwargs)
-    return output
+        args = {}
+        for name, table in tables.items():
+            path = Path(tmpdir) / f"{name}.csv"
+            table.to_csv(path, index=False)
+            args[f"{name}_path"] = str(path)
+        outputs = [output]
+        if Path(output).suffix.lower() != ".png":
+            outputs.append(str(Path(tmpdir) / "preview.png"))
+        args.update({k: _to_r(v) for k, v in kwargs.items() if v is not None})
+        value = r[plot_function](output=StrVector(outputs), **args)
+        preview = Path(outputs[-1]).read_bytes() if Path(outputs[-1]).exists() else None
+    return output, preview, value
+
+
+def _render(plot_function: str, data: pd.DataFrame, output, **kwargs) -> tuple[str | None, bytes | None]:
+    """Draw ``plot_function`` (R) to ``output``; return the path and a PNG preview for inline display."""
+    rendered, preview, _ = _draw(plot_function, output, tables={"data": data}, **kwargs)
+    return rendered, preview
 
 
 def gene_trajectory(
@@ -133,7 +243,7 @@ def gene_trajectory(
     del fit_key, clustering_key
     rows = _select_rows(adata, genes=genes)
     data = _trajectory_long(adata, rows=rows, normalize=normalize)
-    rendered = _render(
+    rendered, preview = _render(
         "chronopack_plot_gene_trajectory_csv",
         data,
         output,
@@ -142,79 +252,50 @@ def gene_trajectory(
         title="" if title is None else str(title),
         normalize=bool(normalize),
     )
-    return RPlotResult("gene_trajectory", data=data, output=rendered, metadata={"normalize": normalize})
+    return RPlotResult("gene_trajectory", data=data, output=rendered, preview_png=preview, metadata={"normalize": normalize})
 
 
-def cluster_trajectories(
-    adata,
-    *,
-    groupby: str = "broad_cluster",
-    fit_key: str = GENE_TRAJECTORY_KEY,
-    clustering_key: str = GENE_TRAJECTORY_CLUSTERING_KEY,
-    rows=None,
-    normalize: bool = True,
-    output: str | Path | None = None,
-    width: float = 8,
-    height: float = 5,
-    title: str | None = None,
-) -> RPlotResult:
-    """Plot median +/- IQR fitted trajectories for dynamic-mode groups."""
-    del fit_key, clustering_key
-    selected = pd.Index(adata.obs_names.astype(str)) if rows is None else pd.Index([str(x) for x in rows])
-    long_df = _trajectory_long(adata, rows=selected, normalize=normalize)
-    if groupby not in long_df.columns:
-        raise KeyError(f"Grouping column '{groupby}' is not available in the trajectory plot data.")
-    data = (
-        long_df.groupby([groupby, "time"], dropna=False)
-        .agg(
-            median=("value", "median"),
-            q25=("value", lambda x: x.quantile(0.25)),
-            q75=("value", lambda x: x.quantile(0.75)),
-            n=("row_id", "nunique"),
-        )
-        .reset_index()
-        .rename(columns={groupby: "cluster"})
-    )
-    data["cluster"] = data["cluster"].astype(str)
-    rendered = _render(
-        "chronopack_plot_cluster_trajectories_csv",
-        data,
-        output,
-        width=float(width),
-        height=float(height),
-        title="" if title is None else str(title),
-        normalize=bool(normalize),
-    )
-    return RPlotResult("cluster_trajectories", data=data, output=rendered, metadata={"groupby": groupby})
+def _obs_table(adata, columns) -> pd.DataFrame:
+    """``row_id`` plus the requested ``adata.obs`` columns, as plain values."""
+    missing = [c for c in columns if c not in adata.obs]
+    if missing:
+        raise KeyError(f"Trajectory observation column(s) not available: {', '.join(missing)}.")
+    out = pd.DataFrame({"row_id": adata.obs_names.astype(str)})
+    for col in dict.fromkeys(columns):
+        values = adata.obs[col]
+        out[col] = values.astype(str).to_numpy() if isinstance(values.dtype, pd.CategoricalDtype) else values.to_numpy()
+    return out
 
 
 def trajectory_features(
     adata,
     *,
-    x: str = "PC1",
-    y: str = "PC2",
     color: str = "broad_cluster",
     basis: str | None = None,
-    clustering_key: str = GENE_TRAJECTORY_CLUSTERING_KEY,
-    fit_key: str = GENE_TRAJECTORY_KEY,
+    x: str = "PC1",
+    y: str = "PC2",
+    cat_colors=None,
     output: str | Path | None = None,
-    width: float = 6,
+    width: float = 6.5,
     height: float = 5,
     title: str | None = None,
+    **kwargs,
 ) -> RPlotResult:
-    """Plot two trajectory features against each other, coloured by ``color``.
+    """Scatter of trajectories in a feature space, coloured by ``color`` (TESTING ``feature_plot_pc_simple``).
 
     ``x`` and ``y`` are ``traj.obs`` columns (descriptors), or with ``basis`` the
-    components (``"PC1"``, ``"PC2"``, ...) of ``traj.obsm[basis]``, e.g. the
-    ``X_pca`` coordinates stored by the clustering notebook; trajectories
-    without coordinates there (NaN) are left out.
+    components (``"PC1"``, ``"PC2"``, ...) of ``traj.obsm[basis]``, e.g. the ``X_pca``
+    coordinates stored by the clustering notebook; trajectories without coordinates
+    there (NaN) are left out. Categorical colours default to the dynamic-mode palette
+    (``MODE_COLORS``) when every label is a named mode. Extra keyword arguments go to
+    the R ``feature_plot_pc_simple``.
     """
-    del clustering_key, fit_key
     data = _gene_labels(adata).reset_index(drop=True)
     for name in dict.fromkeys([x, y, color] if basis is None else [color]):
         if name not in adata.obs:
             raise KeyError(f"Trajectory observation column '{name}' is not available.")
-        data[name] = adata.obs[name].to_numpy()
+        values = adata.obs[name]
+        data[name] = values.astype(str).to_numpy() if isinstance(values.dtype, pd.CategoricalDtype) else values.to_numpy()
     if basis is not None:
         if basis not in adata.obsm:
             raise KeyError(f"Trajectory embedding adata.obsm['{basis}'] is not available.")
@@ -222,18 +303,136 @@ def trajectory_features(
         for name in (x, y):
             data[name] = coords[:, int(str(name).removeprefix("PC")) - 1]
         data = data.dropna(subset=[x, y]).reset_index(drop=True)
-    rendered = _render(
+    categorical = not pd.api.types.is_numeric_dtype(data[color])
+    if cat_colors is None and categorical:
+        cat_colors = _default_colors(data[color])
+    rendered, preview, _ = _draw(
         "chronopack_plot_trajectory_features_csv",
-        data,
         output,
-        width=float(width),
-        height=float(height),
-        title="" if title is None else str(title),
+        tables={"data": data},
+        feature=str(color),
         x=str(x),
         y=str(y),
-        color=str(color),
+        cat_colors=cat_colors,
+        title=title,
+        width=float(width),
+        height=float(height),
+        **kwargs,
     )
-    return RPlotResult("trajectory_features", data=data, output=rendered, metadata={"x": x, "y": y, "color": color})
+    return RPlotResult("trajectory_features", data=data, output=rendered, preview_png=preview, metadata={"x": x, "y": y, "color": color})
+
+
+def cluster_medoids_and_top_genes(
+    adata,
+    groupby="broad_cluster",
+    *,
+    features="X_cluster_features",
+    score_key: str = "waldStat_1",
+    top_n: int = 9,
+    gene_selection: str = "wald",
+    seed: int = 13,
+    show_median_iqr: bool = False,
+    show_sil_text: bool = True,
+    use_silhouette_alpha: bool = True,
+    show_gene_titles: bool = False,
+    gene_title_mode: str = "rownames",
+    cat_colors=None,
+    cluster_order=None,
+    title: str | None = None,
+    output: str | Path | None = None,
+    width: float = 13,
+    height: float | None = None,
+    **kwargs,
+) -> RPlotResult:
+    """One row per cluster: medoid trajectory and top genes (TESTING ``plot_cluster_medoids_and_top_genes``).
+
+    Panels show row z-scored trajectories (``adata.X``) over ``adata.var["time"]``;
+    with ``show_median_iqr`` the first panel is the cluster median and IQR. Medoids
+    and silhouettes use Euclidean distances between the clustering ``features``: an
+    ``adata.obsm`` key (default, as stored by the clustering notebook), a DataFrame
+    indexed by ``obs_names`` (e.g. ``GeneTrajectoryClusteringResult.features``) or an
+    array aligned with ``adata``. ``groupby`` is an ``obs`` column or labels aligned
+    with ``adata`` (Series indexed by ``obs_names``, e.g. candidate assignments).
+    Genes are ranked by ``obs[score_key]``. ``title=None`` keeps the R default title;
+    ``""`` drops it. ``height`` defaults to the number of clusters + 1 (inches).
+    Extra keyword arguments go to the R function.
+    """
+    obs_names = pd.Index(adata.obs_names.astype(str))
+    if isinstance(groupby, str):
+        if groupby not in adata.obs:
+            raise KeyError(f"Trajectory observation column '{groupby}' is not available.")
+        labels = pd.Series(adata.obs[groupby].to_numpy(), index=obs_names)
+    elif isinstance(groupby, pd.Series):
+        labels = groupby.copy()
+        labels.index = labels.index.astype(str)
+        labels = labels.reindex(obs_names)
+    else:
+        labels = pd.Series(np.asarray(groupby), index=obs_names)
+    labels = labels.astype(object).where(labels.notna(), None)
+    if labels.isna().any():
+        raise ValueError("Every trajectory needs a cluster label; subset adata first.")
+    numeric = pd.to_numeric(labels, errors="coerce")
+    if numeric.notna().all() and (numeric % 1 == 0).all():
+        labels = numeric.astype(int)  # numbered clusters sort numerically in R
+    else:
+        labels = labels.astype(str)
+
+    if isinstance(features, str):
+        if features not in adata.obsm:
+            raise KeyError(f"Clustering features adata.obsm['{features}'] are not available.")
+        feat = pd.DataFrame(np.asarray(adata.obsm[features], dtype=float), index=obs_names)
+    elif isinstance(features, pd.DataFrame):
+        feat = features.copy()
+        feat.index = feat.index.astype(str)
+        feat = feat.reindex(obs_names)
+    else:
+        feat = pd.DataFrame(np.asarray(features, dtype=float), index=obs_names)
+    if feat.isna().to_numpy().any():
+        raise ValueError("Clustering features are missing for some trajectories.")
+    feat.columns = [f"f{i}" for i in range(feat.shape[1])]
+
+    if score_key not in adata.obs:
+        raise KeyError(f"Trajectory observation column '{score_key}' is not available.")
+    z = pd.DataFrame(_z_row(_trajectory_matrix(adata)), index=obs_names, columns=adata.var_names.astype(str))
+    obs = pd.DataFrame({
+        "row_id": obs_names,
+        "cluster": labels.to_numpy(),
+        "score": pd.to_numeric(adata.obs[score_key], errors="coerce").to_numpy(),
+    })
+    n_clusters = labels.nunique()
+    if cat_colors is None:
+        cat_colors = _default_colors(labels)
+    rendered, preview, _ = _draw(
+        "chronopack_plot_cluster_medoids_csv",
+        output,
+        tables={
+            "traj": z.reset_index(names="row_id"),
+            "features": feat.reset_index(names="row_id"),
+            "obs": obs,
+            "time": pd.DataFrame({"time": _time_grid(adata, z.shape[1])}),
+        },
+        top_n=int(top_n),
+        gene_selection=gene_selection,
+        seed=int(seed),
+        show_median_iqr=bool(show_median_iqr),
+        show_sil_text=bool(show_sil_text),
+        use_silhouette_alpha=bool(use_silhouette_alpha),
+        show_gene_titles=bool(show_gene_titles),
+        gene_title_mode=gene_title_mode,
+        cat_colors=cat_colors,
+        cluster_order=None if cluster_order is None else [str(c) for c in cluster_order],
+        title=title,
+        width=float(width),
+        height=float(n_clusters + 1 if height is None else height),
+        **kwargs,
+    )
+    return RPlotResult(
+        "cluster_medoids_and_top_genes",
+        data=obs,
+        output=rendered,
+        preview_png=preview,
+        metadata={"n_clusters": int(n_clusters), "top_n": int(top_n)},
+    )
 
 
 def clustering_metrics(
@@ -274,4 +473,14 @@ def clustering_metrics(
     return RPlotResult("clustering_metrics", data=data, output=rendered, backend="matplotlib", figure=fig)
 
 
-__all__ = ["RPlotResult", "gene_trajectory", "cluster_trajectories", "trajectory_features", "clustering_metrics"]
+__all__ = [
+    "CATEGORICAL_COLORS",
+    "LOW_SIGNIFICANCE_COLOR",
+    "MODE_COLORS",
+    "MODE_ORDER",
+    "RPlotResult",
+    "cluster_medoids_and_top_genes",
+    "clustering_metrics",
+    "gene_trajectory",
+    "trajectory_features",
+]

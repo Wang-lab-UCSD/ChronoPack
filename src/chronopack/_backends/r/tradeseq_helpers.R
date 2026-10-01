@@ -629,3 +629,104 @@ fit_tradeseq_genes <- function(input_dir,
   write.csv(asso_df, association_path, row.names = TRUE)
   list(sce_path = sce_path, association_path = association_path, genes_keep = genes)
 }
+
+# Signed max log2((mu + pseudocount) / (mu_start + pseudocount)) over predictSmooth() means, per gene
+# (lineage with the largest |effect|). From TradeSeqFits.ipynb, used for the volcano x-axis.
+signed_max_log2fc_start_many <- function(
+  sce, genes, nPoints = 100,
+  fit_scale = c("auto","log","response"),
+  pseudocount = 0.1   # <-- your shrink knob, in mean-count units
+) {
+  fit_scale <- match.arg(fit_scale)
+  pc <- max(0, as.numeric(pseudocount))
+
+  pr <- tryCatch(
+    as.data.frame(predictSmooth(sce, gene = genes, nPoints = nPoints, tidy = TRUE),
+                  stringsAsFactors = FALSE),
+    error = function(e) NULL
+  )
+  if (is.null(pr) || nrow(pr) == 0) return(setNames(rep(NA_real_, length(genes)), genes))
+
+  gene_col <- intersect(c("gene","Gene","feature","Feature"), names(pr))
+  fit_col  <- intersect(c("yhat","mu","fit","y","estimate"), names(pr))
+  time_col <- intersect(c("pseudotime","time","t","x","lambda","arclength"), names(pr))
+  lin_col  <- intersect(c("lineage","Lineage","lin","curve"), names(pr))
+
+  if (length(gene_col) == 0) stop("No gene column found in predictSmooth() output.")
+  if (length(fit_col)  == 0) stop("No fitted-value column found in predictSmooth() output.")
+  if (length(lin_col)  == 0) { pr$.__tmp_lineage__ <- "L1"; lin_col <- ".__tmp_lineage__" }
+
+  gene_col <- gene_col[1]
+  fit_col  <- fit_col[1]
+  time_col <- if (length(time_col)) time_col[1] else NA_character_
+  lin_col  <- lin_col[1]
+
+  infer_scale <- function(colname, v) {
+    if (fit_scale != "auto") return(fit_scale)
+    if (colname %in% c("mu","yhat","y","estimate")) return("response")
+    if (any(v < 0, na.rm = TRUE)) return("log")
+    "log"
+  }
+
+  v_all <- as.numeric(pr[[fit_col]])
+  sc <- infer_scale(fit_col, v_all)
+
+  # Convert to eta (natural log mean) and mu (mean counts)
+  if (sc == "response") {
+    mu_all  <- pmax(v_all, 0)
+    eta_all <- log(mu_all + 1e-12)
+  } else {
+    eta_all <- v_all
+    mu_all  <- exp(eta_all)
+  }
+
+  # order by gene, lineage, time so "start" is first row within each (gene,lineage)
+  if (!is.na(time_col)) {
+    ord <- order(pr[[gene_col]], pr[[lin_col]], pr[[time_col]])
+  } else {
+    ord <- order(pr[[gene_col]], pr[[lin_col]])
+  }
+  pr <- pr[ord, , drop = FALSE]
+  mu_all <- mu_all[ord]
+
+  # Split by (gene,lineage)
+  gl <- paste(pr[[gene_col]], pr[[lin_col]], sep = "||")
+  idx <- split(seq_along(gl), gl)
+
+  # For each (gene,lineage): compute signed max | log2((mu+pc)/(mu0+pc)) |
+  per_gl <- vapply(idx, function(ii) {
+    mu <- mu_all[ii]
+    if (!length(mu) || all(!is.finite(mu))) return(NA_real_)
+
+    mu0 <- mu[1L]
+    log2fc_series <- log2((mu + pc) / (mu0 + pc))
+    log2fc_series[ which.max(abs(log2fc_series)) ]
+  }, numeric(1))
+
+  # Pick the lineage with largest |effect| for each gene
+  gene_names <- sub("\\|\\|.*$", "", names(per_gl))
+  idx2 <- split(seq_along(per_gl), gene_names)
+  out <- vapply(idx2, function(jj) {
+    vv <- per_gl[jj]
+    if (all(is.na(vv))) return(NA_real_)
+    vv[ which.max(abs(vv)) ]
+  }, numeric(1))
+
+  # align to input genes
+  out2 <- setNames(rep(NA_real_, length(genes)), genes)
+  out2[names(out)] <- out
+  out2
+}
+
+signed_max_log2fc_start_rds <- function(sce_path, genes, out, n_points = 100, pseudocount = 0.01) {
+  suppressPackageStartupMessages({
+    library(tradeSeq)
+    library(SingleCellExperiment)
+  })
+  sce <- readRDS(sce_path)
+  missing <- setdiff(genes, rownames(sce))
+  if (length(missing)) stop("Genes not in the tradeSeq fit: ", paste(head(missing, 20), collapse = ", "))
+  res <- signed_max_log2fc_start_many(sce, genes, nPoints = n_points, pseudocount = pseudocount)
+  write.csv(data.frame(gene = names(res), value = unname(res)), out, row.names = FALSE)
+  invisible(out)
+}

@@ -12,6 +12,9 @@ __all__ = [
     "compute_terminal_fate_probabilities",
     "fit_gene_dynamics",
     "predict_gene_dynamics",
+    "signed_max_log2fc_from_start",
+    "early_fate_correlations",
+    "rotate_embedding_to_time",
     "identify_tag_bias_candidates",
     "filter_tag_bias_candidates",
     "tag_bias_exclusion_genes",
@@ -23,6 +26,7 @@ __all__ = [
     "standardize_gene_trajectories",
     "mode_conservation",
     "mode_switchers",
+    "topk_mode_recovery",
 ]
 
 
@@ -46,6 +50,7 @@ def __getattr__(name):
     if name in {
         "fit_gene_dynamics",
         "predict_gene_dynamics",
+        "signed_max_log2fc_from_start",
         "identify_tag_bias_candidates",
         "filter_tag_bias_candidates",
         "tag_bias_exclusion_genes",
@@ -62,7 +67,7 @@ def __getattr__(name):
         from . import _gene_clustering
 
         return getattr(_gene_clustering, name)
-    if name in {"mode_conservation", "mode_switchers"}:
+    if name in {"mode_conservation", "mode_switchers", "topk_mode_recovery"}:
         from . import _mode_conservation
 
         return getattr(_mode_conservation, name)
@@ -74,7 +79,9 @@ def __getattr__(name):
         "cluster_cells_to_trajectories",
         "cluster_cell_state_trajectories",
         "compute_terminal_fate_probabilities",
+        "early_fate_correlations",
         "merge_trajectory_graphs",
+        "rotate_embedding_to_time",
         "trajectory_soft_memberships",
     }:
         from . import _trajectories

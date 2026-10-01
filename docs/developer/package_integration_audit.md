@@ -104,12 +104,16 @@ visualization:
 
 - gene trajectory / dynamic modes:
   - `gene_trajectory`
-  - `cluster_trajectories`
   - `trajectory_features`
+  - `cluster_medoids_and_top_genes`
+  - `clustering_metrics`
 - cross-context modes:
   - `mode_conservation`
+  - `mode_proportions`
   - `mode_sankey`
   - `mode_chord`
+  - `cluster_pair_representative_genes`
+  - `cluster_violin`
 - C2C:
   - `cp.pl.c2c.interaction_scatter`
   - `cp.pl.c2c.pair_overlay`

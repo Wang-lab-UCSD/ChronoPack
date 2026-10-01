@@ -889,6 +889,280 @@ plot_tradeSeq_gene <- function(
         )
 }
 
+# TESTING.ipynb's SCE-only multi-run gene plot (its plot_tradeSeq_gene, cell 3), verbatim
+# under a new name; plot_tradeSeq_gene above is the same plot with extra metadata checks.
+plot_tradeSeq_gene_sce_pub <- function(
+    gene, sce_ls, q_by_gene = NULL,
+    keys = NULL, key_labels = NULL,
+    offset_map = NULL, time_max_map = NULL,
+    plot_normalized_pt = FALSE, trim_before_zero = FALSE,
+    point_tmax_map = NULL,
+    time_unit = "min", x_tick_step = 20,
+    x_tick_labels = NULL, xlim = NULL,
+    omit_points = FALSE, nPoints = 1000,
+    ny_ticks = 5, ylim = NULL,
+    color_points_by_run = TRUE,
+    points_color = "#274C77", points_alpha = 0.30, points_size = 0.75,
+    se_factor = 1.96,
+    line_width = 1.7, ribbon_alpha = 0.35,
+    show_title = TRUE, show_legend = TRUE,
+    axis_text_size = 14, axis_title_size = 16,
+    colours = NULL, ribbon_alpha_mult = 0.30
+) {
+    if (is.null(keys)) keys <- names(sce_ls)
+    keys <- intersect(keys, names(sce_ls))
+    keys <- keys[vapply(keys, function(k) gene %in% rownames(sce_ls[[k]]), logical(1))]
+    if (!length(keys)) stop("Gene not found in any requested SCE.")
+
+    if (is.null(key_labels)) key_labels <- setNames(keys, keys)
+    labels <- unname(unlist(key_labels[keys]))
+
+    if (is.null(colours)) {
+        colours <- rep(c("#1b9e77", "#d95f02", "#7570b3", "#e7298a",
+                         "#66a61e", "#e6ab02", "#a6761d", "#666666"),
+                       length.out = length(keys))
+        names(colours) <- keys
+    } else if (is.null(names(colours))) {
+        colours <- setNames(rep(colours, length.out = length(keys)), keys)
+    } else {
+        colours <- colours[keys]
+        if (any(is.na(colours))) stop("Named `colours` must include all requested keys.")
+    }
+    fill_cols <- setNames(grDevices::adjustcolor(colours, alpha.f = ribbon_alpha_mult), keys)
+
+    map_num <- function(x, k, default = NA_real_) {
+        if (is.null(x) || is.null(names(x)) || !(k %in% names(x))) return(default)
+        v <- x[[k]]
+        if (!length(v) || is.na(v)) default else as.numeric(v)
+    }
+    get_time_max <- function(k) {
+        if (plot_normalized_pt) return(1)
+        v <- map_num(time_max_map, k)
+        if (is.na(v)) stop("`time_max_map` must provide a value for key: ", k)
+        v
+    }
+    get_offset <- function(k) map_num(offset_map, k, 0)
+    pt_to_x <- function(pt, tm, off) (if (plot_normalized_pt) pt else pt * tm) + off
+    wmean <- function(x, w) {
+        s <- sum(w, na.rm = TRUE)
+        if (is.finite(s) && s > 0) sum(x * w, na.rm = TRUE) / s else NA_real_
+    }
+
+    fit_list <- obs_list <- setNames(vector("list", length(keys)), keys)
+
+    for (k in keys) {
+        sce <- sce_ls[[k]]
+        cd <- SummarizedExperiment::colData(sce)
+        rd <- SummarizedExperiment::rowData(sce)
+        crv <- cd$crv
+        ts_cd <- cd$tradeSeq
+        ts_rd <- rd$tradeSeq
+        dm <- ts_cd$dm
+
+        t_cols <- grep("^t[0-9]+$", colnames(dm), value = TRUE)
+        if (!length(t_cols)) stop("[", k, "] No lineage columns found in tradeSeq design matrix.")
+        ell <- if ("t1" %in% t_cols) 1L else as.integer(sub("^t", "", t_cols[1]))
+
+        pt_col <- paste0("pseudotime.lineage", ell)
+        cw_col <- paste0("cellWeights.lineage", ell)
+        if (!(pt_col %in% colnames(crv))) stop("[", k, "] Missing ", pt_col)
+
+        pt <- as.numeric(crv[[pt_col]])
+        w <- if (cw_col %in% colnames(crv)) as.numeric(crv[[cw_col]]) else rep(1, ncol(sce))
+        w[!is.finite(w)] <- 0
+
+        offset_col <- grep("offset", colnames(dm), value = TRUE)[1]
+        if (is.na(offset_col)) stop("[", k, "] No offset column found in tradeSeq design matrix.")
+
+        offset_vec <- as.numeric(dm[[offset_col]])
+        off_ref <- mean(offset_vec, na.rm = TRUE)
+
+        df_pred <- tradeSeq:::.getPredictRangeDf(dm, lineageId = ell, nPoints = nPoints)
+        t_pt <- df_pred[[paste0("t", ell)]]
+
+        pt_cols <- grep("^pseudotime\\.lineage", colnames(crv), value = TRUE)
+        pt_mat <- as.matrix(crv[, pt_cols, drop = FALSE])
+
+        X_pred <- tradeSeq:::predictGAM(
+            lpmatrix = ts_cd$X,
+            df = df_pred,
+            pseudotime = pt_mat
+        )
+
+        gene_i <- match(gene, rownames(sce))
+        beta_mat <- ts_rd$beta[[1]]
+        beta <- as.numeric(beta_mat[gene_i, , drop = TRUE])
+        Sigma <- ts_rd$Sigma[[gene_i]]
+
+        eta <- drop(X_pred %*% beta) + off_ref
+        se <- sqrt(pmax(0, rowSums((X_pred %*% Sigma) * X_pred)))
+
+        tm <- get_time_max(k)
+        off <- get_offset(k)
+        run <- factor(unname(key_labels[[k]]), levels = labels)
+
+        fit_list[[k]] <- data.frame(
+            key = k, run = run, pt = t_pt, x = pt_to_x(t_pt, tm, off),
+            mu = log1p(exp(eta)),
+            lo = log1p(exp(eta - se_factor * se)),
+            hi = log1p(exp(eta + se_factor * se))
+        )
+
+        counts <- SummarizedExperiment::assay(sce, "counts")
+        y <- as.numeric(counts[gene, ]) * exp(off_ref - offset_vec)
+
+        obs_df <- data.frame(
+            key = k, run = run, pt = pt,
+            x = pt_to_x(pt, tm, off), y = log1p(y)
+        )
+
+        nb <- min(nPoints, 200)
+        bin <- cut(pt, breaks = seq(0, 1, length.out = nb + 1),
+                   include.lowest = TRUE, right = TRUE)
+
+        pt_mid <- tapply(pt, bin, mean, na.rm = TRUE)
+        y_mean <- tapply(seq_along(y), bin, function(ii) wmean(y[ii], w[ii]))
+
+        mean_df <- data.frame(
+            key = k, run = run,
+            pt_mid = as.numeric(pt_mid),
+            x_mid = pt_to_x(as.numeric(pt_mid), tm, off),
+            mean_norm_log1p = log1p(as.numeric(y_mean))
+        )
+        mean_df <- mean_df[
+            is.finite(mean_df$pt_mid) & is.finite(mean_df$mean_norm_log1p), ,
+            drop = FALSE
+        ]
+
+        obs_list[[k]] <- list(points = obs_df, means = mean_df)
+    }
+
+    fit_all <- do.call(rbind, fit_list)
+    obs_pts <- do.call(rbind, lapply(obs_list, `[[`, "points"))
+    obs_mea <- do.call(rbind, lapply(obs_list, `[[`, "means"))
+
+    if (trim_before_zero) {
+        fit_all <- fit_all[fit_all$x >= 0, , drop = FALSE]
+        obs_pts <- obs_pts[obs_pts$x >= 0, , drop = FALSE]
+        obs_mea <- obs_mea[obs_mea$x_mid >= 0, , drop = FALSE]
+    }
+
+    if (!is.null(point_tmax_map)) {
+        cutoff <- vapply(as.character(obs_pts$key),
+                         function(k) map_num(point_tmax_map, k), numeric(1))
+        obs_pts <- obs_pts[is.na(cutoff) | obs_pts$x <= cutoff, , drop = FALSE]
+
+        cutoff <- vapply(as.character(obs_mea$key),
+                         function(k) map_num(point_tmax_map, k), numeric(1))
+        obs_mea <- obs_mea[is.na(cutoff) | obs_mea$x_mid <= cutoff, , drop = FALSE]
+    }
+
+    sub_txt <- NULL
+    if (!is.null(q_by_gene) && gene %in% names(q_by_gene)) {
+        qv <- unname(q_by_gene[gene])
+        if (is.finite(qv)) sub_txt <- paste0("FDR = ", formatC(qv, format = "fg", digits = 3))
+    }
+
+    if (is.null(ylim)) {
+        ylo <- min(c(fit_all$lo, obs_mea$mean_norm_log1p,
+                     if (!omit_points) obs_pts$y), na.rm = TRUE)
+        yhi <- max(c(fit_all$hi, obs_mea$mean_norm_log1p,
+                     if (!omit_points) obs_pts$y), na.rm = TRUE)
+
+        if (is.finite(ylo) && is.finite(yhi)) {
+            pad <- 0.04 * (yhi - ylo)
+            if (!is.finite(pad) || pad == 0) pad <- 0.2
+            ylim <- c(max(0, ylo - pad), 1.3 * (yhi + pad))
+        } else {
+            ylim <- c(0, 1)
+        }
+    }
+
+    # Preserve behavior of the original function.
+    ylim[2] <- 1.4 * max(fit_all$mu, na.rm = TRUE)
+
+    if (plot_normalized_pt) {
+        x_title <- "Pseudotime"
+        x_breaks <- x_labels <- seq(0, 1, by = 0.2)
+    } else {
+        x_title <- paste0("Time", if (!is.null(time_unit)) paste0(" (", time_unit, ")") else "")
+        if (is.null(x_tick_labels)) {
+            tmax <- max(vapply(keys, get_time_max, numeric(1)), na.rm = TRUE)
+            x_tick_labels <- seq(0, tmax, by = x_tick_step)
+        }
+        x_breaks <- x_labels <- x_tick_labels
+    }
+
+    if (is.null(xlim)) {
+        xlim <- range(c(fit_all$x, obs_mea$x_mid,
+                        if (!omit_points) obs_pts$x), na.rm = TRUE)
+    }
+
+    oob_fun <- if (requireNamespace("scales", quietly = TRUE))
+        scales::squish else function(x, ...) x
+
+    p <- ggplot2::ggplot()
+
+    if (!omit_points) {
+        if (color_points_by_run) {
+            p <- p + ggplot2::geom_point(
+                data = obs_pts, ggplot2::aes(x, y, colour = run),
+                size = points_size, alpha = points_alpha
+            )
+        } else {
+            p <- p + ggplot2::geom_point(
+                data = obs_pts, ggplot2::aes(x, y),
+                size = points_size, alpha = points_alpha, colour = points_color
+            )
+        }
+    }
+
+    p +
+        ggplot2::geom_ribbon(
+            data = fit_all, ggplot2::aes(x, ymin = lo, ymax = hi, fill = run),
+            alpha = ribbon_alpha, colour = NA
+        ) +
+        ggplot2::geom_line(
+            data = fit_all, ggplot2::aes(x, mu, colour = run),
+            linewidth = line_width
+        ) +
+        ggplot2::geom_point(
+            data = obs_mea, ggplot2::aes(x_mid, mean_norm_log1p, colour = run),
+            shape = 21, fill = "white", size = 3.2, stroke = 0.9
+        ) +
+        ggplot2::scale_colour_manual(
+            values = setNames(colours[keys], labels), name = "Run"
+        ) +
+        ggplot2::scale_fill_manual(
+            values = setNames(fill_cols[keys], labels), name = "Run"
+        ) +
+        ggplot2::scale_y_continuous(
+            breaks = if (requireNamespace("scales", quietly = TRUE))
+                scales::pretty_breaks(n = ny_ticks) else ggplot2::waiver(),
+            name = "Expression"
+        ) +
+        ggplot2::scale_x_continuous(
+            breaks = x_breaks, labels = x_labels, limits = xlim, oob = oob_fun
+        ) +
+        ggplot2::coord_cartesian(expand = FALSE, ylim = ylim) +
+        ggplot2::labs(
+            title = if (show_title) gene else NULL,
+            subtitle = if (show_title) sub_txt else NULL,
+            x = x_title, y = "Expression"
+        ) +
+        ggplot2::theme_minimal(base_size = axis_text_size) +
+        ggplot2::theme(
+            panel.grid.minor = ggplot2::element_blank(),
+            panel.grid.major.x = ggplot2::element_line(colour = "grey88"),
+            panel.grid.major.y = ggplot2::element_line(colour = "grey88"),
+            axis.text = ggplot2::element_text(colour = "black", size = axis_text_size),
+            axis.title = ggplot2::element_text(colour = "black", size = axis_title_size),
+            plot.title = ggplot2::element_text(face = "bold", hjust = 0, colour = "black"),
+            plot.subtitle = ggplot2::element_text(size = axis_text_size, colour = "black"),
+            legend.position = if (show_legend) "right" else "none"
+        )
+}
+
 plot_tradeSeq_gene_multirun_pub <- function(
   gene,
   sce_ls, counts_sub_ls, PT_ls, sf_ls,
@@ -1700,17 +1974,18 @@ plot_tradeSeq_gene_multirun_pub <- function(
   return(p)
 }
 
+# Verbatim from TESTING.ipynb (cell 4), except that cluster::silhouette() is called through
+# chronopack_silhouette(), which gives the same widths when the 'cluster' package is missing.
 plot_cluster_medoids_and_top_genes <- function(
   traj_mat,
   X,
   tt,
   cl,
   D,
-  asso_df.ls = NULL,
   top_n = 9,
   gene_selection = c("random", "wald"),
   gene_score_map = NULL,
-  show_median_iqr = FALSE,   # NEW
+  show_median_iqr = FALSE,
   show_sil_text = TRUE,
   use_silhouette_alpha = TRUE,
   show_gene_titles = FALSE,
@@ -1741,13 +2016,15 @@ plot_cluster_medoids_and_top_genes <- function(
     cl <- factor(cl)
   } else {
     cl <- factor(cl, levels = cluster_order)
-    if (any(is.na(cl))) stop("cluster_order does not include all cluster labels in cl.")
+    if (any(is.na(cl))) {
+      stop("cluster_order does not include all cluster labels in cl.")
+    }
   }
 
   nm <- rownames(traj_mat)
 
   # ------------------------------------------------------------
-  # 0) Parse "{gene}_{key}" and attach waldStat_1
+  # 0) Parse "{gene}_{key}" and attach score
   # ------------------------------------------------------------
   m <- regexec("^(.*)_([^_]+)$", nm, perl = TRUE)
   mm <- regmatches(nm, m)
@@ -1756,44 +2033,31 @@ plot_cluster_medoids_and_top_genes <- function(
   gene_sym <- vapply(mm, `[[`, "", 2)
   key <- vapply(mm, `[[`, "", 3)
 
-  direct_score <- rep(NA_real_, length(nm))
-  names(direct_score) <- nm
+  waldStat_1 <- rep(NA_real_, length(nm))
 
   if (!is.null(gene_score_map)) {
-    if (is.list(gene_score_map)) gene_score_map <- unlist(gene_score_map, use.names = TRUE)
+    if (is.list(gene_score_map)) {
+      gene_score_map <- unlist(gene_score_map, use.names = TRUE)
+    }
 
     nm_map <- names(gene_score_map)
+
     if (is.null(nm_map) || any(!nzchar(nm_map))) {
-      stop("gene_score_map must be a named numeric vector or named list with names = rownames(traj_mat).")
+      stop(
+        "gene_score_map must be a named numeric vector or named list ",
+        "with names = rownames(traj_mat)."
+      )
     }
 
     gene_score_map <- as.numeric(gene_score_map)
     names(gene_score_map) <- nm_map
-    direct_score <- unname(gene_score_map[nm])
+
+    waldStat_1 <- unname(gene_score_map[nm])
   }
 
-  fallback_score <- vapply(seq_along(nm), function(i) {
-    k <- key[i]
-    g <- gene_sym[i]
-
-    if (is.null(asso_df.ls)) return(NA_real_)
-    adf <- asso_df.ls[[k]]
-    if (is.null(adf) || !("waldStat_1" %in% names(adf))) return(NA_real_)
-
-    rn <- rownames(adf)
-    if (!is.null(rn) && all(nzchar(rn)) && g %in% rn) {
-      return(as.numeric(adf[g, "waldStat_1"]))
-    }
-
-    if ("gene" %in% names(adf)) {
-      j <- match(g, as.character(adf$gene))
-      if (!is.na(j)) return(as.numeric(adf$waldStat_1[j]))
-    }
-
-    NA_real_
-  }, numeric(1))
-
-  waldStat_1 <- ifelse(is.na(direct_score), fallback_score, direct_score)
+  if (gene_selection == "wald" && all(is.na(waldStat_1))) {
+    stop("gene_selection = 'wald' requires gene_score_map.")
+  }
 
   wald <- data.frame(
     gene = nm,
@@ -1806,7 +2070,7 @@ plot_cluster_medoids_and_top_genes <- function(
   # ------------------------------------------------------------
   # 1) Silhouette width per gene
   # ------------------------------------------------------------
-  sil_obj <- cluster::silhouette(as.integer(cl), D)
+  sil_obj <- chronopack_silhouette(as.integer(cl), D)
 
   sil_df <- data.frame(
     gene = nm,
@@ -1828,10 +2092,19 @@ plot_cluster_medoids_and_top_genes <- function(
     stringsAsFactors = FALSE
   ) %>%
     dplyr::left_join(
-      wald %>% dplyr::select(gene, gene_sym, key, waldStat_1),
+      wald %>%
+        dplyr::select(
+          gene,
+          gene_sym,
+          key,
+          waldStat_1
+        ),
       by = "gene"
     ) %>%
-    dplyr::left_join(sil_df, by = "gene")
+    dplyr::left_join(
+      sil_df,
+      by = "gene"
+    )
 
   Dmat <- as.matrix(D)
 
@@ -1848,19 +2121,43 @@ plot_cluster_medoids_and_top_genes <- function(
 
   set.seed(seed)
 
-  select_cluster_genes <- function(df_cluster, medoid_gene, top_n, mode) {
-    pool <- df_cluster %>% dplyr::filter(gene != medoid_gene)
-    if (nrow(pool) == 0) return(character(0))
+  select_cluster_genes <- function(
+    df_cluster,
+    medoid_gene,
+    top_n,
+    mode
+  ) {
+    pool <- df_cluster %>%
+      dplyr::filter(gene != medoid_gene)
+
+    if (nrow(pool) == 0) {
+      return(character(0))
+    }
 
     if (mode == "random") {
-      return(sample(pool$gene, size = min(top_n, nrow(pool)), replace = FALSE))
+      return(
+        sample(
+          pool$gene,
+          size = min(top_n, nrow(pool)),
+          replace = FALSE
+        )
+      )
     }
 
     pool <- pool %>%
-      dplyr::mutate(.ord_na = is.na(waldStat_1)) %>%
-      dplyr::arrange(.ord_na, dplyr::desc(waldStat_1), gene)
+      dplyr::mutate(
+        .ord_na = is.na(waldStat_1)
+      ) %>%
+      dplyr::arrange(
+        .ord_na,
+        dplyr::desc(waldStat_1),
+        gene
+      )
 
-    head(pool$gene, n = min(top_n, nrow(pool)))
+    head(
+      pool$gene,
+      n = min(top_n, nrow(pool))
+    )
   }
 
   top_genes <- gene_info %>%
@@ -1868,7 +2165,10 @@ plot_cluster_medoids_and_top_genes <- function(
     dplyr::group_split() %>%
     purrr::map_dfr(function(df_cl) {
       cl_val <- df_cl$cluster[1]
-      medoid_gene <- medoids$medoid[match(cl_val, medoids$cluster)]
+
+      medoid_gene <- medoids$medoid[
+        match(cl_val, medoids$cluster)
+      ]
 
       chosen <- select_cluster_genes(
         df_cluster = df_cl,
@@ -1890,22 +2190,37 @@ plot_cluster_medoids_and_top_genes <- function(
   n_panels <- top_n + panel_offset
 
   panel_tbl <- top_genes %>%
-    dplyr::select(cluster, panel_genes) %>%
+    dplyr::select(
+      cluster,
+      panel_genes
+    ) %>%
     tidyr::unnest(panel_genes) %>%
     dplyr::group_by(cluster) %>%
-    dplyr::mutate(panel_pos = dplyr::row_number() + panel_offset) %>%
+    dplyr::mutate(
+      panel_pos = dplyr::row_number() + panel_offset
+    ) %>%
     dplyr::ungroup() %>%
-    dplyr::mutate(gene = panel_genes)
+    dplyr::mutate(
+      gene = panel_genes
+    )
 
   # ------------------------------------------------------------
   # 3) Individual-gene plot dataframe
   # ------------------------------------------------------------
   panel_gene_set <- unique(panel_tbl$gene)
-  stopifnot(all(panel_gene_set %in% rownames(X)))
 
-  Xsub <- X[panel_gene_set, , drop = FALSE]
+  stopifnot(
+    all(panel_gene_set %in% rownames(X))
+  )
+
+  Xsub <- X[
+    panel_gene_set,
+    ,
+    drop = FALSE
+  ]
 
   tp_levels <- colnames(Xsub)
+
   tt_lookup <- data.frame(
     tp = tp_levels,
     t = suppressWarnings(as.numeric(tp_levels)),
@@ -1918,46 +2233,95 @@ plot_cluster_medoids_and_top_genes <- function(
   }
 
   plot_df <- as.data.frame(Xsub) %>%
-    dplyr::mutate(gene = rownames(Xsub)) %>%
-    tidyr::pivot_longer(cols = -gene, names_to = "tp", values_to = "z") %>%
-    dplyr::left_join(tt_lookup, by = "tp") %>%
+    dplyr::mutate(
+      gene = rownames(Xsub)
+    ) %>%
+    tidyr::pivot_longer(
+      cols = -gene,
+      names_to = "tp",
+      values_to = "z"
+    ) %>%
+    dplyr::left_join(
+      tt_lookup,
+      by = "tp"
+    ) %>%
     dplyr::inner_join(
-      panel_tbl %>% dplyr::select(cluster, gene, panel_pos),
+      panel_tbl %>%
+        dplyr::select(
+          cluster,
+          gene,
+          panel_pos
+        ),
       by = "gene"
     ) %>%
     dplyr::left_join(
-      gene_info %>% dplyr::select(gene, sil_width, waldStat_1, gene_sym, key),
+      gene_info %>%
+        dplyr::select(
+          gene,
+          sil_width,
+          waldStat_1,
+          gene_sym,
+          key
+        ),
       by = "gene"
     ) %>%
     dplyr::mutate(
-      panel = factor(panel_pos, levels = seq_len(n_panels)),
-      alpha = if (use_silhouette_alpha) sil_to_alpha(sil_width) else 1,
-      sil_lab = sprintf("sil=%.2f", sil_width)
+      panel = factor(
+        panel_pos,
+        levels = seq_len(n_panels)
+      ),
+      alpha = if (use_silhouette_alpha) {
+        sil_to_alpha(sil_width)
+      } else {
+        1
+      },
+      sil_lab = sprintf(
+        "sil=%.2f",
+        sil_width
+      )
     )
 
-  stopifnot(length(tt) == ncol(Xsub))
+  stopifnot(
+    length(tt) == ncol(Xsub)
+  )
 
   plot_df2 <- plot_df %>%
     dplyr::mutate(
-      t_idx = match(tp, colnames(Xsub)),
+      t_idx = match(
+        tp,
+        colnames(Xsub)
+      ),
       t = tt[t_idx],
       z = as.numeric(z)
     )
 
   # ------------------------------------------------------------
-  # NEW: median + IQR cluster summary for panel 1
+  # 4) Median + IQR cluster summary for panel 1
   # ------------------------------------------------------------
   summary_df <- NULL
 
   if (show_median_iqr) {
-    summary_genes <- intersect(gene_info$gene, rownames(X))
-    Xall <- X[summary_genes, , drop = FALSE]
+    summary_genes <- intersect(
+      gene_info$gene,
+      rownames(X)
+    )
+
+    Xall <- X[
+      summary_genes,
+      ,
+      drop = FALSE
+    ]
 
     summary_df <- as.data.frame(Xall) %>%
       dplyr::mutate(
         gene = rownames(Xall),
         cluster = factor(
-          gene_info$cluster[match(rownames(Xall), gene_info$gene)],
+          gene_info$cluster[
+            match(
+              rownames(Xall),
+              gene_info$gene
+            )
+          ],
           levels = levels(cl)
         )
       ) %>%
@@ -1967,90 +2331,177 @@ plot_cluster_medoids_and_top_genes <- function(
         values_to = "z"
       ) %>%
       dplyr::mutate(
-        t_idx = match(tp, colnames(Xall)),
+        t_idx = match(
+          tp,
+          colnames(Xall)
+        ),
         t = tt[t_idx],
         z = as.numeric(z)
       ) %>%
-      dplyr::group_by(cluster, t) %>%
+      dplyr::group_by(
+        cluster,
+        t
+      ) %>%
       dplyr::summarise(
-        median = median(z, na.rm = TRUE),
-        q25 = quantile(z, 0.25, na.rm = TRUE),
-        q75 = quantile(z, 0.75, na.rm = TRUE),
+        median = median(
+          z,
+          na.rm = TRUE
+        ),
+        q25 = quantile(
+          z,
+          0.25,
+          na.rm = TRUE
+        ),
+        q75 = quantile(
+          z,
+          0.75,
+          na.rm = TRUE
+        ),
         .groups = "drop"
       ) %>%
       dplyr::mutate(
-        panel = factor(1, levels = seq_len(n_panels))
+        panel = factor(
+          1,
+          levels = seq_len(n_panels)
+        )
       )
   }
 
   # ------------------------------------------------------------
-  # 4) Colors
+  # 5) Colors
   # ------------------------------------------------------------
   clus_levels <- levels(cl)
   pal <- NULL
 
   if (!is.null(cat_colors)) {
-    if (!is.null(names(cat_colors)) && all(nzchar(names(cat_colors)))) {
+    if (
+      !is.null(names(cat_colors)) &&
+        all(nzchar(names(cat_colors)))
+    ) {
       if (!all(clus_levels %in% names(cat_colors))) {
-        missing_cols <- setdiff(clus_levels, names(cat_colors))
+        missing_cols <- setdiff(
+          clus_levels,
+          names(cat_colors)
+        )
+
         stop(
           "cat_colors is named, but missing colors for cluster(s): ",
-          paste(missing_cols, collapse = ", ")
+          paste(
+            missing_cols,
+            collapse = ", "
+          )
         )
       }
 
-      pal <- unname(cat_colors[clus_levels])
+      pal <- unname(
+        cat_colors[clus_levels]
+      )
+
       names(pal) <- clus_levels
     } else {
       if (length(cat_colors) < length(clus_levels)) {
         stop(
-          "cat_colors must have at least ", length(clus_levels),
+          "cat_colors must have at least ",
+          length(clus_levels),
           " entries, or be a named vector covering all clusters."
         )
       }
 
-      pal <- setNames(cat_colors[seq_along(clus_levels)], clus_levels)
+      pal <- setNames(
+        cat_colors[
+          seq_along(clus_levels)
+        ],
+        clus_levels
+      )
     }
   } else if (length(clus_levels) == 3) {
-    pal <- setNames(c("#1f77b4", "#d62728", "#2ca02c"), clus_levels)
+    pal <- setNames(
+      c(
+        "#1f77b4",
+        "#d62728",
+        "#2ca02c"
+      ),
+      clus_levels
+    )
   }
 
   # ------------------------------------------------------------
-  # 5) Figure size
+  # 6) Figure size
   # ------------------------------------------------------------
   n_clusters <- nlevels(cl)
 
   options(
-    repr.plot.width = max(14, 1.55 * n_panels),
-    repr.plot.height = max(4, 1.55 * n_clusters)
+    repr.plot.width = max(
+      14,
+      1.55 * n_panels
+    ),
+    repr.plot.height = max(
+      4,
+      1.55 * n_clusters
+    )
   )
 
   if (is.null(title)) {
     pick_txt <- if (gene_selection == "random") {
-      paste0("random ", top_n)
+      paste0(
+        "random ",
+        top_n
+      )
     } else {
-      paste0("top ", top_n, " by waldStat_1")
+      paste0(
+        "top ",
+        top_n,
+        " by score"
+      )
     }
 
-    if (show_median_iqr) pick_txt <- paste0("median + IQR; ", pick_txt)
+    if (show_median_iqr) {
+      pick_txt <- paste0(
+        "median + IQR; ",
+        pick_txt
+      )
+    }
 
     title <- paste0(
-      "Approach C clusters: ", pick_txt,
+      "Approach C clusters: ",
+      pick_txt,
       " genes (color=cluster; opacity=membership confidence via silhouette)"
     )
   }
 
   strip_y_el <- if (show_cluster_labels) {
-    element_text(angle = 0, size = base_size, face = "bold")
+    element_text(
+      angle = 0,
+      size = base_size,
+      face = "bold"
+    )
   } else {
     element_blank()
   }
 
-  p <- ggplot(plot_df2, aes(x = t, y = z, group = gene)) +
-    geom_line(aes(color = cluster, alpha = alpha), linewidth = 0.95) +
-    facet_grid(cluster ~ panel, switch = "y") +
+  p <- ggplot(
+    plot_df2,
+    aes(
+      x = t,
+      y = z,
+      group = gene
+    )
+  ) +
+    geom_line(
+      aes(
+        color = cluster,
+        alpha = alpha
+      ),
+      linewidth = 0.95
+    ) +
+    facet_grid(
+      cluster ~ panel,
+      switch = "y"
+    ) +
     scale_alpha_identity() +
-    theme_classic(base_size = base_size) +
+    theme_classic(
+      base_size = base_size
+    ) +
     theme(
       strip.background = element_blank(),
       strip.placement = "outside",
@@ -2065,66 +2516,120 @@ plot_cluster_medoids_and_top_genes <- function(
       axis.ticks.y = element_blank(),
       axis.line.x = element_line(),
       axis.line.y = element_line(),
-      panel.spacing.x = grid::unit(0.25, "lines"),
-      panel.spacing.y = grid::unit(0.35, "lines"),
+      panel.spacing.x = grid::unit(
+        0.25,
+        "lines"
+      ),
+      panel.spacing.y = grid::unit(
+        0.35,
+        "lines"
+      ),
       legend.position = "none",
-      plot.title = element_text(hjust = 0.5, face = "bold", size = 14)
+      plot.title = element_text(
+        hjust = 0.5,
+        face = "bold",
+        size = 14
+      )
     ) +
-    labs(title = title, x = NULL, y = NULL)
+    labs(
+      title = title,
+      x = NULL,
+      y = NULL
+    )
 
-  # NEW: median + IQR in first panel
+  # Median + IQR in first panel
   if (show_median_iqr) {
     p <- p +
       geom_ribbon(
         data = summary_df,
-        aes(x = t, ymin = q25, ymax = q75, fill = cluster),
+        aes(
+          x = t,
+          ymin = q25,
+          ymax = q75,
+          fill = cluster
+        ),
         inherit.aes = FALSE,
         alpha = 0.22
       ) +
       geom_line(
         data = summary_df,
-        aes(x = t, y = median, color = cluster, group = cluster),
+        aes(
+          x = t,
+          y = median,
+          color = cluster,
+          group = cluster
+        ),
         inherit.aes = FALSE,
         linewidth = 1.25
       )
   }
 
   if (!is.null(pal)) {
-    p <- p + scale_color_manual(values = pal)
-    if (show_median_iqr) p <- p + scale_fill_manual(values = pal)
+    p <- p +
+      scale_color_manual(
+        values = pal
+      )
+
+    if (show_median_iqr) {
+      p <- p +
+        scale_fill_manual(
+          values = pal
+        )
+    }
   }
 
   if (show_sil_text) {
     ann <- plot_df2 %>%
-      dplyr::group_by(cluster, panel, gene) %>%
+      dplyr::group_by(
+        cluster,
+        panel,
+        gene
+      ) %>%
       dplyr::summarise(
         alpha = dplyr::first(alpha),
         sil_lab = dplyr::first(sil_lab),
         .groups = "drop"
       ) %>%
       dplyr::mutate(
-        t = min(tt) + 0.02 * diff(range(tt)),
+        t = min(tt) +
+          0.02 * diff(range(tt)),
         z = sil_text_y
       )
 
-    p <- p + geom_text(
-      data = ann,
-      aes(x = t, y = z, label = sil_lab, alpha = alpha, color = cluster),
-      size = 2.2,
-      hjust = 0,
-      vjust = 1
-    )
+    p <- p +
+      geom_text(
+        data = ann,
+        aes(
+          x = t,
+          y = z,
+          label = sil_lab,
+          alpha = alpha,
+          color = cluster
+        ),
+        size = 2.2,
+        hjust = 0,
+        vjust = 1
+      )
   }
 
   if (show_gene_titles) {
-    y_rng <- range(plot_df2$z, na.rm = TRUE)
+    y_rng <- range(
+      plot_df2$z,
+      na.rm = TRUE
+    )
 
     if (is.null(gene_title_y)) {
-      gene_title_y <- y_rng[2] - 0.04 * diff(y_rng)
+      gene_title_y <- y_rng[2] -
+        0.04 * diff(y_rng)
     }
 
     ann_titles <- plot_df2 %>%
-      dplyr::group_by(cluster, panel, gene, gene_sym) %>%
+      dplyr::group_by(
+        cluster,
+        panel,
+        gene,
+        gene_sym
+      ) %>%
       dplyr::summarise(
         alpha = dplyr::first(alpha),
         .groups = "drop"
@@ -2133,34 +2638,44 @@ plot_cluster_medoids_and_top_genes <- function(
         t = mean(range(tt)),
         z = gene_title_y,
         label = ifelse(
-          gene_title_mode == "gene_sym" & !is.na(gene_sym) & nzchar(gene_sym),
+          gene_title_mode == "gene_sym" &
+            !is.na(gene_sym) &
+            nzchar(gene_sym),
           gene_sym,
           gene
         )
       )
 
-    p <- p + geom_text(
-      data = ann_titles,
-      aes(x = t, y = z, label = label, alpha = alpha),
-      inherit.aes = FALSE,
-      size = gene_title_size,
-      fontface = "bold",
-      hjust = 0.5,
-      vjust = 1
-    )
+    p <- p +
+      geom_text(
+        data = ann_titles,
+        aes(
+          x = t,
+          y = z,
+          label = label,
+          alpha = alpha
+        ),
+        inherit.aes = FALSE,
+        size = gene_title_size,
+        fontface = "bold",
+        hjust = 0.5,
+        vjust = 1
+      )
   }
 
   if (return_data) {
-    return(list(
-      plot = p,
-      gene_info = gene_info,
-      medoids = medoids,
-      top_genes = top_genes,
-      panel_tbl = panel_tbl,
-      plot_df = plot_df2,
-      summary_df = summary_df,   # NEW
-      pal = pal
-    ))
+    return(
+      list(
+        plot = p,
+        gene_info = gene_info,
+        medoids = medoids,
+        top_genes = top_genes,
+        panel_tbl = panel_tbl,
+        plot_df = plot_df2,
+        summary_df = summary_df,
+        pal = pal
+      )
+    )
   }
 
   p
@@ -3105,13 +3620,17 @@ plot_selected_genes_same_plot <- function(
   }
 }
 
+# Verbatim from TESTING.ipynb (cell 15), except one change: TESTING called
+# plot_tradeSeq_gene_multirun_pub(sce_ls = ...), which it never defined (a kernel
+# leftover; the counts-based package function of that name needs counts_sub_ls etc.).
+# The call goes to plot_tradeSeq_gene_sce_pub, TESTING's SCE-only gene plot.
 plot_cluster_pair_representative_genes <- function(
   pc_df,
   cluster_list = c(1, 2),
   row_cell_type = "K562a",
   col_cell_type = "THP1",
   cluster_col = "cluster",
-  sce_ls, counts_sub_ls, PT_ls, sf_ls,
+  gamList_ls, sce_ls, counts_sub_ls, PT_ls, sf_ls,
   CW_ls = NULL,
   colours = c(THP1 = "#222021", K562a = "#386cb0"),
   cluster_palette = NULL,
@@ -3136,11 +3655,27 @@ plot_cluster_pair_representative_genes <- function(
   rank_by <- match.arg(rank_by)
 
   stopifnot(is.data.frame(pc_df))
-  stopifnot(all(c("gene", "cell_type", cluster_col, "waldStat_1", "qval_1") %in% colnames(pc_df)))
+  stopifnot(
+    all(
+      c(
+        "gene",
+        "cell_type",
+        cluster_col,
+        "waldStat_1",
+        "qval_1"
+      ) %in% colnames(pc_df)
+    )
+  )
   stopifnot(length(cluster_list) >= 1)
 
-  if (is.na(colours[[row_cell_type]]) || is.na(colours[[col_cell_type]])) {
-    stop("colours must be a named vector containing both row_cell_type and col_cell_type.")
+  if (
+    is.na(colours[[row_cell_type]]) ||
+    is.na(colours[[col_cell_type]])
+  ) {
+    stop(
+      "colours must be a named vector containing both ",
+      "row_cell_type and col_cell_type."
+    )
   }
 
   row_clusters <- as.character(cluster_list)
@@ -3149,12 +3684,23 @@ plot_cluster_pair_representative_genes <- function(
   cluster_ids <- as.character(unique(cluster_list))
 
   if (is.null(cluster_palette)) {
-    pal_vals <- hcl.colors(length(cluster_ids), palette = "Dark 3")
-    cluster_palette <- stats::setNames(pal_vals, cluster_ids)
+    pal_vals <- hcl.colors(
+      length(cluster_ids),
+      palette = "Dark 3"
+    )
+
+    cluster_palette <- stats::setNames(
+      pal_vals,
+      cluster_ids
+    )
   } else {
     if (!all(cluster_ids %in% names(cluster_palette))) {
-      stop("cluster_palette must be a named vector with names matching as.character(cluster_list).")
+      stop(
+        "cluster_palette must be a named vector with names ",
+        "matching as.character(cluster_list)."
+      )
     }
+
     cluster_palette <- cluster_palette[cluster_ids]
   }
 
@@ -3162,7 +3708,9 @@ plot_cluster_pair_representative_genes <- function(
   # prepare shared-gene assignment table
   # -----------------------------------
   df_row <- pc_df %>%
-    dplyr::filter(.data$cell_type == row_cell_type) %>%
+    dplyr::filter(
+      .data$cell_type == row_cell_type
+    ) %>%
     dplyr::transmute(
       gene = .data$gene,
       cluster_row = as.character(.data[[cluster_col]]),
@@ -3171,7 +3719,9 @@ plot_cluster_pair_representative_genes <- function(
     )
 
   df_col <- pc_df %>%
-    dplyr::filter(.data$cell_type == col_cell_type) %>%
+    dplyr::filter(
+      .data$cell_type == col_cell_type
+    ) %>%
     dplyr::transmute(
       gene = .data$gene,
       cluster_col = as.character(.data[[cluster_col]]),
@@ -3179,15 +3729,25 @@ plot_cluster_pair_representative_genes <- function(
       qval_col = .data$qval_1
     )
 
-  shared_df <- dplyr::inner_join(df_row, df_col, by = "gene") %>%
+  shared_df <- dplyr::inner_join(
+    df_row,
+    df_col,
+    by = "gene"
+  ) %>%
     dplyr::mutate(
-      pass_qval_both = !is.na(.data$qval_row) & !is.na(.data$qval_col) &
-        (.data$qval_row < qval_cut) & (.data$qval_col < qval_cut),
+      pass_qval_both =
+        !is.na(.data$qval_row) &
+        !is.na(.data$qval_col) &
+        (.data$qval_row < qval_cut) &
+        (.data$qval_col < qval_cut),
+
       score = dplyr::case_when(
         rank_by == "row" ~ .data$wald_row,
         rank_by == "col" ~ .data$wald_col,
-        rank_by == "sum" ~ .data$wald_row + .data$wald_col,
-        rank_by == "min" ~ pmin(.data$wald_row, .data$wald_col),
+        rank_by == "sum" ~
+          .data$wald_row + .data$wald_col,
+        rank_by == "min" ~
+          pmin(.data$wald_row, .data$wald_col),
         TRUE ~ .data$wald_row
       )
     )
@@ -3217,9 +3777,12 @@ plot_cluster_pair_representative_genes <- function(
   remove_point_layers <- function(p) {
     keep <- vapply(
       p$layers,
-      function(lyr) !inherits(lyr$geom, "GeomPoint"),
+      function(lyr) {
+        !inherits(lyr$geom, "GeomPoint")
+      },
       logical(1)
     )
+
     p$layers <- p$layers[keep]
     p
   }
@@ -3227,7 +3790,8 @@ plot_cluster_pair_representative_genes <- function(
   make_empty_panel <- function() {
     add_box_theme(
       ggplot() +
-        xlim(0, 1) + ylim(0, 1) +
+        xlim(0, 1) +
+        ylim(0, 1) +
         theme_void()
     )
   }
@@ -3238,21 +3802,32 @@ plot_cluster_pair_representative_genes <- function(
     ggplot() +
       annotate(
         "rect",
-        xmin = 0, xmax = 1, ymin = 0, ymax = 1,
+        xmin = 0,
+        xmax = 1,
+        ymin = 0,
+        ymax = 1,
         fill = fill_col,
         colour = fill_col,
         linewidth = annotation_box_linewidth
       ) +
-      xlim(0, 1) + ylim(0, 1) +
+      xlim(0, 1) +
+      ylim(0, 1) +
       theme_void() +
-      theme(plot.margin = margin(2, 2, 2, 2))
+      theme(
+        plot.margin = margin(2, 2, 2, 2)
+      )
   }
 
-  make_axis_label_panel <- function(label, angle = 0, face = "bold") {
+  make_axis_label_panel <- function(
+    label,
+    angle = 0,
+    face = "bold"
+  ) {
     ggplot() +
       annotate(
         "text",
-        x = 0.5, y = 0.5,
+        x = 0.5,
+        y = 0.5,
         label = label,
         angle = angle,
         hjust = 0.5,
@@ -3260,138 +3835,232 @@ plot_cluster_pair_representative_genes <- function(
         size = label_size,
         fontface = face
       ) +
-      xlim(0, 1) + ylim(0, 1) +
+      xlim(0, 1) +
+      ylim(0, 1) +
       theme_void() +
-      theme(plot.margin = margin(0, 0, 0, 0))
-  }
-
-  # -----------------------------------
-  # choose representative gene for each cell
-  #
-  # normally exclude specified genes;
-  # if no non-excluded qval-passing gene
-  # demonstrates a given reassignment,
-  # allow excluded genes back in as fallback
-  # -----------------------------------
-  chosen_df <- do.call(
-    rbind,
-    lapply(row_clusters, function(rcl) {
-      do.call(
-        rbind,
-        lapply(col_clusters, function(ccl) {
-
-          # all genes demonstrating this assignment/reassignment
-          cand_all <- shared_df %>%
-            dplyr::filter(
-              .data$cluster_row == as.character(rcl),
-              .data$cluster_col == as.character(ccl)
-            )
-
-          # first choice: non-excluded genes
-          cand <- cand_all
-
-          if (!is.null(exclude_genes)) {
-            cand <- cand %>%
-              dplyr::filter(!.data$gene %in% exclude_genes)
-          }
-
-          cand <- cand %>%
-            dplyr::filter(.data$pass_qval_both) %>%
-            dplyr::arrange(
-              dplyr::desc(.data$score),
-              dplyr::desc(.data$wald_row)
-            )
-
-          # FALLBACK:
-          # if no non-excluded gene works, allow excluded genes
-          # that demonstrate this same reassignment
-          if (nrow(cand) == 0 && !is.null(exclude_genes)) {
-            cand <- cand_all %>%
-              dplyr::filter(
-                .data$gene %in% exclude_genes,
-                .data$pass_qval_both
-              ) %>%
-              dplyr::arrange(
-                dplyr::desc(.data$score),
-                dplyr::desc(.data$wald_row)
-              )
-          }
-
-          if (nrow(cand) == 0) {
-            data.frame(
-              row_cluster = rcl,
-              col_cluster = ccl,
-              gene = NA_character_,
-              wald_row = NA_real_,
-              wald_col = NA_real_,
-              qval_row = NA_real_,
-              qval_col = NA_real_,
-              score = NA_real_,
-              n_candidates_all = nrow(cand_all),
-              n_candidates_qpass = 0L,
-              stringsAsFactors = FALSE
-            )
-          } else {
-            data.frame(
-              row_cluster = rcl,
-              col_cluster = ccl,
-              gene = cand$gene[1],
-              wald_row = cand$wald_row[1],
-              wald_col = cand$wald_col[1],
-              qval_row = cand$qval_row[1],
-              qval_col = cand$qval_col[1],
-              score = cand$score[1],
-              n_candidates_all = nrow(cand_all),
-              n_candidates_qpass = nrow(cand),
-              stringsAsFactors = FALSE
-            )
-          }
-        })
+      theme(
+        plot.margin = margin(0, 0, 0, 0)
       )
-    })
-  )
-
-  rownames(chosen_df) <- NULL
-
-  if (print_gene_table) {
-    print(chosen_df)
   }
+
+  # -----------------------------------
+  # construct ranked candidate lists
+  # for every row/column cluster pair
+  #
+  # Preferred order:
+  #   1. qval-passing, non-excluded genes
+  #   2. qval-passing excluded genes as fallback
+  #
+  # Within each group, genes are ranked using
+  # the same score as before.
+  # -----------------------------------
+  candidate_lists <- list()
+  chosen_rows <- list()
+
+  pair_idx <- 1L
+
+  for (rcl in row_clusters) {
+    for (ccl in col_clusters) {
+
+      cand_all <- shared_df %>%
+        dplyr::filter(
+          .data$cluster_row == as.character(rcl),
+          .data$cluster_col == as.character(ccl)
+        )
+
+      cand_qpass <- cand_all %>%
+        dplyr::filter(
+          .data$pass_qval_both
+        )
+
+      # Preferred candidates: non-excluded
+      cand_primary <- cand_qpass
+
+      if (!is.null(exclude_genes)) {
+        cand_primary <- cand_primary %>%
+          dplyr::filter(
+            !.data$gene %in% exclude_genes
+          )
+      }
+
+      cand_primary <- cand_primary %>%
+        dplyr::arrange(
+          dplyr::desc(.data$score),
+          dplyr::desc(.data$wald_row)
+        )
+
+      # Fallback candidates: excluded genes
+      if (!is.null(exclude_genes)) {
+        cand_fallback <- cand_qpass %>%
+          dplyr::filter(
+            .data$gene %in% exclude_genes
+          ) %>%
+          dplyr::arrange(
+            dplyr::desc(.data$score),
+            dplyr::desc(.data$wald_row)
+          )
+      } else {
+        cand_fallback <- cand_qpass[0, , drop = FALSE]
+      }
+
+      # Keep the complete ordered list.
+      cand_ranked <- dplyr::bind_rows(
+        cand_primary,
+        cand_fallback
+      ) %>%
+        dplyr::distinct(
+          .data$gene,
+          .keep_all = TRUE
+        )
+
+      candidate_lists[[pair_idx]] <- cand_ranked
+
+      # Placeholder row; populated with the gene that
+      # actually plots successfully below.
+      chosen_rows[[pair_idx]] <- data.frame(
+        row_cluster = rcl,
+        col_cluster = ccl,
+        gene = NA_character_,
+        wald_row = NA_real_,
+        wald_col = NA_real_,
+        qval_row = NA_real_,
+        qval_col = NA_real_,
+        score = NA_real_,
+        n_candidates_all = nrow(cand_all),
+        n_candidates_qpass = nrow(cand_ranked),
+        candidate_rank = NA_integer_,
+        stringsAsFactors = FALSE
+      )
+
+      pair_idx <- pair_idx + 1L
+    }
+  }
+
+  chosen_df <- dplyr::bind_rows(chosen_rows)
 
   # -----------------------------------
   # interior plot panels
+  #
+  # If a candidate gene is absent from all
+  # requested SCEs, try the next-ranked gene.
+  # Other plotting errors are NOT swallowed.
   # -----------------------------------
-  keys_use <- c(row_cell_type, col_cell_type)
+  keys_use <- c(
+    row_cell_type,
+    col_cell_type
+  )
+
   colours_use <- colours[keys_use]
 
-  panel_lookup <- vector("list", nrow(chosen_df))
+  panel_lookup <- vector(
+    "list",
+    length(candidate_lists)
+  )
 
-  for (i in seq_len(nrow(chosen_df))) {
-    g <- chosen_df$gene[i]
+  skipped_missing_genes <- vector(
+    "list",
+    length(candidate_lists)
+  )
 
-    if (is.na(g)) {
+  for (i in seq_along(candidate_lists)) {
+
+    candidates <- candidate_lists[[i]]
+
+    if (nrow(candidates) == 0) {
+      panel_lookup[[i]] <- make_empty_panel()
+      skipped_missing_genes[[i]] <- character(0)
+      next
+    }
+
+    successful_plot <- NULL
+    successful_row <- NULL
+    missing_genes <- character(0)
+
+    for (j in seq_len(nrow(candidates))) {
+
+      g <- candidates$gene[j]
+
+      p_try <- tryCatch(
+        {
+          p_tmp <- NULL
+
+          utils::capture.output({
+            p_tmp <- suppressMessages(
+              suppressWarnings(
+                plot_tradeSeq_gene_sce_pub(
+                  sce_ls = sce_ls,
+                  keys = keys_use,
+                  colours = colours_use,
+                  key_labels = NULL,
+                  gene = g,
+                  show_legend = show_legend,
+                  ...
+                )
+              )
+            )
+          })
+
+          p_tmp
+        },
+        error = function(e) {
+
+          msg <- conditionMessage(e)
+
+          # This is the specific recoverable error.
+          if (
+            grepl(
+              "Gene not found in any requested SCE",
+              msg,
+              fixed = TRUE
+            )
+          ) {
+            missing_genes <<- c(
+              missing_genes,
+              g
+            )
+
+            return(NULL)
+          }
+
+          # Any other error should still stop execution,
+          # since it likely represents a real bug.
+          stop(e)
+        }
+      )
+
+      # Missing gene -> try next-ranked candidate.
+      if (is.null(p_try)) {
+        next
+      }
+
+      # Successful candidate.
+      successful_plot <- p_try
+      successful_row <- candidates[j, , drop = FALSE]
+
+      chosen_df$candidate_rank[i] <- j
+
+      break
+    }
+
+    skipped_missing_genes[[i]] <- missing_genes
+
+    # If every candidate failed because it was absent
+    # from the requested SCEs, leave an empty panel.
+    if (is.null(successful_plot)) {
       panel_lookup[[i]] <- make_empty_panel()
       next
     }
 
-    utils::capture.output({
-      p <- suppressMessages(
-        suppressWarnings(
-          plot_tradeSeq_gene_multirun_pub(
-            sce_ls = sce_ls,
-            counts_sub_ls = counts_sub_ls,
-            PT_ls = PT_ls,
-            sf_ls = sf_ls,
-            CW_ls = CW_ls,
-            keys = keys_use,
-            colours = colours_use,
-            key_labels = NULL,
-            gene = g,
-            show_legend = show_legend,
-            ...
-          )
-        )
-      )
-    })
+    # Record the gene that was actually plotted.
+    chosen_df$gene[i] <- successful_row$gene
+    chosen_df$wald_row[i] <- successful_row$wald_row
+    chosen_df$wald_col[i] <- successful_row$wald_col
+    chosen_df$qval_row[i] <- successful_row$qval_row
+    chosen_df$qval_col[i] <- successful_row$qval_col
+    chosen_df$score[i] <- successful_row$score
+
+    p <- successful_plot
+    g <- successful_row$gene
 
     if (isTRUE(hide_mean_fit_points)) {
       p <- remove_point_layers(p)
@@ -3415,24 +4084,37 @@ plot_cluster_pair_representative_genes <- function(
     panel_lookup[[i]] <- add_box_theme(p)
   }
 
+  # Print after plotting so this reflects
+  # the gene that actually rendered.
+  if (print_gene_table) {
+    print(chosen_df)
+  }
+
   # -----------------------------------
   # assemble central grid
   # -----------------------------------
   full_panels <- list()
+
   full_panels[[1]] <- patchwork::plot_spacer()
 
   for (ccl in col_clusters) {
-    full_panels[[length(full_panels) + 1]] <- make_annotation_panel(ccl)
+    full_panels[[length(full_panels) + 1]] <-
+      make_annotation_panel(ccl)
   }
 
-  idx <- 1
+  idx <- 1L
 
   for (rcl in row_clusters) {
-    full_panels[[length(full_panels) + 1]] <- make_annotation_panel(rcl)
+
+    full_panels[[length(full_panels) + 1]] <-
+      make_annotation_panel(rcl)
 
     for (ccl in col_clusters) {
-      full_panels[[length(full_panels) + 1]] <- panel_lookup[[idx]]
-      idx <- idx + 1
+
+      full_panels[[length(full_panels) + 1]] <-
+        panel_lookup[[idx]]
+
+      idx <- idx + 1L
     }
   }
 
@@ -3442,8 +4124,14 @@ plot_cluster_pair_representative_genes <- function(
     byrow = TRUE
   ) +
     plot_layout(
-      widths = c(annotation_box_rel_size, rep(1, n_cl)),
-      heights = c(top_annotation_box_rel_size, rep(1, n_cl))
+      widths = c(
+        annotation_box_rel_size,
+        rep(1, n_cl)
+      ),
+      heights = c(
+        top_annotation_box_rel_size,
+        rep(1, n_cl)
+      )
     )
 
   y_axis_panel <- make_axis_label_panel(
@@ -3462,7 +4150,10 @@ plot_cluster_pair_representative_genes <- function(
       x_axis_panel
     ),
     ncol = 2,
-    widths = c(axis_label_rel_size, 1)
+    widths = c(
+      axis_label_rel_size,
+      1
+    )
   )
 
   grid_row <- wrap_plots(
@@ -3471,17 +4162,25 @@ plot_cluster_pair_representative_genes <- function(
       main_grid
     ),
     ncol = 2,
-    widths = c(axis_label_rel_size, 1)
+    widths = c(
+      axis_label_rel_size,
+      1
+    )
   )
 
   p_out <- x_label_row / grid_row +
     plot_layout(
-      heights = c(axis_label_rel_size, 1)
+      heights = c(
+        axis_label_rel_size,
+        1
+      )
     )
 
   if (!is.null(overall_title)) {
     p_out <- p_out +
-      plot_annotation(title = overall_title)
+      plot_annotation(
+        title = overall_title
+      )
   }
 
   print(p_out)
@@ -3490,6 +4189,8 @@ plot_cluster_pair_representative_genes <- function(
     list(
       plot = p_out,
       chosen_genes = chosen_df,
+      candidate_genes = candidate_lists,
+      skipped_missing_genes = skipped_missing_genes,
       shared_df = shared_df,
       cluster_palette = cluster_palette
     )
@@ -4970,11 +5671,57 @@ plot_pca_reconstruction <- function(gene, X_mat, pca_X, time = tt, n_pcs = c(3, 
     theme_classic()
 }
 
-chronopack_save_ggplot <- function(plot, output, width = 7, height = 5, dpi = 300) {
+
+# ---------------------------------------------------------------------------
+# Python (cp.pl) entry points. Each reads its inputs from CSV files written by
+# the wrapper, draws with the helpers above and saves to every path in `output`
+# (the requested file plus a PNG preview for inline display).
+# ---------------------------------------------------------------------------
+
+# cluster::silhouette() widths; same definition when the 'cluster' package is not installed
+# (a = mean distance to the rest of the own cluster, b = smallest mean distance to another
+# cluster, s = (b - a) / max(a, b), 0 for singletons).
+chronopack_silhouette <- function(cl, D) {
+  if (requireNamespace("cluster", quietly = TRUE)) {
+    return(cluster::silhouette(cl, D))
+  }
+  Dm <- as.matrix(D)
+  ids <- sort(unique(cl))
+  idx <- match(cl, ids)
+  n <- length(idx)
+  sizes <- tabulate(idx, nbins = length(ids))
+  sums <- t(rowsum(t(Dm), group = idx))
+  own <- cbind(seq_len(n), idx)
+  a <- sums[own] / pmax(sizes[idx] - 1, 1)
+  means <- sweep(sums, 2, sizes, "/")
+  means[own] <- Inf
+  b <- if (length(ids) > 1) apply(means, 1, min) else rep(NA_real_, n)
+  neighbor <- if (length(ids) > 1) ids[apply(means, 1, which.min)] else rep(NA, n)
+  denom <- pmax(a, b)
+  s <- ifelse(is.finite(denom) & denom > 0, (b - a) / denom, 0)
+  s[sizes[idx] == 1] <- 0
+  cbind(cluster = cl, neighbor = neighbor, sil_width = s)
+}
+
+# The TESTING-derived helpers call ggplot2, dplyr and patchwork functions unqualified.
+chronopack_attach_plot_packages <- function() {
+  suppressPackageStartupMessages({
+    library(ggplot2)
+    library(dplyr)
+    library(patchwork)
+  })
+}
+
+chronopack_read_plot_table <- function(path) {
+  df <- utils::read.csv(path, check.names = FALSE, stringsAsFactors = FALSE, na.strings = "")
+  if ("row_id" %in% colnames(df)) rownames(df) <- df$row_id
+  df
+}
+
+chronopack_open_device <- function(output, width, height, dpi = 300) {
   output <- path.expand(output)
   dir.create(dirname(output), recursive = TRUE, showWarnings = FALSE)
   ext <- tolower(tools::file_ext(output))
-
   if (ext == "pdf") {
     grDevices::pdf(output, width = width, height = height)
   } else if (ext == "svg") {
@@ -4984,9 +5731,27 @@ chronopack_save_ggplot <- function(plot, output, width = 7, height = 5, dpi = 30
   } else {
     stop("Unsupported plot output extension: ", ext, ". Use pdf, svg, or png.")
   }
+}
+
+# `plot` is a ggplot / patchwork object, or a function drawing with base graphics
+# (its value from the last draw is returned).
+chronopack_save_plot <- function(plot, output, width = 7, height = 5, dpi = 300) {
+  value <- NULL
+  for (path in output) {
+    chronopack_open_device(path, width, height, dpi)
+    tryCatch(
+      if (is.function(plot)) value <- plot() else print(plot),
+      finally = grDevices::dev.off()
+    )
+  }
+  invisible(value)
+}
+
+# Evaluate `expr` with a null device open, for helpers that print their plot themselves.
+chronopack_without_display <- function(expr) {
+  grDevices::pdf(NULL)
   on.exit(grDevices::dev.off(), add = TRUE)
-  print(plot)
-  invisible(output)
+  expr
 }
 
 chronopack_mode_palette <- function(levels) {
@@ -5047,76 +5812,7 @@ chronopack_plot_gene_trajectory_csv <- function(
       legend.position = "bottom"
     )
 
-  chronopack_save_ggplot(p, output, width = width, height = height)
-}
-
-chronopack_plot_cluster_trajectories_csv <- function(
-  data_path,
-  output,
-  width = 8,
-  height = 5,
-  title = "",
-  normalize = TRUE
-) {
-  df <- utils::read.csv(data_path, check.names = FALSE, stringsAsFactors = FALSE)
-  required <- c("cluster", "time", "median", "q25", "q75", "n")
-  missing <- setdiff(required, colnames(df))
-  if (length(missing) > 0) stop("Missing required columns: ", paste(missing, collapse = ", "))
-  df$cluster <- as.character(df$cluster)
-  pal <- chronopack_mode_palette(sort(unique(df$cluster)))
-  title_value <- if (nzchar(title)) title else NULL
-
-  p <- ggplot2::ggplot(df, ggplot2::aes(time, median, color = cluster, fill = cluster)) +
-    ggplot2::geom_ribbon(ggplot2::aes(ymin = q25, ymax = q75), alpha = 0.18, color = NA) +
-    ggplot2::geom_line(linewidth = 1.1) +
-    ggplot2::scale_color_manual(values = pal) +
-    ggplot2::scale_fill_manual(values = pal) +
-    ggplot2::labs(
-      title = title_value,
-      x = "Aligned time (min)",
-      y = ifelse(isTRUE(normalize), "Median z trajectory", "Median trajectory"),
-      color = NULL,
-      fill = NULL
-    ) +
-    ggplot2::theme_classic(base_size = 12)
-
-  chronopack_save_ggplot(p, output, width = width, height = height)
-}
-
-chronopack_plot_trajectory_features_csv <- function(
-  data_path,
-  output,
-  width = 6,
-  height = 5,
-  title = "",
-  x = "PC1",
-  y = "PC2",
-  color = "broad_cluster"
-) {
-  df <- utils::read.csv(data_path, check.names = FALSE, stringsAsFactors = FALSE)
-  required <- c(x, y, color)
-  missing <- setdiff(required, colnames(df))
-  if (length(missing) > 0) stop("Missing required columns: ", paste(missing, collapse = ", "))
-  title_value <- if (nzchar(title)) title else NULL
-
-  p <- ggplot2::ggplot(df, ggplot2::aes_string(x = x, y = y, color = color)) +
-    ggplot2::geom_point(size = 1.3, alpha = 0.9) +
-    ggplot2::labs(
-      title = title_value,
-      x = x,
-      y = y,
-      color = color
-    ) +
-    ggplot2::theme_classic(base_size = 12)
-
-  if (!is.numeric(df[[color]])) {
-    pal <- chronopack_mode_palette(sort(unique(as.character(df[[color]]))))
-    p <- p + ggplot2::scale_color_manual(values = pal)
-  } else {
-    p <- p + ggplot2::scale_color_viridis_c()
-  }
-
-  chronopack_save_ggplot(p, output, width = width, height = height)
+  chronopack_save_plot(p, output, width = width, height = height)
 }
 
 chronopack_plot_mode_conservation_csv <- function(
@@ -5150,85 +5846,139 @@ chronopack_plot_mode_conservation_csv <- function(
       legend.position = "none"
     )
 
-  chronopack_save_ggplot(p, output, width = width, height = height)
+  chronopack_save_plot(p, output, width = width, height = height)
 }
 
-chronopack_plot_mode_sankey_csv <- function(
-  data_path,
-  output,
-  width = 7,
-  height = 5,
-  title = ""
+# cp.pl.trajectory_features: feature_plot_pc_simple() on a pc_df-style table.
+chronopack_plot_trajectory_features_csv <- function(data_path, output, feature, width = 6.5, height = 5, dpi = 300, ...) {
+  chronopack_attach_plot_packages()
+  pc_df <- chronopack_read_plot_table(data_path)
+  p <- feature_plot_pc_simple(pc_df, feature = feature, ...)
+  chronopack_save_plot(p, output, width = width, height = height, dpi = dpi)
+}
+
+# cp.pl.cluster_medoids_and_top_genes. As in TESTING, traj_mat and X are the row z-scored
+# trajectories and D the Euclidean distances of the joint clustering features.
+chronopack_plot_cluster_medoids_csv <- function(
+  traj_path, features_path, obs_path, time_path, output,
+  width = 13, height = 7, dpi = 300, ...
 ) {
-  df <- utils::read.csv(data_path, check.names = FALSE, stringsAsFactors = FALSE)
-  required <- c("source_mode", "target_mode", "n")
-  missing <- setdiff(required, colnames(df))
-  if (length(missing) > 0) stop("Missing required columns: ", paste(missing, collapse = ", "))
-  df$source_mode <- as.character(df$source_mode)
-  df$target_mode <- as.character(df$target_mode)
-  df$n <- as.numeric(df$n)
-  title_value <- if (nzchar(title)) title else NULL
+  chronopack_attach_plot_packages()
+  traj_mat <- as.matrix(utils::read.csv(traj_path, row.names = 1, check.names = FALSE))
+  X_use <- as.matrix(utils::read.csv(features_path, row.names = 1, check.names = FALSE))[rownames(traj_mat), , drop = FALSE]
+  obs <- utils::read.csv(obs_path, check.names = FALSE, stringsAsFactors = FALSE, na.strings = "")
+  obs <- obs[match(rownames(traj_mat), obs$row_id), , drop = FALSE]
+  tt <- utils::read.csv(time_path)$time
 
-  modes <- unique(c(df$source_mode, df$target_mode))
-  pal <- chronopack_mode_palette(modes)
-  y_levels <- rev(sort(unique(modes)))
-  df$source_y <- match(df$source_mode, y_levels)
-  df$target_y <- match(df$target_mode, y_levels)
-  df$flow_id <- seq_len(nrow(df))
+  p <- plot_cluster_medoids_and_top_genes(
+    traj_mat = traj_mat,
+    X = traj_mat,
+    tt = tt,
+    cl = obs$cluster,
+    D = stats::dist(X_use, method = "euclidean"),
+    gene_score_map = stats::setNames(obs$score, obs$row_id),
+    ...
+  )
+  chronopack_save_plot(p, output, width = width, height = height, dpi = dpi)
+}
 
-  p <- ggplot2::ggplot(df) +
-    ggplot2::geom_segment(
-      ggplot2::aes(x = 1, xend = 2, y = source_y, yend = target_y, linewidth = n, color = source_mode),
-      alpha = 0.55,
-      lineend = "round"
+# cp.pl.mode_proportions: the pie charts of TESTING.ipynb cell 82 (pie_df is computed in Python).
+chronopack_plot_mode_proportions_csv <- function(data_path, output, cluster_order, cluster_colors,
+                                                 width = 12, height = 5, dpi = 300) {
+  chronopack_attach_plot_packages()
+  pie_df <- chronopack_read_plot_table(data_path)
+  pie_df$broad_cluster <- factor(pie_df$broad_cluster, levels = cluster_order)
+
+  p_pie <- ggplot(pie_df, aes(x = "", y = prop, fill = broad_cluster)) +
+    geom_col(width = 1, color = "white") +
+    coord_polar(theta = "y", direction = -1) +
+    facet_wrap(~cell_type, nrow = 1) +
+    theme_void(base_size = 16) +
+    theme(
+      strip.text = element_text(face = "bold", size = 18),
+      plot.title = element_text(hjust = 0.5, size = 20),
+      legend.title = element_text(size = 16),
+      legend.text = element_text(size = 14)
     ) +
-    ggplot2::geom_point(ggplot2::aes(x = 1, y = source_y, fill = source_mode), shape = 22, size = 6, color = "grey25") +
-    ggplot2::geom_point(ggplot2::aes(x = 2, y = target_y, fill = target_mode), shape = 22, size = 6, color = "grey25") +
-    ggplot2::scale_y_continuous(breaks = seq_along(y_levels), labels = y_levels) +
-    ggplot2::scale_x_continuous(breaks = c(1, 2), labels = c("Source", "Target"), limits = c(0.75, 2.25)) +
-    ggplot2::scale_color_manual(values = pal) +
-    ggplot2::scale_fill_manual(values = pal) +
-    ggplot2::scale_linewidth(range = c(0.4, 5), guide = "none") +
-    ggplot2::labs(title = title_value, x = NULL, y = NULL, color = "Source mode", fill = "Mode") +
-    ggplot2::theme_classic(base_size = 12) +
-    ggplot2::theme(axis.line.y = ggplot2::element_blank(), axis.ticks.y = ggplot2::element_blank())
+    labs(
+      title = "",
+      fill = "broad_cluster"
+    ) +
+    scale_fill_manual(
+      breaks = cluster_order,
+      drop = FALSE,
+      values = cluster_colors
+    )
 
-  chronopack_save_ggplot(p, output, width = width, height = height)
+  chronopack_save_plot(p_pie, output, width = width, height = height, dpi = dpi)
 }
 
-chronopack_plot_mode_chord_csv <- function(
-  data_path,
-  output,
-  width = 6,
-  height = 6,
-  title = ""
-) {
-  if (!requireNamespace("circlize", quietly = TRUE)) {
-    stop("mode_chord rendering requires the R package 'circlize'.")
-  }
-  df <- utils::read.csv(data_path, check.names = FALSE, stringsAsFactors = FALSE)
-  required <- c("source_mode", "target_mode", "n")
-  missing <- setdiff(required, colnames(df))
-  if (length(missing) > 0) stop("Missing required columns: ", paste(missing, collapse = ", "))
-  df$source_mode <- paste0("source::", as.character(df$source_mode))
-  df$target_mode <- paste0("target::", as.character(df$target_mode))
-  mat <- stats::xtabs(n ~ source_mode + target_mode, data = df)
+# cp.pl.mode_sankey: TESTING.ipynb cell 90, one Sankey per context pair (legend on the last),
+# combined with patchwork. Returns the flow tables.
+chronopack_plot_mode_sankey_csv <- function(data_path, output, source_cell_types, target_cell_types,
+                                            width = 11, height = 5, dpi = 300, ...) {
+  chronopack_attach_plot_packages()
+  pc_df_subset <- chronopack_read_plot_table(data_path)
+  n <- length(source_cell_types)
+  res <- lapply(seq_len(n), function(i) {
+    plot_cluster_reassignment_sankey(
+      pc_df = pc_df_subset,
+      source_cell_type = source_cell_types[[i]],
+      target_cell_type = target_cell_types[[i]],
+      show_legend = i == n,
+      ...
+    )
+  })
+  p_all <- Reduce(`+`, lapply(res, function(x) x$plot + ggtitle("")))
+  chronopack_save_plot(p_all, output, width = width, height = height, dpi = dpi)
+  dplyr::bind_rows(lapply(seq_len(n), function(i) {
+    data.frame(
+      source_cell_type = source_cell_types[[i]],
+      target_cell_type = target_cell_types[[i]],
+      as.data.frame(res[[i]]$flow_df),
+      check.names = FALSE
+    )
+  }))
+}
 
-  output <- path.expand(output)
-  dir.create(dirname(output), recursive = TRUE, showWarnings = FALSE)
-  ext <- tolower(tools::file_ext(output))
-  if (ext == "pdf") {
-    grDevices::pdf(output, width = width, height = height)
-  } else if (ext == "svg") {
-    grDevices::svg(output, width = width, height = height)
-  } else if (ext == "png") {
-    grDevices::png(output, width = width, height = height, units = "in", res = 300)
-  } else {
-    stop("Unsupported plot output extension: ", ext, ". Use pdf, svg, or png.")
-  }
-  on.exit(grDevices::dev.off(), add = TRUE)
-  on.exit(circlize::circos.clear(), add = TRUE)
-  circlize::chordDiagram(mat, transparency = 0.35)
-  if (nzchar(title)) graphics::title(main = title)
-  invisible(output)
+# cp.pl.mode_chord: TESTING.ipynb cell 102 (circlize, base graphics). Returns the pairwise links.
+chronopack_plot_mode_chord_csv <- function(data_path, output, width = 8, height = 6, dpi = 300, ...) {
+  chronopack_attach_plot_packages()
+  pc_df_subset <- chronopack_read_plot_table(data_path)
+  res <- chronopack_save_plot(
+    function() plot_cluster_reassignment_chord_pairwise(pc_df = pc_df_subset, return_data = TRUE, ...),
+    output, width = width, height = height, dpi = dpi
+  )
+  as.data.frame(res$link_df)
+}
+
+# cp.pl.cluster_pair_representative_genes: TESTING.ipynb cell 107; `sce_paths` names the
+# tradeSeq SCE (.rds) of each context. Returns the chosen gene per cluster pair.
+chronopack_plot_cluster_pair_genes_csv <- function(data_path, output, sce_paths,
+                                                   width = 10, height = 10, dpi = 300, ...) {
+  chronopack_attach_plot_packages()
+  suppressPackageStartupMessages(requireNamespace("SingleCellExperiment"))
+  pc_df <- chronopack_read_plot_table(data_path)
+  sce.ls <- lapply(as.list(sce_paths), readRDS)
+  res <- chronopack_without_display(
+    plot_cluster_pair_representative_genes(pc_df = pc_df, sce_ls = sce.ls, ...)
+  )
+  chronopack_save_plot(res$plot, output, width = width, height = height, dpi = dpi)
+  as.data.frame(res$chosen_genes)
+}
+
+# cp.pl.cluster_violin: TESTING.ipynb cell 111, one plot_cluster_violin() panel per feature,
+# combined with patchwork. Returns the per-group summaries.
+chronopack_plot_cluster_violin_csv <- function(data_path, output, features, plot_titles,
+                                               width = 7, height = 3.5, dpi = 300, ...) {
+  chronopack_attach_plot_packages()
+  pc_df_subset <- chronopack_read_plot_table(data_path)
+  res <- chronopack_without_display(lapply(seq_along(features), function(i) {
+    plot_cluster_violin(pc_df_subset, feature = features[[i]], plot_title = plot_titles[[i]], ...)
+  }))
+  fig <- Reduce(`+`, lapply(res, `[[`, "plot"))
+  chronopack_save_plot(fig, output, width = width, height = height, dpi = dpi)
+  dplyr::bind_rows(lapply(seq_along(features), function(i) {
+    data.frame(feature = features[[i]], as.data.frame(res[[i]]$summary), check.names = FALSE)
+  }))
 }

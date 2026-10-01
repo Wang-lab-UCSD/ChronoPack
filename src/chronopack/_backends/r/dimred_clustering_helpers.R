@@ -1469,13 +1469,16 @@ chronopack_cluster_trajectory_matrix_to_files <- function(
     assignments = file.path(output_dir, "cluster_assignments.csv"),
     centroid_distances = file.path(output_dir, "cluster_centroid_distances.csv"),
     pca_X = file.path(output_dir, "gene_trajectory_X_pca.csv"),
-    pca_Xd = file.path(output_dir, "gene_trajectory_Xd_pca.csv")
+    pca_Xd = file.path(output_dir, "gene_trajectory_Xd_pca.csv"),
+    features = file.path(output_dir, "cluster_features.csv")
   )
   write.csv(clust_eval$metrics, paths$metrics, row.names = FALSE)
   write_matrix_csv(assignments, paths$assignments)
   write_matrix_csv(centroid_distances, paths$centroid_distances)
   write_matrix_csv(pca_res$pca_X$x, paths$pca_X)
   write_matrix_csv(pca_res$pca_Xd$x, paths$pca_Xd)
+  # The joint (shape + derivative) features the distances and clusters come from.
+  write_matrix_csv(X_joint, paths$features)
 
   list(
     paths = paths,
@@ -1808,4 +1811,52 @@ chronopack_finalize_gene_trajectory_clusters <- function(
   )
   class(out) <- c("chronopack_gene_trajectory_finalized_clusters", class(out))
   out
+}
+
+# Verbatim from TESTING.ipynb (cell 94): fraction of the top-k `source` genes of a response
+# mode (by rank_col, q < q_cut) that have the same mode (q < q_cut) in `target`.
+calc_topk_mode_recovery <- function(
+  pc_df,
+  source,
+  target,
+  mode,
+  mode_col = "response_direction",
+  k = 100,
+  q_cut = 0.05,
+  rank_col = "waldStat_1",
+  q_col = "qval_1",
+  gene_col = "gene"
+) {
+
+  src <- pc_df %>%
+    dplyr::filter(
+      .data$cell_type == source,
+      .data[[mode_col]] == mode,
+      .data[[q_col]] < q_cut
+    ) %>%
+    dplyr::arrange(
+      dplyr::desc(.data[[rank_col]])
+    ) %>%
+    dplyr::slice_head(n = k)
+
+  tgt <- pc_df %>%
+    dplyr::filter(
+      .data$cell_type == target,
+      .data[[mode_col]] == mode,
+      .data[[q_col]] < q_cut
+    )
+
+  mean(
+    src[[gene_col]] %in% tgt[[gene_col]]
+  )
+}
+
+# cp.tl.topk_mode_recovery: calc_topk_mode_recovery() for each (source, target, mode).
+chronopack_topk_mode_recovery_csv <- function(data_path, sources, targets, modes, ...) {
+  suppressPackageStartupMessages(library(dplyr))
+  pc_df <- utils::read.csv(data_path, check.names = FALSE, stringsAsFactors = FALSE, na.strings = "")
+  recovery <- vapply(seq_along(sources), function(i) {
+    calc_topk_mode_recovery(pc_df, source = sources[[i]], target = targets[[i]], mode = modes[[i]], ...)
+  }, numeric(1))
+  data.frame(mode = modes, source = sources, target = targets, recovery = recovery)
 }

@@ -890,3 +890,35 @@ Before making more changes, inspect the current `git status --short` carefully.
   fitted on the reference = all significant trajectories, so induced and repressed
   clusterings share it). `cp.pl.trajectory_features(..., basis="X_pca")` plots it;
   `02_ClusterVisualization` uses it. Clusters unchanged vs r9. Wheel: `dist_fix10`.
+- R-rendered plots now display inline: `_render` also draws a PNG preview, which
+  `RPlotResult._repr_png_` returns (SVG outputs are not shown by Jupyter in untrusted,
+  script-executed notebooks); `RPlotResult` repr is one line (path only); previews display at half their pixel width (`display_scale=0.5`).
+  `verification/execute_notebook.py` records PNG/SVG representations.
+  `02_ClusterVisualization` / `03_ModeConservation` end cells with the plot object
+  (or `display(...)`) and were promoted with 10 / 2 inline plots. Wheel: `dist_fix13`.
+
+### 2026-10-01: TESTING.ipynb plotting port (gene clustering)
+
+- R (`dimred_plotting_helpers.R`): `plot_cluster_medoids_and_top_genes` and
+  `plot_cluster_pair_representative_genes` replaced by the TESTING.ipynb versions
+  (pair function calls `plot_tradeSeq_gene_sce_pub` = TESTING's SCE-only
+  `plot_tradeSeq_gene`, since TESTING's `plot_tradeSeq_gene_multirun_pub` was never
+  defined; silhouettes via `chronopack_silhouette`, which falls back to the same
+  definition because `cluster` is not installed in the chronopack envs).
+  `calc_topk_mode_recovery` added verbatim to `dimred_clustering_helpers.R`.
+  New `chronopack_plot_*_csv` entry points draw to the output file and a PNG preview in
+  one call; old cluster-trajectory / transition-table Sankey and chord renderers removed.
+- Python: `cp.pl.trajectory_features` (now `feature_plot_pc_simple`),
+  `cluster_medoids_and_top_genes`, `mode_proportions`, `mode_sankey` / `mode_chord`
+  (AnnData + context pairs, TESTING renderers), `cluster_pair_representative_genes`,
+  `cluster_violin`; `cp.tl.topk_mode_recovery`. Removed `cp.pl.cluster_trajectories`.
+  Kept `cp.tl.mode_conservation` / `mode_switchers` / `cp.pl.mode_conservation` (unused by
+  notebooks). `GeneTrajectoryClusteringResult.features` = joint clustering features; 01
+  stores them in `traj.obsm["X_cluster_features"]`.
+- Notebooks: 01 has prospective broad-mode medoid plots (induced / repressed); 02 rebuilt
+  (PCA, broad + fine medoid panels, pies, 3 Sankeys, top-k recovery, chord, K562a x THP1
+  representative genes, impulse-up violins); `03_ModeConservation` removed.
+- Verified (Slurm 934596, `gene_clustering_refactor_check_20261001/`): all cluster
+  columns identical to r9 (n_diff 0); no errors; every plot cell has a PNG (01: 4, 02: 14).
+  Top-k recovery = TESTING saved values (induced 0.61 / 0.35 / 0.26, repressed 0.11 /
+  0.06 / 0.09). Executed 01/02 promoted. Wheel: `dist_fix14`.

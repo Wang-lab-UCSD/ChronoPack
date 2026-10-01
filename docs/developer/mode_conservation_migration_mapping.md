@@ -184,3 +184,17 @@ Synthetic tests cover:
 - R-backed conservation SVG render smoke.
 
 Full lightweight suite after this migration: `51 passed, 1 warning`.
+
+
+## Update 2026-10-01: TESTING.ipynb plotting port
+
+`03_ModeConservation` was removed; its figures are part of
+`02_ClusterVisualization`. `cp.pl.mode_sankey()` and `cp.pl.mode_chord()` now
+take the gene-trajectory AnnData and draw with the TESTING
+`plot_cluster_reassignment_sankey()` / `plot_cluster_reassignment_chord_pairwise()`
+(context pairs or a context list, top-k by `waldStat_1`), replacing the
+transition-table renderers. New: `cp.pl.mode_proportions()` (pie charts),
+`cp.pl.cluster_pair_representative_genes()`, `cp.pl.cluster_violin()` and
+`cp.tl.topk_mode_recovery()` (`calc_topk_mode_recovery()`). `cp.tl.mode_conservation()`,
+`cp.tl.mode_switchers()` and `cp.pl.mode_conservation()` are kept (per-mode,
+bidirectional statistic and switcher tables; not used by the notebooks).

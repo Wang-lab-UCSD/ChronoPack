@@ -817,6 +817,153 @@ def trajectory_soft_memberships(
     )
 
 
+def rotate_embedding_to_time(
+    adata,
+    *,
+    basis=OT_UMAP_KEY,
+    time_key="time",
+    key_added=None,
+    flip_x=False,
+):
+    """Rotate a 2-D embedding so that time increases along +y.
+
+    The centred coordinates are rotated so the direction most correlated with
+    ``obs[time_key]`` becomes the y-axis (time increasing upward) and recentred.
+    A rotation cannot undo a mirror image; ``flip_x=True`` also negates x (e.g.
+    to match an earlier layout). Stores the result in
+    ``adata.obsm[key_added]`` (default ``f"{basis}_rot"``) and returns the key.
+    """
+    if basis not in adata.obsm:
+        raise KeyError(f"Missing adata.obsm[{basis!r}].")
+    key_added = f"{basis}_rot" if key_added is None else key_added
+    X = np.asarray(adata.obsm[basis], dtype=float)[:, :2].copy()
+    t = np.asarray(adata.obs[time_key]).astype(float)
+
+    Xc = X - X.mean(axis=0, keepdims=True)
+    tc = t - t.mean()
+    v = (tc[:, None] * Xc).sum(axis=0)
+    u = v / (np.linalg.norm(v) + 1e-12)
+    ux, uy = u
+    R = np.array([[uy, -ux],
+                  [ux, uy]], dtype=float)
+    Xr = Xc @ R.T
+
+    corr = np.corrcoef(Xr[:, 1], t)[0, 1]
+    if corr < 0:
+        Xr[:, 1] *= -1
+    if flip_x:
+        Xr[:, 0] *= -1
+    Xr -= Xr.mean(axis=0, keepdims=True)
+
+    adata.obsm[key_added] = Xr
+    return key_added
+
+
+def early_fate_correlations(
+    adata,
+    fate0_key="fate_0",
+    fate1_key="fate_1",
+    time_key="time",
+    early_bins=(1,),
+    layer=None,
+    use_raw_if_available=True,
+    min_detect_rate=0.10,
+    method="spearman",
+):
+    """Correlate early-bin gene expression with the fate-probability difference.
+
+    For cells whose ``obs[time_key]`` is in ``early_bins``, correlates each gene
+    (``layers[layer]``, else ``.raw`` if present and ``use_raw_if_available``,
+    else ``.X``) with ``fate1 - fate0`` after removing per-bin means. Genes
+    detected in fewer than ``min_detect_rate`` of those cells are dropped.
+    Returns ``gene, r, pval, qval, detect_rate_early`` (t-approximation p,
+    Benjamini-Hochberg q) sorted by ``r`` descending; r > 0 predicts fate 1.
+    """
+    from scipy.stats import rankdata, t as tdist
+
+    # --- pick matrix and gene names ---
+    if use_raw_if_available and (adata.raw is not None) and (layer is None):
+        X = adata.raw.X
+        genes = adata.raw.var_names.to_numpy()
+    else:
+        X = adata.layers[layer] if (layer is not None) else adata.X
+        genes = adata.var_names.to_numpy()
+
+    # --- subset to early bins ---
+    early_bins = list(early_bins) if isinstance(early_bins, (list, tuple, np.ndarray)) else [early_bins]
+    early_mask = adata.obs[time_key].isin(early_bins).to_numpy()
+
+    if early_mask.sum() < 3:
+        raise ValueError(f"Too few cells in early_bins={early_bins}: n={early_mask.sum()}")
+
+    if fate0_key not in adata.obs or fate1_key not in adata.obs:
+        raise KeyError(f"Need adata.obs['{fate0_key}'] and adata.obs['{fate1_key}']")
+
+    y = (adata.obs.loc[early_mask, fate1_key].to_numpy()
+         - adata.obs.loc[early_mask, fate0_key].to_numpy()).astype(float)
+
+    X_e = X[early_mask]
+    X_e = X_e.toarray() if sp.issparse(X_e) else np.array(X_e)
+
+    # --- remove per-bin means (controls for bin effect across early bins) ---
+    bins = adata.obs.loc[early_mask, time_key].astype(str).to_numpy()
+    for b in np.unique(bins):
+        idx = np.where(bins == b)[0]
+        if len(idx) == 0:
+            continue
+        X_e[idx, :] -= X_e[idx, :].mean(axis=0, keepdims=True)
+        y[idx] -= y[idx].mean()
+
+    # --- filter low-detection genes ---
+    detect = (X_e > 0).mean(axis=0)
+    keep = detect >= float(min_detect_rate)
+    X_e = X_e[:, keep]
+    genes_keep = genes[keep]
+    detect_keep = detect[keep]
+
+    if X_e.shape[1] == 0:
+        raise ValueError(f"No genes left after detect-rate filter (min_detect_rate={min_detect_rate}).")
+
+    # --- correlations ---
+    method = method.lower()
+    if method == "spearman":
+        Xr = np.apply_along_axis(rankdata, 0, X_e)
+        yr = rankdata(y)
+        Xc = Xr - Xr.mean(axis=0)
+        yc = yr - yr.mean()
+    elif method == "pearson":
+        Xc = X_e - X_e.mean(axis=0)
+        yc = y - y.mean()
+    else:
+        raise ValueError("method must be 'spearman' or 'pearson'")
+
+    num = Xc.T @ yc
+    den = np.sqrt((Xc**2).sum(axis=0) * (yc**2).sum())
+    r = (num / np.maximum(den, 1e-12)).astype(float)
+
+    # p-values (t approximation)
+    n = X_e.shape[0]
+    tstat = r * np.sqrt((n - 2) / np.maximum(1e-12, 1 - r**2))
+    p = 2 * tdist.sf(np.abs(tstat), df=n - 2)
+
+    # Benjamini-Hochberg FDR
+    m = len(p)
+    order = np.argsort(p)
+    ranks = np.arange(1, m + 1)
+    q = np.empty_like(p)
+    q[order] = p[order] * m / ranks
+    for i in range(m - 2, -1, -1):
+        q[order[i]] = min(q[order[i]], q[order[i + 1]])
+
+    return pd.DataFrame({
+        "gene": genes_keep,
+        "r": r,
+        "pval": p,
+        "qval": q,
+        "detect_rate_early": detect_keep,
+    }).sort_values("r", ascending=False).reset_index(drop=True)
+
+
 __all__ = [
     "CalculateTerminalFatesAcrossCells",
     "CellStateTrajectoryResult",
@@ -826,6 +973,7 @@ __all__ = [
     "cluster_cells_to_trajectories",
     "compute_terminal_fate_probabilities",
     "cosine_topk_leiden_from_terminal_dist",
+    "early_fate_correlations",
     "embed_block",
     "extract_wot_couplings",
     "fate_umap_2x2_scanpy",
@@ -834,6 +982,7 @@ __all__ = [
     "mass_retention_plots_and_umap",
     "merge_trajectory_graphs",
     "read_tmap",
+    "rotate_embedding_to_time",
     "run_wot_transport_workflow",
     "sparse_adjacency_from_tmats",
     "terminal_fate_trajectory_clustering",

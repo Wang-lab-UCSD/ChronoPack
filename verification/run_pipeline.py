@@ -56,7 +56,6 @@ STAGES = {
     "GeneClustering": [(
         "gene_clustering/01_DimensionalityReduction&Clustering.ipynb",
         "gene_clustering/02_ClusterVisualization.ipynb",
-        "gene_clustering/03_ModeConservation.ipynb",
     )],
     "CellCommunication": [("c2c/CellCommunication.ipynb",)],
     "GRNInference": [("grn/GRNInference.ipynb",)],

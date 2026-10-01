@@ -16,7 +16,6 @@ TRADESEQ_FITS = [
 GENE_CLUSTERING = [
     "gene_clustering/01_DimensionalityReduction&Clustering.ipynb",
     "gene_clustering/02_ClusterVisualization.ipynb",
-    "gene_clustering/03_ModeConservation.ipynb",
 ]
 NOTEBOOKS = PREPROCESS + GET_TRAJECTORIES + PREPARE
 

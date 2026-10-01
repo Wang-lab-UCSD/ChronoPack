@@ -36,16 +36,24 @@ def _repr(obj) -> str:
         return f"<unrepresentable {type(obj).__name__}>"
 
 
-def _mime(obj) -> dict:
-    data = {"text/plain": _repr(obj)}
-    if hasattr(obj, "_repr_html_"):
-        try:
-            html = obj._repr_html_()
-            if html is not None:
-                data["text/html"] = html
-        except Exception:
-            pass
-    return data
+def _mime(obj) -> tuple[dict, dict]:
+    """(data, metadata) for an output, as Jupyter would record it."""
+    data, metadata = {"text/plain": _repr(obj)}, {}
+    # Rich representations Jupyter would display (HTML tables, SVG / PNG plots). A
+    # _repr_*_ method may return (value, metadata), e.g. a PNG with a display width.
+    for method, mime in (("_repr_html_", "text/html"), ("_repr_svg_", "image/svg+xml"), ("_repr_png_", "image/png")):
+        if hasattr(obj, method):
+            try:
+                value = getattr(obj, method)()
+            except Exception:
+                value = None
+            if isinstance(value, tuple):
+                value, md = value
+                if md:
+                    metadata[mime] = md
+            if value is not None:
+                data[mime] = base64.b64encode(value).decode("ascii") if isinstance(value, bytes) else value
+    return data, metadata
 
 
 def _figures() -> list[dict]:
@@ -87,7 +95,7 @@ def main() -> None:
     namespace = {
         "__name__": "__main__",
         "display": lambda *objs: displayed.extend(
-            {"output_type": "display_data", "data": _mime(o), "metadata": {}} for o in objs
+            dict(zip(("data", "metadata"), _mime(o)), output_type="display_data") for o in objs
         ),
     }
 
@@ -128,7 +136,7 @@ def main() -> None:
         cell["outputs"] += displayed
         if result is not None:
             cell["outputs"].append({
-                "output_type": "execute_result", "execution_count": count, "data": _mime(result), "metadata": {},
+                "output_type": "execute_result", "execution_count": count, **dict(zip(("data", "metadata"), _mime(result))),
             })
         cell["outputs"] += _figures()
     save()

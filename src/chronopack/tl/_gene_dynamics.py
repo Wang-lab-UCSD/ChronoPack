@@ -764,6 +764,52 @@ def predict_gene_dynamics(
     )
 
 
+def signed_max_log2fc_from_start(
+    fit,
+    genes=None,
+    *,
+    n_points: int = 100,
+    pseudocount: float = 0.01,
+    sce_file: str = "sce_screen.1trajectory.nknots4.rds",
+) -> pd.Series:
+    """Signed maximum log2 fold change of each fitted curve versus its start.
+
+    The tradeSeq means (``predictSmooth``, ``n_points`` grid points) are compared
+    with the first grid point as log2((mu + pseudocount) / (mu_start + pseudocount));
+    the value of largest magnitude is kept, with its sign (for several lineages,
+    the lineage with the largest magnitude). ``fit`` is a
+    :class:`GeneDynamicsResult` or a tradeSeq input directory whose ``sce_file``
+    is read (by default the 4-knot screen fit, which covers every tested gene,
+    matching the association table ``asso_df.1trajectory.nknots4.csv``).
+    Returns a Series named ``signedMaxLog2FC_start`` indexed by gene, the x-axis
+    of :func:`chronopack.pl.association_volcano`.
+    """
+    import tempfile
+
+    if isinstance(fit, GeneDynamicsResult):
+        sce_path = Path(fit.sidecar_paths["sce"]) if sce_file is None else Path(fit.metadata["input_dir"]) / sce_file
+        if genes is None and fit.association is not None:
+            genes = fit.association.index
+    else:
+        sce_path = Path(fit) / sce_file
+    if genes is None:
+        raise ValueError("genes is required when fit is an input directory.")
+    genes = [str(g) for g in ([genes] if isinstance(genes, str) else genes)]
+
+    source_r_resource("tradeseq_helpers.R")  # signed_max_log2fc_start_many()
+    try:
+        from rpy2.robjects import StrVector, r
+    except ImportError as exc:
+        raise ImportError("Computing tradeSeq fold changes requires the optional 'rpy2' dependency.") from exc
+    with tempfile.TemporaryDirectory(prefix="chronopack-log2fc-") as tmp:
+        out = Path(tmp) / "log2fc.csv"
+        r["signed_max_log2fc_start_rds"](str(sce_path), StrVector(genes), str(out),
+                                         n_points=int(n_points), pseudocount=float(pseudocount))
+        res = pd.read_csv(out, keep_default_na=False, na_values=["NA"])
+    return pd.Series(res["value"].to_numpy(float), index=pd.Index(res["gene"].astype(str), name="gene"),
+                     name="signedMaxLog2FC_start")
+
+
 __all__ = [
     "GeneDynamicsResult",
     "compute_smooth_correlations",
@@ -774,6 +820,7 @@ __all__ = [
     "predict_gene_dynamics",
     "prepare_tradeseq_inputs",
     "refilter_tag_bias_candidates",
+    "signed_max_log2fc_from_start",
     "smooth_series",
     "tag_bias_exclusion_genes",
     "temporal_pseudobulk_from_anndata",

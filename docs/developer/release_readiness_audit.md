@@ -35,9 +35,10 @@ Recommended public imports:
   - `infer`
   - `C2CResult`
 - `chronopack.pl`
-  - `gene_trajectory`, `cluster_trajectories`,
-    `trajectory_features`
-  - `mode_conservation`, `mode_sankey`, `mode_chord`
+  - `gene_trajectory`, `trajectory_features`,
+    `cluster_medoids_and_top_genes`, `clustering_metrics`
+  - `mode_conservation`, `mode_proportions`, `mode_sankey`, `mode_chord`,
+    `cluster_pair_representative_genes`, `cluster_violin`
   - `RPlotResult`
 - `chronopack.pl.c2c`
   - `interaction_scatter`, `pair_overlay`, `plot_genes_over_time`

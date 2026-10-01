@@ -92,3 +92,27 @@ def test_standardize_gene_trajectories_matches_notebook_math():
     np.testing.assert_array_equal(ddt_z.to_numpy(), z_row(ddt))
     assert list(ddt_z.columns) == list(traj.var_names[1:])
     assert np.all(fit_z.iloc[2] == 0.0)
+
+
+def test_cluster_gene_trajectories_returns_joint_features():
+    pytest.importorskip("rpy2")
+    ad = pytest.importorskip("anndata")
+
+    rng = np.random.default_rng(0)
+    t = np.linspace(0.1, 1, 6)
+    X = np.vstack([np.sin(np.pi * t * (1 + i % 3)) + rng.normal(0, 0.05, t.size) for i in range(12)])
+    traj = ad.AnnData(
+        X=X,
+        obs=pd.DataFrame(index=[f"g{i}_A" for i in range(12)]),
+        var=pd.DataFrame({"time": t}, index=[f"t{i}" for i in range(t.size)]),
+    )
+    result = gc.cluster_gene_trajectories(traj, k=[2, 3], alpha=0.1)
+
+    # Shape (6 timepoints) and derivative (5) features, rows in obs order.
+    assert result.features.shape == (12, 11)
+    assert result.features.index.tolist() == traj.obs_names.tolist()
+    # The centroid distances are computed on these features.
+    f = result.features.to_numpy()
+    labels = result.assignments[2].to_numpy()
+    centroid = f[labels == labels[0]].mean(axis=0)
+    assert np.linalg.norm(f[0] - centroid) == pytest.approx(result.centroid_distances[2].iloc[0], rel=1e-9)

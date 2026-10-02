@@ -1020,3 +1020,14 @@ Before making more changes, inspect the current `git status --short` carefully.
   promoted. Per-gene association stats equal the genome-wide r9 single-lineage fit and the
   two-lineage check fit (max rel. diff 1.5e-6). Trajectory clusters 3792/3065 vs r9 3793/3064
   (corrected matrix stored as float32). Tests: 101 passed. Wheel: `dist_fix19`.
+
+## Update (2026-10-02): NB-GAM panel y-limits
+
+- `cp.pl.gene_dynamics_curves`: per panel, y from `max(0, y_min - 0.04 * (upper - y_min))` to
+  `1.4 * max(fitted mean)`, with `y_min` the lowest observed value / time-point mean / band lower
+  bound (`y_upper_scale=1.4`, `y_pad=0.04`; `y_upper_scale=None` = matplotlib limits).
+- Both 05_Visualization notebooks re-executed (Slurm 934821, 934822; no errors) and promoted.
+  Demo notebook re-executed with the new limits (Slurm 934825, 889 s; no errors) and promoted;
+  its two-lineage table now has all 300 genes (the previous run had 299; the R helper drops genes whose
+  Wald statistics are all NA, so most likely one fit failed). Tests: 102 passed.
+  Wheel: `dist_fix20`.

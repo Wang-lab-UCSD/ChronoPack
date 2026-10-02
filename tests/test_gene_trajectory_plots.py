@@ -284,6 +284,24 @@ def test_gene_dynamics_curves_draws_assigned_points_and_weighted_time_means():
     assert tuple(means_l1.get_facecolor()[0]) == (1.0, 1.0, 1.0, 1.0)
 
 
+def test_gene_dynamics_curves_y_limits_follow_the_fitted_mean():
+    import chronopack as cp
+
+    t = np.linspace(0, 110, 5)
+    curves = pd.DataFrame({"gene": "A", "t": t, "mu_log1p": [0.5, 1, 2, 1.5, 1], "lo_log1p": [0.4, 0.8, 1.7, 1.2, 0.8],
+                           "hi_log1p": 2.5, "lineage": "L1"})
+    obs = pd.DataFrame({"gene": "A", "t": [0, 0, 60], "expr_log1p": [0.6, 5.0, 2.0], "lineage": "L1"})
+
+    ax = cp.pl.gene_dynamics_curves(curves, ["A"], ncols=1).axes[0]
+    np.testing.assert_allclose(ax.get_ylim(), (0.4 - 0.04 * (2.8 - 0.4), 2.8))
+    ax = cp.pl.gene_dynamics_curves(curves, ["A"], observations=obs, ncols=1).axes[0]
+    np.testing.assert_allclose(ax.get_ylim(), (0.4 - 0.04 * (2.8 - 0.4), 2.8))  # points above 1.4 x max(mu) cut off
+    ax = cp.pl.gene_dynamics_curves(curves.assign(lo_log1p=0.0), ["A"], ncols=1).axes[0]
+    assert ax.get_ylim() == (0.0, 2.8)
+    ax = cp.pl.gene_dynamics_curves(curves, ["A"], observations=obs, ncols=1, y_upper_scale=None).axes[0]
+    assert ax.get_ylim()[1] > 5.0
+
+
 def _combined_table():
     df = pd.DataFrame(
         {

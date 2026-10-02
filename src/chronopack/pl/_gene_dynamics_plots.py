@@ -22,6 +22,8 @@ def gene_dynamics_curves(
     ylabel: str = "Expression",
     x_tick_step: float | None = 30,
     show_band: bool = True,
+    y_upper_scale: float | None = 1.4,
+    y_pad: float = 0.04,
     point_size: float = 2.0,
     point_alpha: float = 0.3,
     title: str | None = None,
@@ -40,6 +42,13 @@ def gene_dynamics_curves(
     ``weight`` when given) mean of the normalized counts, on the log1p scale.
     Panels follow ``genes`` row by row (``ncols`` per row); groups keep their order
     of appearance. Returns the matplotlib figure; ``output`` also saves it.
+
+    Each panel's y-axis runs from ``max(0, y_min - pad)`` to ``y_upper_scale``
+    times the panel's highest fitted mean, where ``y_min`` is the lowest observed
+    value, per-time-point mean or band lower bound (fitted mean without a band)
+    and ``pad`` is ``y_pad`` of the span from ``y_min`` to the upper limit. Cells
+    above the upper limit are cut off. ``y_upper_scale=None`` keeps matplotlib's
+    automatic limits.
     """
     import matplotlib.pyplot as plt
     from matplotlib.ticker import MultipleLocator
@@ -86,7 +95,16 @@ def gene_dynamics_curves(
         ax.set_title(gene, fontsize=12, fontweight="bold", loc="left")
         if x_tick_step:
             ax.xaxis.set_major_locator(MultipleLocator(x_tick_step))
-        ax.use_sticky_edges = False  # keep a margin so points at t = 0 / expression 0 are not clipped
+        ax.use_sticky_edges = False  # keep a margin so points at t = 0 are not clipped
+        if y_upper_scale is not None:
+            groups_sub = sub[sub[group_col].astype(str).isin(groups)]
+            lows = [groups_sub["lo_log1p" if show_band and "lo_log1p" in groups_sub else "mu_log1p"]]
+            if observations is not None:
+                lows += [pts["expr_log1p"], means.loc[means["gene"] == gene, "mean_log1p"]]
+            y_min = float(np.nanmin(pd.concat(lows).to_numpy(float)))
+            upper = y_upper_scale * float(np.nanmax(groups_sub["mu_log1p"].to_numpy(float)))
+            if np.isfinite(upper) and upper > y_min:
+                ax.set_ylim(max(0.0, y_min - y_pad * (upper - y_min)), upper)
         ax.grid(True, color="#e0e0e0", lw=0.6, zorder=0)
         ax.set_axisbelow(True)
         ax.spines[:].set_visible(False)

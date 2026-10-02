@@ -39,7 +39,7 @@ def test_demo_notebook_uses_the_public_api_and_relative_paths():
 
 def test_demo_notebook_keeps_executed_outputs():
     nb = _nb()
-    code_cells = [c for c in nb["cells"] if c["cell_type"] == "code"]
+    code_cells = [c for c in nb["cells"] if c["cell_type"] == "code" and "".join(c["source"]).strip()]
     assert all(c["execution_count"] for c in code_cells)
     assert not any(o["output_type"] == "error" for c in code_cells for o in c["outputs"])
     assert sum("image/png" in o.get("data", {}) for c in code_cells for o in c["outputs"]) >= 8

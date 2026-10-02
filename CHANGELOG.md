@@ -13,6 +13,8 @@ Initial package-ready ChronoPack release candidate.
 - Added GRN inference outputs through `chronopack.tl.grn`.
 - Added CellCommunication/C2C inference outputs through `chronopack.tl.c2c`.
 - Added lightweight tests, R-resource packaging checks, and release smoke tests.
+- Added a K562 + TNF-alpha demo notebook (`demo/`) covering trajectories, tag-bias
+  filtering, single- and per-fate gene-dynamics fits, and figures.
 
 Benchmark datasets, comparator methods, gold standards, and benchmarking
 metrics for GRN and C2C remain outside ChronoPack for this release.

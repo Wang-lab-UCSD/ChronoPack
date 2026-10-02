@@ -321,3 +321,12 @@ def test_observed_gene_dynamics_scales_counts_to_the_reference_library_size(tmp_
         cp.tl.observed_gene_dynamics(tmp_path, ["g2"], lineage=2)
     with pytest.raises(cp._core._validation.ChronoPackError):
         cp.tl.observed_gene_dynamics(tmp_path, ["MISSING"])
+
+
+def test_prepare_tradeseq_inputs_accepts_counts_only_anndata(tmp_path):
+    adata = _adata()
+    adata.X = None  # counts only in a layer
+
+    paths = _gene_dynamics.prepare_tradeseq_inputs(adata, tmp_path)
+
+    assert pd.read_csv(paths["counts"], index_col=0).shape == (3, 2)

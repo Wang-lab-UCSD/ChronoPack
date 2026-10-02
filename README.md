@@ -51,6 +51,14 @@ Cluster-specific packed-environment deployment is documented separately in
 
 See `docs/user/quickstart.md` for a compact walkthrough of the intended API.
 
+## Demo
+
+`demo/K562_TNFa_demo.ipynb` runs the core workflow on one time course (K562
+cells after TNF-α): optimal-transport cell-state trajectories, filtering of
+time-tag-biased genes, and tradeSeq gene-dynamics fits for all cells and per
+fate, with figures. It takes about 20 minutes on 4 cores; see `demo/README.md`
+for its input files.
+
 ## Analyses
 
 `analyses/` holds the manuscript analysis notebooks (preprocessing through

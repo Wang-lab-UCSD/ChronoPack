@@ -30,7 +30,7 @@ def validate_adata(
             raise ChronoPackError(f"adata.obs[{time_key!r}] has invalid length.")
     if layer is not None and layer not in adata.layers:
         raise ChronoPackError(f"Missing adata.layers[{layer!r}].")
-    if adata.X.shape != (adata.n_obs, adata.n_vars):
+    if adata.X is not None and adata.X.shape != (adata.n_obs, adata.n_vars):
         raise ChronoPackError("adata.X shape is inconsistent with obs/var dimensions.")
     for key, layer_value in adata.layers.items():
         if layer_value.shape != (adata.n_obs, adata.n_vars):

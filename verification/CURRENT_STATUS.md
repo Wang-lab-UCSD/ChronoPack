@@ -1006,3 +1006,17 @@ Before making more changes, inspect the current `git status --short` carefully.
   THP1 CD69 from the temporary input folder). Checks: Slurm 934686 (K562; `cell_weights.csv`
   symlinked from `two_lineage_check_20260930`, counts identical to r9) and 934685 (THP1): no
   errors; promoted. Tests: 97 passed. Wheel: `dist_fix18`.
+
+## Update (2026-10-01): demo notebook
+
+- `demo/K562_TNFa_demo.ipynb` (K562 + TNF-alpha, from preprocessed data): WOT trajectories,
+  trajectory clusters, fate probabilities, soft memberships; tag-bias + technical + low-count
+  filtering; tradeSeq single-lineage and two-lineage fits on `N_GENES = 300` (most variable
+  remaining genes + 8 panel genes); volcano and NB-GAM curve figures. Inputs (`demo/data/`, not
+  in git) built by `demo/make_demo_data.py` from r9 `output/` (hvg 77 MB, counts 25 MB, neg-ctrl
+  2.9 MB). `CHRONOPACK_DEMO_DATA` / `CHRONOPACK_DEMO_WORK` override the folders.
+- `validate_adata` accepts `X=None` (counts-only AnnData in a layer).
+- Verified: Slurm 934708 (4 CPUs, `verification_runs/demo_check_20261001/`), 1013 s, no errors;
+  promoted. Per-gene association stats equal the genome-wide r9 single-lineage fit and the
+  two-lineage check fit (max rel. diff 1.5e-6). Trajectory clusters 3792/3065 vs r9 3793/3064
+  (corrected matrix stored as float32). Tests: 101 passed. Wheel: `dist_fix19`.

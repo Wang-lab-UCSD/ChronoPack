@@ -9,7 +9,8 @@ Initial package-ready ChronoPack release candidate.
 - Added Python-first gene-dynamics fitting orchestration backed by tradeSeq.
 - Added gene-expression trajectory characterization and dynamic-mode clustering.
 - Added R-backed plotting wrappers for gene trajectories and mode summaries.
-- Added cross-context mode conservation and mode-switching result objects.
+- Added cross-context comparison of dynamic modes (top-k mode recovery; mode
+  proportion, Sankey and chord plots).
 - Added GRN inference outputs through `chronopack.tl.grn`.
 - Added CellCommunication/C2C inference outputs through `chronopack.tl.c2c`.
 - Added lightweight tests, R-resource packaging checks, and release smoke tests.

@@ -48,8 +48,8 @@ because ligands with < 10 THP1 counts are not tested in the THP1 fit
 
 - `interactions`: primary LR pair score table with sender/receiver context,
   ligand, receptor, pair, `activity_sum` (early-window summed activity),
-  receptor detection `rec_det`, ligand `logp`, early-window point count, and
-  pair rank;
+  receptor detection `rec_det`, ligand `logp`, early-window point count,
+  `z_logp`, `z_activity_sum`, `composite_score` and pair rank;
 - `ligand_scores`: ligand-level aggregate priority table;
 - `temporal_profiles`: long-form LR activity and receiver-response profiles;
 - `candidate_interactions`: filtered LR catalog used for scoring;
@@ -86,6 +86,15 @@ The migrated workflow preserves the current method exactly:
     points for every pair);
   - combine with ligand temporal significance `-log10(p + 1e-3)`;
 - ligand aggregation and z-score composite ranking as in the notebook.
+
+Exception (2026-10-19): pairs were historically ranked by `logp`, then
+`activity_sum`. They are now ranked like the ligands, by
+`composite_score = z(logp) + z(activity_sum)` (population z-scores over all
+scored pairs; ties broken by `logp`, then activity), so `pair_rank`,
+`best_pair`, `best_pair_rank` and `current_ligand_rank` follow the composite.
+On the THP1 -> K562 data, 19 of the top 20 pairs are unchanged (18 pairs tie
+at the `logp` cap of 3 and keep their activity order); TNFSF9->TNFRSF9, whose
+early activity falls, drops from 19 to 31.
 
 The pair activity is now a sum (`activity_sum`) instead of the historical mean
 (`avg`). Every pair has the same number of window points, so the sum is the

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from chronopack._core import validate_adata
+from ._arrayexpress import download_arrayexpress_files
 from ._preprocessing import (
     TIME_GROUP_CATEGORIES,
     add_time_metadata,
@@ -12,6 +13,7 @@ from ._preprocessing import (
     map_time_to_group,
     read_time_tagged_dge,
     score_cell_cycle,
+    sum_dge_by_time_tag,
 )
 
 
@@ -31,6 +33,7 @@ def write_h5ad(adata, path, **kwargs):
 validate = validate_adata
 
 __all__ = [
+    "download_arrayexpress_files",
     "TIME_GROUP_CATEGORIES",
     "add_time_metadata",
     "filter_low_count_genes",
@@ -42,4 +45,5 @@ __all__ = [
     "score_cell_cycle",
     "validate",
     "write_h5ad",
+    "sum_dge_by_time_tag",
 ]

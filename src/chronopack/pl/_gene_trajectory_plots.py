@@ -510,6 +510,10 @@ def association_volcano(
     and ``None`` uses the ``y_break_quantile`` of the non-significant Walds.
     Points with ``qval_1 < fdr_thresh`` are coloured by sign when
     ``|log2FC| >= l2fc_thresh``; the ``top_labels`` genes by Wald are labelled.
+    Labels are stacked just above their points (``label_x_nudge`` /
+    ``label_y_offset_frac`` / ``label_min_vgap_frac``), then overlapping ones are
+    nudged apart with ggrepel (``stack_resolve_overlaps=False`` turns that off);
+    ``label_method="repel"`` lays all labels out with ggrepel instead.
     Extra keyword arguments (``x_lim``, ``y_lim``, ``y_lower_scale``,
     ``label_*``, ``axis_*_size``, ...) go to the R function. ``metadata`` holds
     the ``y_break`` used and, once drawn, the labelled genes.

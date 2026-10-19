@@ -365,8 +365,17 @@ def _topk_csr_rows(M_csr, k=100, eps=1e-12):
     return topk_csr_rows(M_csr, k=k, renorm=False, eps=eps)
 
 
-def CalculateTerminalFatesAcrossCells(adata, T, topk=200):
-    """Compute sparse terminal-cell fate distributions for every cell."""
+def CalculateTerminalFatesAcrossCells(adata, T, topk=None):
+    """Compute terminal-cell fate distributions for every cell.
+
+    Each cell's distribution over the cells of the last time point is propagated
+    backwards through the row-normalized forward transitions of ``T``, which equals
+    the corresponding rows of ``P^k`` when ``T`` links consecutive time points.
+    ``topk=None`` (default) keeps every terminal cell, so the distributions are
+    exact; an integer keeps only each cell's ``topk`` largest terminal-cell
+    probabilities at every step (renormalized), an approximation that sharpens
+    early cells' fate probabilities.
+    """
     assert sp.issparse(T), "T must be a scipy sparse matrix."
     assert T.shape == (adata.n_obs, adata.n_obs), "T must be n_cells x n_cells."
     T = T.tocsr().astype(np.float64).copy()
@@ -392,8 +401,11 @@ def CalculateTerminalFatesAcrossCells(adata, T, topk=200):
         inv = np.zeros_like(rs, dtype=np.float64)
         nz = rs > 0
         inv[nz] = 1.0 / (rs[nz] + 1e-15)
-        D_t = (sp.diags(inv, format="csr") @ A) @ D_future
-        D_t = topk_csr_rows(D_t.tocsr(), k=topk, renorm=True)
+        D_t = ((sp.diags(inv, format="csr") @ A) @ D_future).tocsr()
+        if topk is not None:
+            D_t = topk_csr_rows(D_t, k=topk, renorm=True)
+        else:
+            D_t.eliminate_zeros()
         zero_rows = np.where(np.asarray(D_t.sum(axis=1)).ravel() == 0)[0]
         if zero_rows.size:
             D_t = D_t.tolil()
@@ -445,12 +457,16 @@ def terminal_fate_trajectory_clustering(
     T,
     cluster_key=CELL_STATE_TRAJECTORY_CLUSTER_KEY,
     resolution=0.3,
-    terminal_topk=200,
+    terminal_topk=None,
     graph_topk=500,
     random_state=0,
     directed=False,
 ):
-    """Compute terminal fate distributions and Leiden trajectory clusters."""
+    """Compute terminal fate distributions and Leiden trajectory clusters.
+
+    ``terminal_topk`` is passed to :func:`CalculateTerminalFatesAcrossCells` as
+    ``topk``: ``None`` (default) for exact distributions.
+    """
     CalculateTerminalFatesAcrossCells(adata, T, topk=terminal_topk)
     S = cosine_topk_leiden_from_terminal_dist(
         adata,
@@ -476,12 +492,16 @@ def cluster_cells_to_trajectories(
     *,
     cluster_key=CELL_STATE_TRAJECTORY_CLUSTER_KEY,
     resolution=0.3,
-    terminal_topk=200,
+    terminal_topk=None,
     graph_topk=500,
     random_state=0,
     directed=False,
 ):
-    """Cluster cells into cell-state trajectories from a square cell-state graph."""
+    """Cluster cells into cell-state trajectories from a square cell-state graph.
+
+    ``terminal_topk=None`` (default) uses exact terminal-cell distributions; an
+    integer keeps each cell's ``terminal_topk`` largest at every step.
+    """
     if S is None:
         if OT_GRAPH_KEY not in adata.obsp:
             raise KeyError(f"Missing adata.obsp[{OT_GRAPH_KEY!r}]; pass S explicitly or run get_trajectories first.")

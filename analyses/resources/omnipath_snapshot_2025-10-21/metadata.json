@@ -1,0 +1,15 @@
+{
+  "retrieved": "2025-10-21",
+  "saved": "2026-10-19",
+  "organism": "human",
+  "omnipath_client_version": "1.0.12",
+  "queries": {
+    "signaling": "omnipath.interactions.OmniPath.get(genesymbols=1, directed=1, signed=1, organisms=organism)",
+    "transcriptional": "omnipath.interactions.Transcriptional.get(genesymbols=1, organisms=organism)"
+  },
+  "n_rows": {
+    "signaling": 72154,
+    "transcriptional": 131398
+  },
+  "note": "Saved from the omnipath client cache (~/.cache/omnipathdb, files dated 2025-10-21) on the cluster used for the manuscript analyses; these are the tables behind the r9 GRN results."
+}

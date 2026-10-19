@@ -86,6 +86,32 @@ def test_terminal_fate_probabilities_are_cell_aligned_and_normalized():
     np.testing.assert_allclose(F[3], [0.0, 1.0])
 
 
+def test_terminal_cell_distributions_are_exact_by_default():
+    rng = np.random.default_rng(0)
+    sizes = [3, 4, 5]
+    time = np.repeat([0, 1, 2], sizes)
+    n = time.size
+    P = np.zeros((n, n))
+    starts = np.cumsum([0] + sizes)
+    for t in range(2):
+        rows, cols = slice(starts[t], starts[t + 1]), slice(starts[t + 1], starts[t + 2])
+        block = rng.random((sizes[t], sizes[t + 1]))
+        P[rows, cols] = block / block.sum(axis=1, keepdims=True)
+    adata = AnnData(X=np.zeros((n, 1)), obs=pd.DataFrame({"time": time}, index=[f"c{i}" for i in range(n)]),
+                    var=pd.DataFrame(index=["g0"]))
+
+    D = CalculateTerminalFatesAcrossCells(adata, sp.csr_matrix(P)).toarray()
+
+    last = slice(starts[2], starts[3])
+    np.testing.assert_allclose(D[: starts[1]], (P @ P)[: starts[1], last], atol=1e-6)
+    np.testing.assert_allclose(D[starts[1]: starts[2]], P[starts[1]: starts[2], last], atol=1e-6)
+    np.testing.assert_allclose(D[last], np.eye(sizes[2]), atol=1e-6)
+
+    D_top = CalculateTerminalFatesAcrossCells(adata, sp.csr_matrix(P), topk=2).toarray()
+    assert (np.count_nonzero(D_top, axis=1) <= 2).all()
+    assert not np.allclose(D_top, D)
+
+
 def test_cell_state_trajectory_result_supports_legacy_mapping_access():
     matrix = sp.eye(2, format="csr")
     result = CellStateTrajectoryResult(

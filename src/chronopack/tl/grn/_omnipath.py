@@ -47,13 +47,12 @@ class OmniPathTfGraph:
     merged_interactions: pd.DataFrame
 
 
-def load_omnipath_tf_resources(
-    *,
-    human_tf_path: str | Path,
-    ligand_receptor_path: str | Path,
-    organism: str = "human",
-) -> OmniPathTfResources:
-    """Load OmniPath signaling/TF tables and local TF/LR reference files."""
+SNAPSHOT_FILES = {"signaling": "signaling.csv.gz", "transcriptional": "transcriptional.csv.gz"}
+SNAPSHOT_METADATA = "metadata.json"
+
+
+def _download_omnipath_tables(organism: str = "human") -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Signed directed signaling and transcriptional interactions from the OmniPath web service (or the client's cache)."""
 
     import omnipath as op
 
@@ -67,6 +66,79 @@ def load_omnipath_tf_resources(
         genesymbols=1,
         organisms=organism,
     )
+    return signaling, transcriptional
+
+
+def save_omnipath_snapshot(
+    path: str | Path,
+    *,
+    organism: str = "human",
+    retrieved: str | None = None,
+    note: str | None = None,
+) -> Path:
+    """Save the OmniPath tables used by :func:`rank_regulators` to a snapshot folder.
+
+    OmniPath is updated over time, so TF rankings computed from a live download change slightly
+    between runs. The snapshot (``signaling.csv.gz``, ``transcriptional.csv.gz`` and
+    ``metadata.json``) can be passed as ``omnipath_snapshot`` to :func:`rank_regulators` to
+    reproduce a ranking exactly. The tables come from the ``omnipath`` client, which may return
+    its local cache rather than a fresh download; ``retrieved`` (default: today) and ``note``
+    record where they came from.
+    """
+    import datetime
+    import json
+    import omnipath as op
+
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    tables = dict(zip(("signaling", "transcriptional"), _download_omnipath_tables(organism)))
+    for name, table in tables.items():
+        table.to_csv(path / SNAPSHOT_FILES[name], index=False)
+    metadata = {
+        "retrieved": retrieved or datetime.date.today().isoformat(),
+        "saved": datetime.date.today().isoformat(),
+        "organism": organism,
+        "omnipath_client_version": getattr(op, "__version__", None),
+        "queries": {
+            "signaling": "omnipath.interactions.OmniPath.get(genesymbols=1, directed=1, signed=1, organisms=organism)",
+            "transcriptional": "omnipath.interactions.Transcriptional.get(genesymbols=1, organisms=organism)",
+        },
+        "n_rows": {name: int(len(table)) for name, table in tables.items()},
+        "note": note,
+    }
+    (path / SNAPSHOT_METADATA).write_text(json.dumps(metadata, indent=2) + "\n")
+    return path
+
+
+def read_omnipath_snapshot(path: str | Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Signaling and transcriptional tables of a snapshot written by :func:`save_omnipath_snapshot`."""
+
+    path = Path(path)
+    missing = [f for f in SNAPSHOT_FILES.values() if not (path / f).exists()]
+    if missing:
+        raise FileNotFoundError(f"OmniPath snapshot {path} is missing {missing}.")
+    # Only empty fields are missing values, so gene symbols such as "NA" stay strings.
+    read = lambda f: pd.read_csv(path / f, keep_default_na=False, na_values=[""], low_memory=False)
+    return read(SNAPSHOT_FILES["signaling"]), read(SNAPSHOT_FILES["transcriptional"])
+
+
+def load_omnipath_tf_resources(
+    *,
+    human_tf_path: str | Path,
+    ligand_receptor_path: str | Path,
+    organism: str = "human",
+    omnipath_snapshot: str | Path | None = None,
+) -> OmniPathTfResources:
+    """Load OmniPath signaling/TF tables and local TF/LR reference files.
+
+    The OmniPath tables are downloaded (or taken from the ``omnipath`` client's cache) unless
+    ``omnipath_snapshot`` names a folder written by :func:`save_omnipath_snapshot`.
+    """
+
+    if omnipath_snapshot is None:
+        signaling, transcriptional = _download_omnipath_tables(organism)
+    else:
+        signaling, transcriptional = read_omnipath_snapshot(omnipath_snapshot)
     ligand_receptor = pd.read_csv(ligand_receptor_path, index_col=0)
     human_tfs = set(pd.read_csv(human_tf_path, header=None).iloc[:, 0].values)
     return OmniPathTfResources(

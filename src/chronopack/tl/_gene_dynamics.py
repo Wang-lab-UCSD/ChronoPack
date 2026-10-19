@@ -36,6 +36,9 @@ def load_negative_control_logcpm(path):
 
     with open(path, "rb") as handle:
         counts = pickle.load(handle)
+    # One float block: a table summed from libraries with different genes can hold
+    # thousands of mixed int/float blocks, which makes every later column operation slow.
+    counts = pd.DataFrame(counts.to_numpy(dtype=float), index=counts.index, columns=counts.columns)
     counts_sum = counts.sum(axis=1).replace(0, np.nan)
     cpm = counts.div(counts_sum, axis=0) * 1e6
     logcpm = np.log1p(cpm)
@@ -169,9 +172,11 @@ def compute_smooth_correlations(
         raise ValueError("No timepoints found in either logcpm or logcpm_ref index.")
     t_float, _ = _to_float_time(times)
     results = []
-    for gene in logcpm_ref.columns.intersection(logcpm.columns):
-        y_ref = logcpm_ref.reindex(times)[gene].astype(float).to_numpy()
-        y_exp = logcpm.reindex(times)[gene].astype(float).to_numpy()
+    genes = logcpm_ref.columns.intersection(logcpm.columns)
+    # Align both tables to the shared time points once, as float arrays (genes x times).
+    ref_aligned = logcpm_ref.reindex(index=times, columns=genes).to_numpy(dtype=float).T
+    exp_aligned = logcpm.reindex(index=times, columns=genes).to_numpy(dtype=float).T
+    for gene, y_ref, y_exp in zip(genes, ref_aligned, exp_aligned):
         y_ref_s = smooth_series(y_ref, t_float, method=method, **method_kwargs)
         y_exp_s = smooth_series(y_exp, t_float, method=method, **method_kwargs)
         y_ref_resid = y_ref - y_ref_s

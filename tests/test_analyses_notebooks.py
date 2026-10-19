@@ -13,7 +13,10 @@ TRADESEQ_FITS = [
     "thp1-k562-lps.hg38.rep/04_TradeSeqFits.K562.ipynb",
     "thp1-k562-lps.hg38.rep/04_TradeSeqFits.THP1.ipynb",
 ]
-GENE_CLUSTERING = ["gene_clustering/01_GeneTrajectoryClustering.ipynb"]
+GENE_CLUSTERING = [
+    "gene_clustering/01_GeneTrajectoryClustering.ipynb",
+    "gene_clustering/01_GeneTrajectoryClustering.pvalue_only.ipynb",
+]
 NOTEBOOKS = PREPROCESS + GET_TRAJECTORIES + PREPARE
 VISUALIZATION = ["k562-tnfa.hg38.rep/05_Visualization.ipynb", "thp1-k562-lps.hg38.rep/05_Visualization.ipynb"]
 

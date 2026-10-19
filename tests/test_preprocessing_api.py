@@ -58,3 +58,15 @@ def test_standard_scanpy_wrappers_are_not_public_io_api():
     assert not hasattr(cp.io, "filter_cells_by_qc")
     assert not hasattr(cp.io, "initialize_expression_layers")
     assert not hasattr(cp.io, "validate_preprocessed_adata")
+
+
+def test_sum_dge_by_time_tag_sums_counts_per_time_tag(tmp_path):
+    path = tmp_path / "N706.dge.time_tags.csv.gz"
+    pd.DataFrame(
+        {"FINAL TIME TAG": [2, 1, 2], "COUNTS": [9, 9, 9], "G1": [1, 2, 3], "G2": [0, 5, 1]},
+        index=pd.Index(["a", "b", "c"], name="cell"),
+    ).to_csv(path)
+
+    expected = pd.DataFrame({"G1": [2, 4], "G2": [5, 1]}, index=pd.Index([1, 2], name="time_tag"))
+    for chunksize in (1000, 2, 1):  # one chunk, and sums accumulated across chunks
+        pd.testing.assert_frame_equal(cp.io.sum_dge_by_time_tag(path, chunksize=chunksize), expected)

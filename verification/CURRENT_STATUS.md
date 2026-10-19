@@ -1031,3 +1031,83 @@ Before making more changes, inspect the current `git status --short` carefully.
   its two-lineage table now has all 300 genes (the previous run had 299; the R helper drops genes whose
   Wald statistics are all NA, so most likely one fit failed). Tests: 102 passed.
   Wheel: `dist_fix20`.
+
+## Update (2026-10-05): volcano labels and NB-GAM styling
+
+- `cp.pl.association_volcano`: labels placed with ggrepel by default (`label_method="repel"`;
+  labels avoid each other and all points; nudge capped at `x_lim` so genes at the limit keep
+  their label; seed 1). `label_method="stack"` keeps the old placement. K562 05 call drops the
+  stack-only `label_*` arguments.
+- `cp.pl.gene_dynamics_curves`: sizes measured from the original ggplot `plot_tradeSeq_gene`
+  (4.8 x 3.6 in panels; band alpha 0.35 since ggplot's `alpha` replaces the `adjustcolor`
+  alpha; line 3.6 pt; points 3.0 pt with 0.7 pt outline; mean circles 9.4 pt, 1.3 pt ring;
+  text 14/16/16.8; grid 1.4 pt grey88; no x margins; pretty y ticks; legend on the right).
+- Re-executed and promoted: K562 05 (Slurm 934929), THP1 05 (934930), demo (934931). Tests:
+  103 passed. Wheel: `dist_fix21`.
+
+## Update (2026-10-05, later): square NB-GAM panels; volcano labels back to stacked
+
+- `cp.pl.gene_dynamics_curves`: `box_aspect=1.0` (square plotting areas, equal x/y axis
+  lengths), `panel_size=(4.2, 4.0)`.
+- `cp.pl.association_volcano`: default `label_method="stack"` again (labels just above their
+  points; defaults now the K562 values `label_x_nudge=0.05`, `label_y_offset_frac=0.05`,
+  `label_min_vgap_frac=0.012`), followed by a weak ggrepel pass from those positions that only
+  separates overlapping labels (`stack_resolve_overlaps=True`, box padding 0.12, force 1).
+  `label_method="repel"` remains available. K562 05 call restores its original label args.
+- Re-executed and promoted: K562 05 (Slurm 934938), THP1 05 (934939), demo (934941). Tests:
+  104 passed. Wheel: `dist_fix22`.
+
+## Update (2026-10-05): THP-1 + K562 + LPS OT-UMAP vs manuscript
+
+- Investigation (`verification_runs/umap_seed_test_20261005/`): cells, `counts`/`log1p`, `X_pca`,
+  `ot_graph` (1e-13), and the UMAP call/parameters all equal the manuscript run; the manuscript cell
+  run verbatim today reproduces r9's layout exactly (also from the original January object), so the
+  layout difference is the software environment (now scanpy 1.11.5, umap-learn 0.5.12, numba 0.67.0,
+  pynndescent 0.6.0). UMAP is deterministic across nodes. The graph has two components (K562 3,128,
+  THP-1 787; 0 cross edges); a THP-1-only UMAP is no closer (seed 1: 0.127 vs joint 0.142). 30-seed
+  grid: `umap_30_seeds.png` (the `.placeholder_X` version used a zero X and is superseded).
+- `05_Visualization`: after the per-cell-type rotation, THP-1 is shifted vertically so its median
+  height relative to K562 matches the manuscript (0.015 K562 heights; shift -4.94). Re-executed
+  (Slurm 934949) and promoted.
+
+## Update (2026-10-05): C2C overlay aspect
+
+- `cp.pl.c2c.plot_pair_overlay(box_aspect=...)` fixes the plotting area's height/width. C2C
+  notebook: `figsize=(4, 3.6)`, `box_aspect=390 / 445` (axes 933 x 818 px at 300 dpi). Re-executed
+  in `verification_runs/c2c_overlay_aspect_20261005/` (r9 THP1+LPS data symlinked, own c2c output
+  folder; Slurm 934950); result CSVs byte-identical to r9; promoted. Wheel: `dist_fix23`.
+- 2026-10-06: C2C notebook also saves each figure as PDF (`chronopack_lr_pair_scores`,
+  `TNF_TNFRSF1A_NFKBIA_overlay`, `selected_gene_expression_over_time`). Re-executed (Slurm
+  935201, same check folder); result CSVs still byte-identical to r9; promoted.
+
+## Update (2026-10-09): gene clustering variant, responsive = p < 0.05 only
+
+- New `analyses/gene_clustering/01_GeneTrajectoryClustering.pvalue_only.ipynb` (optional runner
+  stage `GeneClusteringPvalueOnly`, README, notebook tests): identical to the main notebook except
+  `responsive = traj[pvalue_1 < 0.05]` (no |peak log2FC| >= 0.5 cut) and outputs in
+  `gene_clustering/pvalue_only/`. The K562a broad-mode medoid panel keeps its own > 0.5 filter.
+- Verified (Slurm 935501, `verification_runs/gene_clustering_pvalue_only_20261009/`, r9 data):
+  no errors, 17 images; cluster assignments identical to the main notebook. Grouped mode ranges:
+  impulse-up 14-23%, trend-up 24-36%, trend-down 46-51%, transient-down 3-6% (main notebook:
+  13-25, 24-41, 44-52, 2-6). Promoted.
+
+## Update (2026-10-10): negative controls for the time-tag-bias filter
+
+- Bulk control provenance: `k562_neg-ctrl_mtx-agg.pkl` = N706 "Bulk K562 Control 600 Cells"
+  (`~/projects/chrono_seq/analyses/old/k562-TNFa.hg38/...time_tags.csv.gz`), summed per FINAL TIME
+  TAG; code in chrono_seq `thp1-k562-lps.hg38.rep/notebooks/PrepareForTradeSeq.ipynb` cells 4-5
+  (commented). Rebuilt byte-identically (`verification_runs/negctrl_provenance_20261010/`).
+- Fix: `load_negative_control_logcpm` casts the control to one float block and
+  `compute_smooth_correlations` aligns both tables once before the gene loop. A control summed
+  from libraries with different genes (29,825 mixed int/float blocks) made each per-gene reindex
+  take 650 ms (~3.6 h per pass); now ~2 min. Results unchanged (bulk run reproduces r9's 1,025
+  K562a genes and all three tested-gene sets). Wheel: `dist_fix24`.
+- Single-cell reverse-time control (qc N701-N704, 9,387 barcodes, paired by FINAL TIME TAG) vs
+  bulk, genes reaching tradeSeq (`verification_runs/negctrl_sc_vs_bulk_20261010/outputs/`):
+  K562a excluded 753 -> 1,075 (253 shared, Jaccard 0.16; 822 would drop incl. 219 screen-significant,
+  500 would return); K562b 563 -> 838 (173 shared, 0.14; 665 drop incl. 127 significant, 390 return);
+  THP1 262 -> 309 (38 shared, 0.07; 271 drop incl. 13 significant, 224 return). Reversed-index
+  pairing agrees even less (Jaccard 0.02-0.05) and flags fewer genes.
+- Observations and options (bulk vs single-cell control; "flagged by both" as the leading
+  candidate; no change made) are written up in
+  `docs/developer/notes/time_tag_bias_negative_controls.md`.

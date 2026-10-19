@@ -36,6 +36,27 @@ def test_score_pairs_ranks_pairs_and_ligands():
     assert {"composite_score", "zscore_composite_rank"}.issubset(ligand_scores.columns)
 
 
+def test_score_pairs_ranks_pairs_by_zscore_composite():
+    t = [0.0, 15.0, 30.0]
+    activities = {
+        ("A", "RA"): pd.Series([0.0, 0.0, -1.0], index=t),  # most significant ligand, falling activity
+        ("B", "RB"): pd.Series([0.0, 2.0, 4.0], index=t),  # slightly less significant, strongly rising
+        ("C", "RC"): pd.Series([0.0, 0.0, 0.0], index=t),
+    }
+    association = pd.DataFrame({"pvalue_1": [1e-6, 1e-3, 0.5]}, index=["A", "B", "C"])
+    detection = pd.Series({"RA": 0.5, "RB": 0.5, "RC": 0.5})
+
+    pair_scores, _ = _score_pairs(activities, association, detection, (0.0, 45.0))
+
+    expected = zscore(pair_scores["logp"]) + zscore(pair_scores["activity_sum"])
+    assert np.allclose(pair_scores["composite_score"], expected)
+    assert np.allclose(pair_scores["composite_score"], pair_scores["z_logp"] + pair_scores["z_activity_sum"])
+    # B outranks A despite A's lower p-value (ranking by logp first would put A on top)
+    assert pair_scores["pair"].tolist() == ["B->RB", "A->RA", "C->RC"]
+    assert pair_scores["pair_rank"].tolist() == [1, 2, 3]
+    assert pair_scores["composite_score"].is_monotonic_decreasing
+
+
 def _tiny_c2c_adata():
     obs = pd.DataFrame(
         {

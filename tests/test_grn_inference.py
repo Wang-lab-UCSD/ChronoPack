@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import numpy as np
@@ -140,3 +141,37 @@ def test_infer_breaks_equal_target_scores_by_wald_statistic():
     edges = cp.tl.grn.infer(targets, tfs, valid_targets=["LOW", "HIGH", "MID"]).edges
 
     assert edges.sort_values("rank")["target"].tolist() == ["HIGH", "MID", "LOW"]
+
+
+def test_omnipath_snapshot_roundtrip_is_used_instead_of_download(tmp_path, monkeypatch):
+    from chronopack.tl.grn import _omnipath
+
+    signaling = pd.DataFrame(
+        {
+            "source_genesymbol": ["NA", "B"],  # "NA" is a gene symbol, not a missing value
+            "target_genesymbol": ["B", "C"],
+            "is_directed": [True, True],
+            "is_stimulation": [True, False],
+            "is_inhibition": [False, True],
+            "sources": ["SIGNOR", "SIGNOR;Reactome"],
+            "n_sources": [1, 2],
+            "references": [None, "SIGNOR:1"],
+        }
+    )
+    transcriptional = pd.DataFrame({"source_genesymbol": ["C", "C"], "target_genesymbol": ["X", "Y"]})
+    monkeypatch.setattr(_omnipath, "_download_omnipath_tables", lambda organism="human": (signaling, transcriptional))
+    snap = cp.tl.grn.save_omnipath_snapshot(tmp_path / "snap", retrieved="2025-10-21", note="test")
+
+    def no_download(organism="human"):
+        raise AssertionError("snapshot should be read instead of downloading OmniPath")
+
+    monkeypatch.setattr(_omnipath, "_download_omnipath_tables", no_download)
+    tf_path, lr_path = tmp_path / "tfs.txt", tmp_path / "lr.csv"
+    tf_path.write_text("C\n")
+    pd.DataFrame({"ligand": ["L"], "receptor": ["R"]}).to_csv(lr_path)
+    res = _omnipath.load_omnipath_tf_resources(human_tf_path=tf_path, ligand_receptor_path=lr_path, omnipath_snapshot=snap)
+
+    pd.testing.assert_frame_equal(res.signaling, signaling)
+    pd.testing.assert_frame_equal(res.transcriptional, transcriptional)
+    meta = json.loads((snap / "metadata.json").read_text())
+    assert meta["retrieved"] == "2025-10-21" and meta["n_rows"] == {"signaling": 2, "transcriptional": 2}

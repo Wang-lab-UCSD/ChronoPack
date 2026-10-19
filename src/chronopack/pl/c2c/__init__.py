@@ -56,7 +56,7 @@ def interaction_scatter(
         alpha=0.96,
         zorder=2,
     )
-    labeled = df.loc[label_mask].sort_values(["logp", "activity_sum"], ascending=[False, False])
+    labeled = df.loc[label_mask].sort_values("pair_rank")
     for i, (_, row) in enumerate(labeled.iterrows()):
         ax.annotate(
             str(row["pair"]).replace("->", r"$\rightarrow$"),

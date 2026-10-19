@@ -483,6 +483,13 @@ def _gene_use_raw(adata, gene):
     raise ValueError(f"{gene} not found in adata.var_names or adata.raw.var_names")
 
 
+def _padded_range(values, pad_frac=0.05):
+    """(min, max) of ``values`` widened by ``pad_frac`` of the range on each side."""
+    lo, hi = float(np.min(values)), float(np.max(values))
+    pad = pad_frac * (hi - lo) if hi > lo else 0.05
+    return lo - pad, hi + pad
+
+
 def _style_fate_scatter_ax(
     ax, gene, x, y, color, dot_size=110, x_label="", y_label="Log Expression",
     font_title=28, font_tick=22, font_annot=24, xlim=(0, 1), xticks=(0, 0.5, 1.0),
@@ -509,9 +516,16 @@ def _style_fate_scatter_ax(
     ax.set_title(gene, fontsize=font_title, fontweight="bold", pad=8)
     ax.set_xlabel(x_label, fontsize=font_title)
     ax.set_ylabel(y_label, fontsize=font_title)
+    if isinstance(xlim, str) and xlim == "auto":
+        xlim = _padded_range(x[np.isfinite(x)])
     ax.set_xlim(*xlim)
-    ax.set_xticks(list(xticks))
-    ax.set_xticklabels([f"{value:g}" for value in xticks])
+    if isinstance(xticks, str) and xticks == "auto":
+        from matplotlib.ticker import MaxNLocator
+
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=5, steps=[1, 2, 2.5, 5, 10]))
+    else:
+        ax.set_xticks(list(xticks))
+        ax.set_xticklabels([f"{value:g}" for value in xticks])
     ax.grid(color="0.92", linewidth=1)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
@@ -595,7 +609,9 @@ def two_gene_fate_scatter(
 
     Top row: expression (``.raw``, else the first of ``layer_preference``, else
     ``.X``) of each gene versus ``obs[fate_key]`` for cells in ``early_bin``
-    (default: the smallest ``obs[time_key]``), with the Spearman r. Bottom
+    (default: the smallest ``obs[time_key]``), with the Spearman r.
+    ``xlim="auto"`` fits the x axis to the plotted fate values (5% padding) and
+    ``xticks="auto"`` places round ticks within it. Bottom
     row: each gene on ``embedding_basis`` (``.X``, vmin 0, vmax per gene from
     ``expression_vmax``, default ``"p99"``), colour bars on the left.
     ``cmap`` may be one name (``"volcano"`` included), a pair or a dict by gene.

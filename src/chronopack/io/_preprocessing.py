@@ -98,6 +98,29 @@ def read_time_tagged_dge(
     return adata
 
 
+def sum_dge_by_time_tag(
+    path: str | Path,
+    *,
+    metadata_cols: Sequence[str] = (TIME_TAG_KEY, "COUNTS"),
+    time_col: str = TIME_TAG_KEY,
+    chunksize: int = 1000,
+) -> pd.DataFrame:
+    """Sum the counts of one time-tagged DGE table per time tag.
+
+    Returns a time tags x genes count table (index ``time_tag``), e.g. the bulk K562
+    negative control that :func:`chronopack.tl.identify_tag_bias_candidates` reads
+    (pickled, as ``k562_neg-ctrl_mtx-agg.pkl``). The table is read ``chunksize`` cells
+    at a time, so large dense tables (N706: 35,030 barcodes x 27,086 genes) fit in memory.
+    """
+    sums = []
+    for chunk in pd.read_csv(path, sep=",", index_col=0, chunksize=chunksize):
+        missing = [col for col in metadata_cols if col not in chunk.columns]
+        if missing:
+            raise ChronoPackError(f"{path} is missing metadata columns: {missing}.")
+        sums.append(chunk.drop(columns=list(metadata_cols)).groupby(chunk[time_col].rename("time_tag")).sum())
+    return pd.concat(sums).groupby(level="time_tag").sum()
+
+
 def add_time_metadata(
     adata,
     *,
@@ -215,4 +238,5 @@ __all__ = [
     "map_time_to_group",
     "read_time_tagged_dge",
     "score_cell_cycle",
+    "sum_dge_by_time_tag",
 ]

@@ -5970,10 +5970,21 @@ plot_association_volcano <- function(
   y_break           = NULL,      # break on Wald (pre-log); NULL = auto from non-sig
   y_break_quantile  = 0.95,      # quantile of non-sig Wald to set break if NULL
   y_lower_scale     = 0.35,      # slope below break (<=1; 1 = no compression)
-  # --- label placement without ggrepel ---
-  label_x_nudge       = 0.8,
-  label_y_offset_frac = 0.015,
-  label_min_vgap_frac = 0.018,
+  # --- label placement: "stack" (labels stacked vertically near their points, then
+  # overlaps nudged apart with ggrepel) or "repel" (ggrepel layout from scratch) ---
+  label_method        = c("stack", "repel"),
+  stack_resolve_overlaps = TRUE,   # "stack": ggrepel pass starting from the stacked positions
+  stack_box_padding   = 0.12,
+  stack_force         = 1,
+  repel_box_padding   = 0.6,
+  repel_point_padding = 0.15,
+  repel_force         = 4,
+  repel_nudge_x       = 0.25,
+  repel_seed          = 1,
+  # --- "stack" placement ---
+  label_x_nudge       = 0.05,
+  label_y_offset_frac = 0.05,
+  label_min_vgap_frac = 0.012,
   label_segment_alpha = 0.6,
   label_segment_size  = 0.4,
   # --- how to choose top-k labels ---
@@ -5982,6 +5993,7 @@ plot_association_volcano <- function(
   save_prefix       = NULL
 ) {
   label_rank_by <- match.arg(label_rank_by)
+  label_method <- match.arg(label_method)
 
   stopifnot(all(c("signedMaxLog2FC_start","qval_1","waldStat_1") %in% names(asso_df)))
   df <- asso_df
@@ -6136,8 +6148,38 @@ plot_association_volcano <- function(
       plot.margin        = ggplot2::margin(14, 18, 14, 16)
     )
 
+  # ---- ggrepel labels: kept off each other and off every point (unlabelled points
+  # are passed with empty labels so the labels avoid them too) ----
+  if (label_method == "repel" && nrow(label_df) > 0) {
+    if (!requireNamespace("ggrepel", quietly = TRUE)) stop("label_method = 'repel' needs the ggrepel package.")
+    rep_df <- df[is.finite(df$x_plot) & is.finite(df$y_scaled), , drop = FALSE]
+    sgn <- ifelse(rep_df$x_plot < 0, -1, 1)
+    x_rng <- if (!is.null(x_lim) && length(x_lim) == 2 && all(is.finite(x_lim))) sort(x_lim) else c(NA, NA)
+    # Nudge labels outward, but not past the x limits (a label starting outside the
+    # scale range would be dropped).
+    x_to <- rep_df$x_plot + ifelse(rep_df$label != "", sgn * repel_nudge_x, 0)
+    if (all(is.finite(x_rng))) x_to <- pmin(pmax(x_to, x_rng[1]), x_rng[2])
+    p <- p + ggrepel::geom_label_repel(
+      data = rep_df,
+      ggplot2::aes(x = x_plot, y = y_scaled, label = label),
+      inherit.aes = FALSE,
+      size = label_size,
+      label.size = 0.15,
+      label.padding = ggplot2::unit(0.10, "lines"),
+      fill = scales::alpha("white", 0.75), color = "black",
+      box.padding = ggplot2::unit(repel_box_padding, "lines"),
+      point.padding = ggplot2::unit(repel_point_padding, "lines"),
+      force = repel_force,
+      nudge_x = x_to - rep_df$x_plot,
+      min.segment.length = 0,
+      segment.colour = "#555555", segment.alpha = label_segment_alpha, segment.size = label_segment_size,
+      max.overlaps = Inf, max.time = 5, max.iter = 1e5,
+      seed = repel_seed
+    )
+  }
+
   # ---- dependency-free label "repel": above + spaced vertically ----
-  if (nrow(label_df) > 0) {
+  if (label_method == "stack" && nrow(label_df) > 0) {
     label_df$y_scaled <- ps(log10(label_df$y_plot))
 
     y_rng   <- diff(range(y_limits_scaled[is.finite(y_limits_scaled)]))
@@ -6167,6 +6209,26 @@ plot_association_volcano <- function(
       label_df$x_lab <- pmin(pmax(label_df$x_lab, min(x_lim)), max(x_lim))
     }
 
+    if (isTRUE(stack_resolve_overlaps) && requireNamespace("ggrepel", quietly = TRUE)) {
+      # Start each label at its stacked position (nudge from its point) and let ggrepel
+      # push apart only the labels that overlap; springs pull labels back to that start.
+      p <- p + ggrepel::geom_label_repel(
+        data = label_df,
+        ggplot2::aes(x = x_plot, y = y_scaled, label = label),
+        inherit.aes = FALSE,
+        nudge_x = label_df$x_lab - label_df$x_plot,
+        nudge_y = label_df$y_lab - label_df$y_scaled,
+        size = label_size, label.size = 0.15,
+        label.padding = ggplot2::unit(0.10, "lines"),
+        fill = scales::alpha("white", 0.75), color = "black",
+        box.padding = ggplot2::unit(stack_box_padding, "lines"),
+        point.padding = ggplot2::unit(0, "lines"),
+        force = stack_force, force_pull = 1,
+        min.segment.length = 0,
+        segment.colour = "#555555", segment.alpha = label_segment_alpha, segment.size = label_segment_size,
+        max.overlaps = Inf, seed = repel_seed
+      )
+    } else {
     # leader lines + labels
     p <- p + ggplot2::geom_segment(
       data = label_df,
@@ -6181,6 +6243,7 @@ plot_association_volcano <- function(
       label.padding = ggplot2::unit(0.10, "lines"),
       fill = scales::alpha("white", 0.75), color = "black"
     )
+    }
   }
 
   if (!is.null(save_prefix)) {
@@ -6197,13 +6260,14 @@ chronopack_plot_association_volcano_csv <- function(data_path, output, width = 7
   asso_df$row_id <- NULL
   p <- plot_association_volcano(asso_df, ...)
   chronopack_save_plot(p, output, width = width, height = height, dpi = dpi)
-  label_layers <- Filter(function(l) inherits(l$geom, "GeomLabel"), p$layers)
+  label_layers <- Filter(function(l) inherits(l$geom, c("GeomLabel", "GeomLabelRepel")), p$layers)
   cols <- c("signedMaxLog2FC_start", "waldStat_1", "qval_1")
   if (!length(label_layers)) {
     return(data.frame(gene = character(), signedMaxLog2FC_start = numeric(), waldStat_1 = numeric(),
                       qval_1 = numeric(), side = character()))
   }
   d <- label_layers[[1]]$data
+  d <- d[d$label != "", , drop = FALSE]
   d <- d[order(d$waldStat_1, decreasing = TRUE), , drop = FALSE]
   data.frame(gene = d$label, d[, cols, drop = FALSE], side = as.character(d$side), row.names = NULL)
 }

@@ -12,7 +12,15 @@ All three functions work on one context per call (2026-09-30); a workflow
 runs them once for K562 + TNF-α and once for THP1 + LPS.
 
 - `cp.tl.grn.rank_regulators(source=..., is_ligand=..., human_tf_path=..., ligand_receptor_path=...)`
-  - Loads OmniPath and CellChat-style ligand-receptor resources.
+  - Loads OmniPath and CellChat-style ligand-receptor resources. OmniPath is
+    downloaded through the `omnipath` client (which may return its local
+    cache) unless `omnipath_snapshot=` names a folder written by
+    `cp.tl.grn.save_omnipath_snapshot()`; scores from a live download change
+    slightly as OmniPath is updated (2026-10-19: RELA 0.727104 with the
+    2025-10-21 tables vs 0.727092 with that day's download; same top 10 TFs).
+    The analyses use `analyses/resources/omnipath_snapshot_2025-10-21/`, which
+    reproduces the r9 TF rankings to 1e-16
+    (`verification_runs/grn_omnipath_version_20261019/`).
   - Builds the signed OmniPath TF graph.
   - Ranks TFs downstream of one signal with the existing signed absorbing
     diffusion workflow.
@@ -89,7 +97,8 @@ paths for:
 
 OmniPath, CellChat-style ligand-receptor resources, Taiji/CIS-BP/contact priors
 from older research workflows remain external resources unless explicitly
-packaged later.
+packaged later. The analyses keep a dated OmniPath snapshot (signaling and
+transcriptional tables, about 4 MB) in `analyses/resources/`.
 
 ## Benchmark Boundary
 

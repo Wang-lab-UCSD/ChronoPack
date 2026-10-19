@@ -22,8 +22,13 @@ def plot_pair_overlay(
     figsize=(5, 2),
     dpi: int = 300,
     title: Optional[str] = None,
+    box_aspect: Optional[float] = None,
 ):
-    """Overlay one LR activity curve with its receiver response curve."""
+    """Overlay one LR activity curve with its receiver response curve.
+
+    ``box_aspect`` fixes the plotting area's height / width (e.g. ``390 / 445``);
+    ``None`` lets it fill ``figsize``.
+    """
     import matplotlib.pyplot as plt
     if pair not in pair_series:
         raise KeyError(f"{pair} not found in pair_series")
@@ -70,6 +75,8 @@ def plot_pair_overlay(
     ax.grid(alpha=0.15)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+    if box_aspect is not None:
+        ax.set_box_aspect(box_aspect)
     plt.tight_layout()
     return fig, ax
 

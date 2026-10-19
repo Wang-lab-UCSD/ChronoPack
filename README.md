@@ -64,7 +64,9 @@ for its input files.
 `analyses/` holds the manuscript analysis notebooks (preprocessing through
 gene-trajectory clustering, cell-cell communication and GRN inference), each
 using the installed package and keeping the outputs of the latest verified
-run. `analyses/README.md` describes the data folder and run order.
+run. `analyses/README.md` describes the data folder and run order, and lists
+the data sources: the ChronoSeq tables come from ArrayExpress (E-MTAB-15894,
+E-MTAB-15928 and E-MTAB-15966), which the notebooks download when missing.
 `verification/` holds the scripts that re-run those notebooks stage by stage
 on the cluster and compare the results with a reference run.
 

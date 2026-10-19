@@ -113,6 +113,13 @@ def test_cell_trajectory_figures_render_and_save(tmp_path):
     with pytest.raises(ValueError, match="not found"):
         ctp.two_gene_fate_scatter(adata, ("g0", "missing"), embedding_basis="ot_umap_rot")
 
+    fig = ctp.two_gene_fate_scatter(adata, ("g0", "g1"), embedding_basis="ot_umap_rot", xlim="auto", xticks="auto")
+    lo, hi = adata.obs["fate_0"][early].min(), adata.obs["fate_0"][early].max()
+    pad = 0.05 * (hi - lo)
+    assert fig.axes[0].get_xlim() == pytest.approx((lo - pad, hi + pad))
+    ticks = fig.axes[0].get_xticks()
+    assert len(ticks[(ticks >= lo - pad) & (ticks <= hi + pad)]) >= 2
+
     res = cp.tl.early_fate_correlations(adata, layer="log1p")
     fig = ctp.top_fate_correlations(res, top_n=3, q_threshold=1.0, output=tmp_path / "corr.png")
     assert fig.top_genes["pos"][0] == "g0" and fig.top_genes["neg"][0] == "g1"

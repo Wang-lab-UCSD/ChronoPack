@@ -241,6 +241,19 @@ def test_association_volcano_rendering_smoke(tmp_path):
     assert (tmp_path / "volcano.pdf").stat().st_size > 0 and pdf.preview_png[:4] == b"\x89PNG"
 
 
+def test_association_volcano_keeps_labels_of_genes_at_the_x_limit(tmp_path):
+    pytest.importorskip("rpy2")
+    import chronopack as cp
+
+    df = _association_table()
+    df.loc["G0", "signedMaxLog2FC_start"] = 10.0  # clamped to the x limit, its label nudged outward
+    for method in ("repel", "stack"):
+        result = cp.pl.association_volcano(
+            df, top_labels=5, x_lim=(-3, 3), label_method=method, output=tmp_path / f"{method}.png", dpi=100
+        )
+        assert result.metadata["labels"]["gene"].tolist() == ["G0", "G1", "G2", "G3", "G4"], method
+
+
 def test_gene_dynamics_curves_grid_follows_gene_order(tmp_path):
     import chronopack as cp
 
@@ -300,6 +313,20 @@ def test_gene_dynamics_curves_y_limits_follow_the_fitted_mean():
     assert ax.get_ylim() == (0.0, 2.8)
     ax = cp.pl.gene_dynamics_curves(curves, ["A"], observations=obs, ncols=1, y_upper_scale=None).axes[0]
     assert ax.get_ylim()[1] > 5.0
+
+
+def test_gene_dynamics_curves_panels_are_square_by_default():
+    import chronopack as cp
+
+    t = np.linspace(0, 110, 5)
+    curves = pd.concat(pd.DataFrame({"gene": g, "t": t, "mu_log1p": t / 100 + 0.1, "lineage": "L1"}) for g in "ABC")
+    fig = cp.pl.gene_dynamics_curves(curves, list("ABC"), ncols=2)
+    fig.canvas.draw()
+    for ax in fig.axes[:3]:
+        bbox = ax.get_window_extent()
+        assert abs(bbox.width - bbox.height) < 1.0
+    ax = cp.pl.gene_dynamics_curves(curves, ["A"], ncols=1, box_aspect=None).axes[0]
+    assert ax.get_box_aspect() is None
 
 
 def _combined_table():

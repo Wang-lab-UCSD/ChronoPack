@@ -24,6 +24,7 @@
 !tests/**
 # Small inputs read by the analyses/ notebooks
 !analyses/resources/*
+!analyses/resources/omnipath_snapshot_*/*
 !analyses/k562-tnfa.hg38.rep/exclude_leiden_clusters.manuscript.csv
 
 __pycache__/

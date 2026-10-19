@@ -104,7 +104,11 @@ def _expressed_pairs(interactions: pd.DataFrame, sender_adata, receiver_adata, m
 
 
 def _score_pairs(activities, association_df, receiver_detection, causal_window):
-    """Score LR pairs by summed early activity and aggregate them into ligand scores."""
+    """Score LR pairs by summed early activity and ligand significance, and aggregate them into ligand scores.
+
+    Pairs and ligands are both ranked by a z-score composite: z(logp) + z(activity_sum) for pairs, and
+    z(max logp) + z(max activity_sum) over each ligand's pairs for ligands.
+    """
     rows = []
     for (ligand, receptor), activity_raw in activities.items():
         activity = activity_raw - activity_raw.iloc[0]
@@ -121,9 +125,13 @@ def _score_pairs(activities, association_df, receiver_detection, causal_window):
                 "n_window_points": int(in_window.sum()),
             }
         )
-    pair_scores = (
-        pd.DataFrame(rows).sort_values(["logp", "activity_sum"], ascending=[False, False]).reset_index(drop=True)
-    )
+    pair_scores = pd.DataFrame(rows)
+    pair_scores["z_logp"] = _helpers.zscore(pair_scores["logp"])
+    pair_scores["z_activity_sum"] = _helpers.zscore(pair_scores["activity_sum"])
+    pair_scores["composite_score"] = pair_scores["z_logp"] + pair_scores["z_activity_sum"]
+    pair_scores = pair_scores.sort_values(
+        ["composite_score", "logp", "activity_sum"], ascending=[False, False, False]
+    ).reset_index(drop=True)
     pair_scores["pair_rank"] = np.arange(1, len(pair_scores) + 1)
 
     current_ligand_rank = pair_scores.drop_duplicates("ligand", keep="first").copy()
@@ -171,8 +179,12 @@ def infer(
     cells, and the ligand has an association row. Each pair is scored by its
     LR activity (ligand expression x receptor availability, relative to the
     first time point) summed over the time points within ``causal_window``
-    (minutes, inclusive; time tags map to ``(tag - 1) * 15`` minutes), and ranked
-    by ligand temporal association (-log10 p) then activity.
+    (minutes, inclusive; time tags map to ``(tag - 1) * 15`` minutes). Pairs are
+    ranked by ``composite_score = z(logp) + z(activity_sum)``, the z-scores
+    (population SD) taken over all scored pairs, where ``logp`` is the ligand's
+    temporal association (-log10 p); ties are broken by ``logp``, then activity.
+    Ligands are ranked the same way from their pairs' maximum ``logp`` and
+    maximum activity.
     """
     for key in (CELL_TYPE_KEY, TIME_KEY):
         if key not in adata.obs:

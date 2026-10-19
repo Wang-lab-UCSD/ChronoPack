@@ -19,7 +19,9 @@ from ._omnipath import (
     build_omnipath_tf_graph,
     load_omnipath_tf_resources,
     rank_omnipath_tfs,
+    read_omnipath_snapshot,
     run_tf_diffusion_ranking,
+    save_omnipath_snapshot,
 )
 
 
@@ -283,6 +285,7 @@ def rank_regulators(
     max_steps: int = 80,
     min_steps: int = 10,
     tol_mass: float = 1e-12,
+    omnipath_snapshot: str | Path | None = None,
 ) -> pd.DataFrame:
     """Rank TFs downstream of one upstream signal by signed OmniPath diffusion.
 
@@ -291,11 +294,17 @@ def rank_regulators(
     flipping sign across inhibitory edges, and is absorbed by TFs (human TFs
     with OmniPath transcriptional targets). Returns one row per TF sorted by
     ``priority_act`` (net activating mass absorbed).
+
+    OmniPath is downloaded (or taken from the ``omnipath`` client's cache), so the
+    ranking can change slightly as the database is updated. Pass
+    ``omnipath_snapshot``, a folder written by :func:`save_omnipath_snapshot`, to
+    use fixed OmniPath tables instead.
     """
     resources = load_omnipath_tf_resources(
         human_tf_path=human_tf_path,
         ligand_receptor_path=ligand_receptor_path,
         organism=organism,
+        omnipath_snapshot=omnipath_snapshot,
     )
     graph_bundle = build_omnipath_tf_graph(resources)
     ranking, _history = rank_omnipath_tfs(
@@ -373,6 +382,8 @@ __all__ = [
     "build_omnipath_tf_graph",
     "load_omnipath_tf_resources",
     "rank_omnipath_tfs",
+    "read_omnipath_snapshot",
+    "save_omnipath_snapshot",
     "run_tf_diffusion_ranking",
     "infer",
     "rank_regulators",

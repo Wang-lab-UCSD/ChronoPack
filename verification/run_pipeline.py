@@ -56,6 +56,8 @@ STAGES = {
     # Optional: figures of both experiments (need GetTrajectories and TradeSeqFits).
     "Visualization": [(f"{K}/05_Visualization.ipynb",), (f"{T}/05_Visualization.ipynb",)],
     "GeneClustering": [("gene_clustering/01_GeneTrajectoryClustering.ipynb",)],
+    # Optional: the same clustering with responsive genes = p < 0.05 only (no |peak log2FC| cut).
+    "GeneClusteringPvalueOnly": [("gene_clustering/01_GeneTrajectoryClustering.pvalue_only.ipynb",)],
     "CellCommunication": [("c2c/CellCommunication.ipynb",)],
     "GRNInference": [("grn/GRNInference.ipynb",)],
 }

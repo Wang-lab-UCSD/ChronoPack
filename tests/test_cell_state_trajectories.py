@@ -6,9 +6,14 @@ from anndata import AnnData
 from chronopack.tl._trajectories import (
     CellStateTrajectoryResult,
     CalculateTerminalFatesAcrossCells,
+    _transitions_long_from_tmaps,
     build_transition_matrices,
     compute_terminal_fate_probabilities,
+    cosine_topk_leiden_from_terminal_dist,
+    embed_transition_matrices,
+    prune_transition_rows,
     sparse_adjacency_from_tmats,
+    transition_matrices_from_tmaps,
 )
 
 
@@ -209,3 +214,136 @@ def test_trajectory_soft_memberships_from_mass_retention():
     assert list(weights.columns) == ["0", "1"]
     assert adata.obs["softmem_argmax"].tolist() == ["0", "0", "1", "1"]
     np.testing.assert_allclose(adata.obs["softmem_entropy"], [0.469, 0.0, 0.971, 0.0], atol=1e-3)
+
+
+def _random_tmaps(rng, sizes):
+    """Dense WOT-like maps between consecutive time points, as read_tmap returns them."""
+    names = [[f"t{t}_c{i}" for i in range(n)] for t, n in enumerate(sizes)]
+    tmaps = []
+    for t in range(len(sizes) - 1):
+        T = sp.csr_matrix(rng.random((sizes[t], sizes[t + 1])))
+        T = T.multiply(1.0 / np.asarray(T.sum(axis=1)).ravel()[:, None])
+        tmaps.append((float(t), float(t + 1), T, np.array(names[t], dtype=object), np.array(names[t + 1], dtype=object)))
+    obs_names = [name for block in names for name in block]
+    return tmaps, obs_names
+
+
+def _legacy_keep_topk(mat, k):
+    """The previous LIL implementation of keep_topk, as a reference."""
+    mat = mat.tolil()
+    for i in range(mat.shape[0]):
+        if len(mat.data[i]) > k:
+            keep = np.argsort(mat.data[i])[-k:]
+            mat.rows[i] = list(np.array(mat.rows[i])[keep])
+            mat.data[i] = list(np.array(mat.data[i])[keep])
+    return mat.tocsr()
+
+
+def test_transition_matrices_from_tmaps_match_the_long_table_route():
+    rng = np.random.default_rng(1)
+    tmaps, _ = _random_tmaps(rng, [6, 7, 5])
+    tmaps = tmaps[::-1]  # file order (tmaps_10_11 before tmaps_1_2) is not time order
+
+    direct = transition_matrices_from_tmaps(tmaps)
+    via_long = build_transition_matrices(_transitions_long_from_tmaps(tmaps))
+
+    assert list(direct) == list(via_long)
+    for t in direct:
+        assert direct[t]["src_ids"].tolist() == via_long[t]["src_ids"].tolist()
+        assert direct[t]["tgt_ids"].tolist() == via_long[t]["tgt_ids"].tolist()
+        assert direct[t]["t_next"] == via_long[t]["t_next"]
+        np.testing.assert_array_equal(direct[t]["csr"].toarray(), via_long[t]["csr"].toarray())
+
+
+def test_pruned_graph_matches_pruning_the_full_matrix():
+    rng = np.random.default_rng(2)
+    tmaps, obs_names = _random_tmaps(rng, [40, 50, 45, 35])
+    tmats = transition_matrices_from_tmaps(tmaps)
+    adata = AnnData(X=np.zeros((len(obs_names), 1)), obs=pd.DataFrame(index=obs_names), var=pd.DataFrame(index=["g0"]))
+
+    T_full, T_pruned, T_sym = sparse_adjacency_from_tmats(adata, tmats, topk=30, symmetrize="maximum")
+
+    np.testing.assert_array_equal(T_pruned.toarray(), _legacy_keep_topk(T_full, 30).toarray())
+    np.testing.assert_array_equal(T_sym.toarray(), np.maximum(T_pruned.toarray(), T_pruned.toarray().T))
+    np.testing.assert_array_equal(embed_transition_matrices(obs_names, tmats).toarray(), T_full.toarray())
+
+
+def test_prune_transition_rows_by_topk_and_mass():
+    M = sp.csr_matrix(np.array([
+        [0.1, 0.4, 0.0, 0.3, 0.2],
+        [0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0, 0.0],
+        [0.25, 0.25, 0.25, 0.25, 0.0],
+    ]))
+
+    np.testing.assert_array_equal(prune_transition_rows(M, topk=2).toarray()[0], [0, 0.4, 0, 0.3, 0])
+    # 0.4 + 0.3 = 70% of the row: 0.7 keeps two entries, 0.71 needs a third.
+    np.testing.assert_array_equal(prune_transition_rows(M, mass=0.7).toarray()[0], [0, 0.4, 0, 0.3, 0])
+    np.testing.assert_array_equal(prune_transition_rows(M, mass=0.71).toarray()[0], [0, 0.4, 0, 0.3, 0.2])
+    np.testing.assert_array_equal(prune_transition_rows(M, mass=0.01).toarray()[2], [0, 0, 1.0, 0, 0])
+    assert prune_transition_rows(M, mass=0.9, topk=1).toarray()[0].tolist() == [0, 0.4, 0, 0, 0]
+    assert prune_transition_rows(M, topk=2).getrow(1).nnz == 0
+    assert prune_transition_rows(M, topk=2).getrow(3).nnz == 2  # ties keep the earlier columns
+    np.testing.assert_array_equal(prune_transition_rows(M).toarray(), M.toarray())
+
+    rng = np.random.default_rng(3)
+    R = sp.random(30, 40, density=0.5, random_state=4, format="csr")
+    for k in (1, 5, 50):
+        np.testing.assert_array_equal(prune_transition_rows(R, topk=k).toarray(), _legacy_keep_topk(R, k).toarray())
+    pruned = prune_transition_rows(R, mass=0.8).toarray()
+    for dense_row, kept in zip(R.toarray(), pruned):
+        if dense_row.sum() == 0:
+            continue
+        values = np.sort(dense_row)[::-1]
+        n_needed = int(np.searchsorted(np.cumsum(values), 0.8 * dense_row.sum() - 1e-12) + 1)
+        assert np.count_nonzero(kept) == n_needed
+        assert kept.sum() >= 0.8 * dense_row.sum() - 1e-12
+
+
+def test_result_builds_full_matrix_and_long_table_only_when_accessed():
+    calls = []
+
+    def full():
+        calls.append("T_full")
+        return sp.eye(2, format="csr")
+
+    result = CellStateTrajectoryResult(tmaps=[], transitions_long=lambda: calls.append("long") or pd.DataFrame(),
+                                       tmats={}, T_full=full, T_pruned=None, T_sym=None)
+    assert result["T_pruned"] is None and calls == []
+    assert set(result.keys()) == {"tmaps", "transitions_long", "tmats", "T_full", "T_pruned", "T_sym"}
+    assert result["T_full"].shape == (2, 2) and calls == ["T_full"]
+    result.T_full
+    assert calls == ["T_full"]
+    result.as_dict()
+    assert calls == ["T_full", "long"]
+
+
+def test_dense_cosine_graph_matches_sklearn_sparse_neighbors():
+    from sklearn.neighbors import NearestNeighbors
+    from sklearn.preprocessing import normalize
+
+    from chronopack.tl._trajectories import _topk_csr_rows
+
+    rng = np.random.default_rng(5)
+    n, m, k = 120, 25, 10
+    D = rng.random((n, m)) ** 4
+    D[D < 0.05] = 0
+    D[-m:] = np.eye(m)  # terminal cells: one-hot rows, as in the exact fate distributions
+    D = sp.csr_matrix(D / D.sum(axis=1, keepdims=True), dtype=np.float32)
+    adata = AnnData(X=np.zeros((n, 1)), obs=pd.DataFrame(index=[f"c{i}" for i in range(n)]), var=pd.DataFrame(index=["g0"]))
+    adata.obsm["terminal_cell_dist"] = D
+
+    S = cosine_topk_leiden_from_terminal_dist(adata, topk=k)
+
+    # The previous implementation: sklearn brute-force cosine neighbours on the sparse matrix.
+    Xn = normalize(D, norm="l2", axis=1, copy=True)
+    nn = NearestNeighbors(n_neighbors=k + 1, metric="cosine", algorithm="brute").fit(Xn)
+    ref = nn.kneighbors_graph(Xn, mode="distance").tocsr()
+    ref.data = (1.0 - ref.data).astype(np.float32)
+    ref.setdiag(0.0)
+    ref.eliminate_zeros()
+    ref = _topk_csr_rows(ref.maximum(ref.T).tocsr(), k=k)
+
+    assert S.shape == ref.shape
+    np.testing.assert_allclose(S.toarray(), ref.toarray(), atol=1e-6)
+    assert (S.toarray() > 0).sum() == (ref.toarray() > 0).sum()

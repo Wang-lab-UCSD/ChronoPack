@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -303,6 +304,23 @@ def _is_integer_valued(matrix):
     return bool(np.all(np.isfinite(values)) and np.array_equal(values, np.round(values)))
 
 
+def _write_genes_x_cells_csv(matrix_gc, genes, cells, path, max_values_per_chunk=20_000_000):
+    """Write a genes x cells matrix as CSV; a sparse matrix is written a block of genes at a time.
+
+    Both give the same text as ``pd.DataFrame(dense, index=genes, columns=cells).to_csv(path)``.
+    """
+    if not sp.issparse(matrix_gc):
+        pd.DataFrame(np.asarray(matrix_gc), index=genes, columns=cells).to_csv(path)
+        return
+    matrix_gc = matrix_gc.tocsr()
+    step = max(1, max_values_per_chunk // max(len(cells), 1))
+    opener = gzip.open if str(path).endswith(".gz") else open
+    with opener(path, "wt", newline="") as handle:
+        for start in range(0, max(matrix_gc.shape[0], 1), step):
+            block = matrix_gc[start : start + step].toarray()
+            pd.DataFrame(block, index=genes[start : start + step], columns=cells).to_csv(handle, header=start == 0)
+
+
 def prepare_tradeseq_inputs(
     adata,
     output_dir,
@@ -348,10 +366,6 @@ def prepare_tradeseq_inputs(
     if _is_integer_valued(matrix_gc):
         matrix_gc = matrix_gc.astype(np.int64)
 
-    if sp.issparse(matrix_gc):
-        counts_df = pd.DataFrame.sparse.from_spmatrix(matrix_gc, index=genes, columns=cells)
-    else:
-        counts_df = pd.DataFrame(np.asarray(matrix_gc), index=genes, columns=cells)
 
     time = pd.to_numeric(adata.obs[time_key].astype(str), errors="coerce")
     if time.isna().any():
@@ -364,7 +378,7 @@ def prepare_tradeseq_inputs(
         "cell_times": output_dir / f"cell_times{suffix}.csv.gz",
         "subset_genes": output_dir / f"subset_genes{suffix}.csv",
     }
-    counts_df.to_csv(paths["counts"])
+    _write_genes_x_cells_csv(matrix_gc, genes, cells, paths["counts"])
     time_df.to_csv(paths["cell_times"], index=False)
     pd.Series(genes, name="gene").to_csv(paths["subset_genes"], index=False)
 

@@ -36,6 +36,21 @@ Changes since the previous collaborator test (2026-10-19):
 - `05_Visualization` (K562 + TNF-alpha) no longer needs
   `04_TradeSeqFits.TwoLineage`: without the stored fit it fits the plotted genes.
 - `two_gene_fate_scatter(xlim="auto", xticks="auto")` fits the x axis to the data.
+- Scaling to larger datasets (e.g. 6 time points x 8,000 cells):
+  - `cp.io.read_time_tagged_dge` returns a sparse CSR `X` (float64, so values are
+    unchanged; `sparse=False` for dense) and reads each table in chunks; the
+    notebooks' `counts`/`cpm`/`log1p` layers are therefore sparse too. Results
+    match the dense version to rounding (log1p differs in the last bit); the
+    K562 + TNF-alpha UMAP and OT-UMAP layouts shift slightly as a result, while
+    trajectory clusters, fates, tradeSeq fits and gene clusters are unchanged.
+  - The WOT transition graph is built map by map with vectorized pruning instead
+    of a long table, Python lists and LIL matrices. `T_full` and
+    `transitions_long` on the `get_trajectories` result are built only when
+    accessed. New `transition_mass=` (keep each cell's largest transitions up to
+    that fraction of its mass; combine with `transition_topk=None` to use it alone).
+  - The terminal-fate cosine graph is computed with dense float32 products
+    instead of sparse ones. On K562 + TNF-alpha, 32 of 3.4M edges differ (ties at
+    the 500th neighbour) and the trajectory clusters are identical.
 
 Benchmark datasets, comparator methods, gold standards, and benchmarking
 metrics for GRN and C2C remain outside ChronoPack for this release.

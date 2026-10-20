@@ -330,3 +330,24 @@ def test_prepare_tradeseq_inputs_accepts_counts_only_anndata(tmp_path):
     paths = _gene_dynamics.prepare_tradeseq_inputs(adata, tmp_path)
 
     assert pd.read_csv(paths["counts"], index_col=0).shape == (3, 2)
+
+
+def test_prepare_tradeseq_inputs_sparse_counts_match_dense_text_across_chunks(tmp_path):
+    import scipy.sparse as sp
+
+    rng = np.random.default_rng(0)
+    counts = rng.poisson(0.3, size=(7, 11)).astype(float)
+    obs = pd.DataFrame({"time": np.arange(7) % 3 + 1, "total_counts": counts.sum(axis=1)}, index=[f"c{i}" for i in range(7)])
+    var = pd.DataFrame(index=[f"g{j}" for j in range(11)])
+    dense = AnnData(X=counts, obs=obs, var=var, layers={"counts": counts})
+    sparse = AnnData(X=counts, obs=obs, var=var, layers={"counts": sp.csr_matrix(counts)})
+
+    expected = _counts_lines(_gene_dynamics.prepare_tradeseq_inputs(dense, tmp_path / "dense")["counts"])
+    assert _counts_lines(_gene_dynamics.prepare_tradeseq_inputs(sparse, tmp_path / "sparse")["counts"]) == expected
+
+    genes, cells = np.array(var.index), np.array(obs.index)
+    _gene_dynamics._write_genes_x_cells_csv(counts.T, genes, cells, tmp_path / "dense.csv.gz")
+    # Two genes per block (7 cells, at most 14 values per block), so blocks of the sparse matrix are written in turn.
+    _gene_dynamics._write_genes_x_cells_csv(sp.csr_matrix(counts.T), genes, cells, tmp_path / "chunked.csv.gz", max_values_per_chunk=14)
+    assert _counts_lines(tmp_path / "chunked.csv.gz") == _counts_lines(tmp_path / "dense.csv.gz")
+    assert len(_counts_lines(tmp_path / "chunked.csv.gz")) == 12

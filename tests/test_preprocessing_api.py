@@ -3,6 +3,7 @@ from pathlib import Path
 import anndata as ad
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp
 import chronopack as cp
 
 
@@ -38,7 +39,34 @@ def test_read_time_tagged_dge_matches_notebook_loader(tmp_path):
         "Group 2 (T4-6)",
         "Group 4 (T10-12)",
     ]
-    assert np.asarray(adata.X).tolist() == [[1.0, 0.0, 0.0], [2.0, 3.0, 0.0], [0.0, 0.0, 5.0]]
+    assert sp.issparse(adata.X) and adata.X.dtype == np.float64
+    assert adata.X.toarray().tolist() == [[1.0, 0.0, 0.0], [2.0, 3.0, 0.0], [0.0, 0.0, 5.0]]
+    dense = cp.io.read_time_tagged_dge([p1, p2], sample_names=["N701", "N702"], sparse=False)
+    assert isinstance(dense.X, np.ndarray) and dense.X.tolist() == adata.X.toarray().tolist()
+
+
+def test_read_time_tagged_dge_matches_pandas_concat_in_chunks(tmp_path):
+    """The chunked sparse reader gives the cells, gene order and values of the previous pandas loader."""
+    rng = np.random.default_rng(0)
+    paths, frames = [], []
+    for s, genes in enumerate([["G3", "G1", "G7", "G2"], ["G1", "G5", "G3"], ["G9", "G2", "G5", "G1", "G4"]]):
+        n = 5 + s
+        df = pd.DataFrame(rng.poisson(1.0, size=(n, len(genes))), columns=genes, index=[f"bc{i}" for i in range(n)])
+        df.insert(0, "FINAL TIME TAG", rng.integers(1, 13, size=n))
+        df.insert(1, "COUNTS", df[genes].sum(axis=1))
+        df.loc["bc1", genes[0]] = np.nan  # missing values are read as zero
+        path = tmp_path / f"N70{s + 1}_input.csv"
+        df.to_csv(path)
+        paths.append(path)
+        frames.append(df.set_axis(f"N70{s + 1}_" + df.index, axis=0))
+
+    expected = pd.concat(frames).fillna(0).drop(columns=["FINAL TIME TAG", "COUNTS"])
+    for chunksize in (1, 2, 1000):
+        adata = cp.io.read_time_tagged_dge(paths, chunksize=chunksize)
+        assert adata.obs_names.tolist() == expected.index.tolist()
+        assert adata.var_names.tolist() == expected.columns.tolist()
+        np.testing.assert_array_equal(adata.X.toarray(), expected.to_numpy(dtype=float))
+        assert adata.X.has_sorted_indices
 
 
 def test_technical_and_low_count_gene_filters_match_current_rules():

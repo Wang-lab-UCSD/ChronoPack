@@ -201,3 +201,18 @@ def test_c2c_causal_window_limits_summed_time_points():
     assert early["n_window_points"] == 2
     assert np.isclose(early["activity_sum"], delta.loc[[0.0, 15.0]].sum())
     assert np.isclose(full["activity_sum"], delta.sum())
+
+
+def test_detection_series_is_the_same_for_sparse_and_dense_counts():
+    import scipy.sparse as sp
+    from anndata import AnnData
+
+    from chronopack.tl.c2c import _helpers
+
+    counts = np.random.default_rng(0).poisson(0.4, size=(37, 9)).astype(float)
+    dense = AnnData(X=counts, layers={"counts": counts})
+    sparse = AnnData(X=sp.csr_matrix(counts), layers={"counts": sp.csr_matrix(counts)})
+    expected = (counts > 0).mean(axis=0)
+    np.testing.assert_array_equal(_helpers.detection_series(dense, layer="counts").to_numpy(), expected)
+    np.testing.assert_array_equal(_helpers.detection_series(sparse, layer="counts").to_numpy(), expected)
+    np.testing.assert_array_equal(_helpers.detection_series(sparse[3:20], layer="counts").to_numpy(), (counts[3:20] > 0).mean(axis=0))

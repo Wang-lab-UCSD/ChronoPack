@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
@@ -43,7 +42,6 @@ def _sklearn_neighbors_and_normalize():
     return NearestNeighbors, normalize
 
 
-@dataclass
 class CellStateTrajectoryResult:
     """Sidecar outputs from WOT-derived cell-state trajectory analysis.
 
@@ -51,31 +49,49 @@ class CellStateTrajectoryResult:
     AnnData-axis-aligned, so ChronoPack keeps them in this result object.
     Square cell-cell graphs may also be attached to ``adata.obsp`` by the
     workflow for Scanpy-compatible downstream use.
+
+    ``transitions_long`` (one row per cell pair) and ``T_full`` (every coupling
+    in one cell x cell matrix) hold all n_t x n_t+1 couplings, which is large for
+    big time points. Either may be given as a zero-argument function; it is then
+    built the first time it is accessed.
     """
 
-    tmaps: list
-    transitions_long: pd.DataFrame
-    tmats: dict
-    T_full: sp.spmatrix
-    T_pruned: sp.spmatrix
-    T_sym: sp.spmatrix
+    _FIELDS = ("tmaps", "transitions_long", "tmats", "T_full", "T_pruned", "T_sym")
+
+    def __init__(self, tmaps, transitions_long, tmats, T_full, T_pruned, T_sym):
+        self.tmaps = tmaps
+        self._transitions_long = transitions_long
+        self.tmats = tmats
+        self._T_full = T_full
+        self.T_pruned = T_pruned
+        self.T_sym = T_sym
+
+    @property
+    def transitions_long(self) -> pd.DataFrame:
+        if callable(self._transitions_long):
+            self._transitions_long = self._transitions_long()
+        return self._transitions_long
+
+    @property
+    def T_full(self) -> sp.spmatrix:
+        if callable(self._T_full):
+            self._T_full = self._T_full()
+        return self._T_full
+
+    def __repr__(self) -> str:
+        return f"CellStateTrajectoryResult(n_tmaps={len(self.tmaps)}, T_pruned={getattr(self.T_pruned, 'shape', None)})"
 
     def as_dict(self) -> dict:
-        """Return the legacy dictionary representation."""
-        return {
-            "tmaps": self.tmaps,
-            "transitions_long": self.transitions_long,
-            "tmats": self.tmats,
-            "T_full": self.T_full,
-            "T_pruned": self.T_pruned,
-            "T_sym": self.T_sym,
-        }
+        """Return the legacy dictionary representation (builds every lazy field)."""
+        return {key: getattr(self, key) for key in self._FIELDS}
 
     def __getitem__(self, key):
-        return self.as_dict()[key]
+        if key not in self._FIELDS:
+            raise KeyError(key)
+        return getattr(self, key)
 
     def keys(self):
-        return self.as_dict().keys()
+        return list(self._FIELDS)
 
     def items(self):
         return self.as_dict().items()
@@ -84,7 +100,8 @@ class CellStateTrajectoryResult:
         return self.as_dict().values()
 
     def __iter__(self) -> Iterator[str]:
-        return iter(self.as_dict())
+        return iter(self._FIELDS)
+
 
 def read_tmap(fpath):
     """Read a WOT transport map and return a row-normalized sparse matrix."""
@@ -96,6 +113,24 @@ def read_tmap(fpath):
     inv_row = 1.0 / np.maximum(row_sums, 1e-12)
     T_norm = T.multiply(inv_row[:, None])
     return t_src, t_tgt, T_norm, ad.obs_names.to_numpy(), ad.var_names.to_numpy()
+
+
+def _renormalize_rows(T):
+    row_sums = np.asarray(T.sum(axis=1)).flatten()
+    nz = row_sums != 0
+    row_sums[nz] = 1.0 / row_sums[nz]
+    return sparse.diags(row_sums) @ T
+
+
+def _transition_entry(T, src_ids, tgt_ids, t_next, make_dense=False):
+    return {
+        "csr": T,
+        "dense": T.toarray() if make_dense else None,
+        "src_ids": src_ids,
+        "tgt_ids": tgt_ids,
+        "t_next": t_next,
+        "src_lookup": {cid: i for i, cid in enumerate(src_ids)},
+    }
 
 
 def build_transition_matrices(df, make_dense=False, renorm_rows=True):
@@ -111,26 +146,37 @@ def build_transition_matrices(df, make_dense=False, renorm_rows=True):
         data = g["p_ij"].to_numpy()
         T = sparse.csr_matrix((data, (rows, cols)), shape=(len(src_ids), len(tgt_ids)))
         if renorm_rows:
-            row_sums = np.asarray(T.sum(axis=1)).flatten()
-            nz = row_sums != 0
-            row_sums[nz] = 1.0 / row_sums[nz]
-            T = sparse.diags(row_sums) @ T
-        matrices[t_src] = {
-            "csr": T,
-            "dense": T.toarray() if make_dense else None,
-            "src_ids": src_ids,
-            "tgt_ids": tgt_ids,
-            "t_next": t_tgt,
-            "src_lookup": src_lookup,
-        }
+            T = _renormalize_rows(T)
+        matrices[t_src] = _transition_entry(T, src_ids, tgt_ids, t_tgt, make_dense)
     print(f"Built {len(matrices)} transport matrices.")
     return matrices
 
 
-def extract_wot_couplings(tmap_path, make_dense=False):
-    """Read all WOT maps from a directory into tmaps, long table, and tmats."""
-    tmap_files = sorted(Path(tmap_path).glob("*.h5ad"))
-    tmaps = [read_tmap(fp) for fp in tmap_files]
+def transition_matrices_from_tmaps(tmaps, make_dense=False, renorm_rows=True):
+    """Build per-time transport CSR matrices directly from :func:`read_tmap` outputs.
+
+    Gives the same matrices as ``build_transition_matrices`` on the long table of
+    the same maps, without building that table (one row per cell pair).
+    """
+    matrices = {}
+    for t_src, t_tgt, T, src_ids, tgt_ids in sorted(tmaps, key=lambda m: (m[0], m[1])):
+        coo = T.tocoo()
+        # Cells are ordered as they first appear among the nonzero couplings, as in the long table.
+        row_order = pd.unique(coo.row)
+        col_order = pd.unique(coo.col)
+        row_pos = np.empty(T.shape[0], dtype=np.int64)
+        row_pos[row_order] = np.arange(row_order.size)
+        col_pos = np.empty(T.shape[1], dtype=np.int64)
+        col_pos[col_order] = np.arange(col_order.size)
+        M = sparse.csr_matrix((coo.data, (row_pos[coo.row], col_pos[coo.col])), shape=(row_order.size, col_order.size))
+        if renorm_rows:
+            M = _renormalize_rows(M)
+        matrices[t_src] = _transition_entry(M, np.asarray(src_ids)[row_order], np.asarray(tgt_ids)[col_order], t_tgt, make_dense)
+    print(f"Built {len(matrices)} transport matrices.")
+    return matrices
+
+
+def _transitions_long_from_tmaps(tmaps):
     tidy_frames = []
     for t_src, t_tgt, T, src_ids, tgt_ids in tmaps:
         coo = T.tocoo()
@@ -145,8 +191,19 @@ def extract_wot_couplings(tmap_path, make_dense=False):
                 }
             )
         )
-    transitions_long = pd.concat(tidy_frames, ignore_index=True)
-    tmats = build_transition_matrices(transitions_long, make_dense=make_dense)
+    return pd.concat(tidy_frames, ignore_index=True)
+
+
+def read_tmaps(tmap_path):
+    """Read every WOT map (``*.h5ad``) in a directory with :func:`read_tmap`."""
+    return [read_tmap(fp) for fp in sorted(Path(tmap_path).glob("*.h5ad"))]
+
+
+def extract_wot_couplings(tmap_path, make_dense=False):
+    """Read all WOT maps from a directory into tmaps, long table, and tmats."""
+    tmaps = read_tmaps(tmap_path)
+    transitions_long = _transitions_long_from_tmaps(tmaps)
+    tmats = transition_matrices_from_tmaps(tmaps, make_dense=make_dense)
     return tmaps, transitions_long, tmats
 
 
@@ -156,6 +213,7 @@ def run_wot_transport_workflow(
     ot_model_kwargs=None,
     compute_transport_maps=True,
     transition_topk=30,
+    transition_mass=None,
     symmetrize="maximum",
     use_unpruned_as_pruned=False,
     attach_graph=True,
@@ -164,7 +222,15 @@ def run_wot_transport_workflow(
     umap_random_state=10,
     umap_kwargs=None,
 ):
-    """Run WaddingtonOT maps, extract couplings, and attach transition graph outputs."""
+    """Run WaddingtonOT maps, extract couplings, and attach transition graph outputs.
+
+    Each cell keeps its largest forward transitions: at most ``transition_topk``
+    (``None`` for no limit) and, with ``transition_mass`` (a fraction in (0, 1]),
+    only as many as needed to reach that fraction of its transition mass. The
+    pruned graph is built map by map, so the full n_t x n_t+1 couplings are only
+    held as the maps themselves; ``T_full`` and ``transitions_long`` on the result
+    are built when first accessed.
+    """
     tmap_dir = Path(tmap_dir)
     tmap_dir.mkdir(parents=True, exist_ok=True)
     if compute_transport_maps:
@@ -176,16 +242,14 @@ def run_wot_transport_workflow(
         ot_model = wot.ot.OTModel(adata, **kwargs)
         ot_model.compute_all_transport_maps(tmap_out=str(tmap_dir / "tmaps"))
 
-    tmaps, transitions_long, tmats = extract_wot_couplings(tmap_dir)
-    T_full, T_pruned, T_sym = sparse_adjacency_from_tmats(
-        adata,
-        tmats,
-        topk=transition_topk,
-        symmetrize=symmetrize,
-    )
+    tmaps = read_tmaps(tmap_dir)
+    tmats = transition_matrices_from_tmaps(tmaps)
+    obs_names = adata.obs_names.copy()
     if use_unpruned_as_pruned:
-        T_pruned = T_full
-        T_sym = 0.5 * (T_pruned + T_pruned.T) if symmetrize == "average" else T_pruned.maximum(T_pruned.T)
+        T_pruned = embed_transition_matrices(obs_names, tmats)
+    else:
+        T_pruned = embed_transition_matrices(obs_names, tmats, topk=transition_topk, mass=transition_mass)
+    T_sym = symmetrize_graph(T_pruned, symmetrize)
     if attach_graph:
         adata.obsp[graph_key] = T_sym
         adata.uns[graph_key] = {
@@ -195,6 +259,7 @@ def run_wot_transport_workflow(
                 "method": "WOT_tmats",
                 "top_k": transition_topk,
                 "symmetric": symmetrize,
+                **({"mass": transition_mass} if transition_mass is not None else {}),
             },
         }
         kwargs = dict(init_pos="spectral", copy=False, random_state=umap_random_state)
@@ -207,9 +272,9 @@ def run_wot_transport_workflow(
             adata.uns["umap"] = original_umap_uns
     return CellStateTrajectoryResult(
         tmaps=tmaps,
-        transitions_long=transitions_long,
+        transitions_long=lambda: _transitions_long_from_tmaps(tmaps),
         tmats=tmats,
-        T_full=T_full,
+        T_full=lambda: embed_transition_matrices(obs_names, tmats),
         T_pruned=T_pruned,
         T_sym=T_sym,
     )
@@ -262,38 +327,83 @@ def get_trajectories(
     return (target, result) if copy else result
 
 
+def prune_transition_rows(M, topk=None, mass=None):
+    """Keep only each row's largest entries of a sparse matrix (values unchanged).
+
+    ``topk`` keeps at most that many entries per row. ``mass`` (a fraction in
+    (0, 1]) keeps the fewest largest entries whose sum reaches that fraction of
+    the row's total; the largest entry is always kept. With both, a row stops at
+    whichever limit comes first. Ties are broken by column order.
+    """
+    M = sp.csr_matrix(M, copy=True)
+    M.sum_duplicates()
+    if topk is None and mass is None:
+        return M
+    if topk is not None and (int(topk) != topk or topk < 1):
+        raise ValueError(f"topk must be a positive integer or None, got {topk!r}.")
+    if mass is not None and not 0 < mass <= 1:
+        raise ValueError(f"mass must be in (0, 1] or None, got {mass!r}.")
+    n_rows = M.shape[0]
+    counts = np.diff(M.indptr)
+    rows = np.repeat(np.arange(n_rows), counts)
+    order = np.lexsort((-M.data, rows))  # by row, then by decreasing value
+    keep_sorted = np.ones(M.nnz, dtype=bool)
+    if topk is not None:
+        rank = np.arange(M.nnz) - np.repeat(M.indptr[:-1], counts)
+        keep_sorted &= rank < topk
+    if mass is not None:
+        vals = M.data[order]
+        csum = np.concatenate([[0.0], np.cumsum(vals)])
+        start = np.repeat(csum[M.indptr[:-1]], counts)
+        total = np.repeat(csum[M.indptr[1:]] - csum[M.indptr[:-1]], counts)
+        before = csum[:-1] - start  # row mass of the larger entries
+        keep_sorted &= before < mass * total
+    keep = np.zeros(M.nnz, dtype=bool)
+    keep[order[keep_sorted]] = True
+    indptr = np.concatenate([[0], np.cumsum(np.bincount(rows[keep], minlength=n_rows))]).astype(M.indptr.dtype)
+    return sp.csr_matrix((M.data[keep], M.indices[keep], indptr), shape=M.shape)
+
+
 def keep_topk(mat, k):
     """For each sparse row, keep only the k largest elements."""
-    mat = mat.tolil()
-    for i in range(mat.shape[0]):
-        if len(mat.data[i]) > k:
-            keep = np.argsort(mat.data[i])[-k:]
-            mat.rows[i] = list(np.array(mat.rows[i])[keep])
-            mat.data[i] = list(np.array(mat.data[i])[keep])
-    return mat.tocsr()
+    return prune_transition_rows(mat, topk=k)
 
 
-def sparse_adjacency_from_tmats(bdata, tmats, topk=30, symmetrize="maximum"):
-    """Embed per-time transition matrices into one cell-by-cell adjacency."""
-    C = bdata.n_obs
-    rows_all, cols_all, data_all = [], [], []
-    for _, tdict in tmats.items():
-        M = tdict["csr"].tocsr()
-        src_ids = np.asarray(tdict["src_ids"])
-        tgt_ids = np.asarray(tdict["tgt_ids"])
-        src_pos = bdata.obs_names.get_indexer(src_ids)
-        tgt_pos = bdata.obs_names.get_indexer(tgt_ids)
-        r, c = M.nonzero()
-        rows_all.extend(src_pos[r])
-        cols_all.extend(tgt_pos[c])
-        data_all.extend(M.data)
-    T_full = sp.csr_matrix((data_all, (rows_all, cols_all)), shape=(C, C))
-    T_pruned = keep_topk(T_full, topk)
+def embed_transition_matrices(obs_names, tmats, *, topk=None, mass=None):
+    """Place per-time transition matrices into one cell x cell matrix over ``obs_names``.
+
+    With ``topk`` / ``mass``, each map's rows are pruned first
+    (:func:`prune_transition_rows`). A cell is the source of a single map, so
+    this equals pruning the rows of the full matrix.
+    """
+    obs_names = pd.Index(obs_names)
+    n = len(obs_names)
+    rows, cols, data = [], [], []
+    for tdict in tmats.values():
+        M = tdict["csr"]
+        if topk is not None or mass is not None:
+            M = prune_transition_rows(M, topk=topk, mass=mass)
+        M = M.tocoo()
+        rows.append(obs_names.get_indexer(np.asarray(tdict["src_ids"]))[M.row])
+        cols.append(obs_names.get_indexer(np.asarray(tdict["tgt_ids"]))[M.col])
+        data.append(M.data)
+    if not rows:
+        return sp.csr_matrix((n, n))
+    return sp.csr_matrix((np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))), shape=(n, n))
+
+
+def symmetrize_graph(T, symmetrize="maximum"):
+    """Symmetrize a directed transition graph: elementwise ``"maximum"`` or ``"average"``."""
     if symmetrize == "average":
-        T_sym = 0.5 * (T_pruned + T_pruned.T)
-    else:
-        T_sym = T_pruned.maximum(T_pruned.T)
-    return T_full, T_pruned, T_sym
+        return 0.5 * (T + T.T)
+    return T.maximum(T.T)
+
+
+def sparse_adjacency_from_tmats(bdata, tmats, topk=30, symmetrize="maximum", mass=None):
+    """Embed per-time transition matrices into one cell-by-cell adjacency."""
+    T_full = embed_transition_matrices(bdata.obs_names, tmats)
+    T_pruned = embed_transition_matrices(bdata.obs_names, tmats, topk=topk, mass=mass)
+    return T_full, T_pruned, symmetrize_graph(T_pruned, symmetrize)
 
 
 def embed_block(A, idx, n):
@@ -433,18 +543,41 @@ def CalculateTerminalFatesAcrossCells(adata, T, topk=None):
     return D_full
 
 
+def _cosine_topk_neighbors(X, k, max_values_per_block=50_000_000):
+    """Sparse matrix of each row's ``k`` largest cosine similarities (itself included).
+
+    ``X`` is dense with L2-normalized rows; similarities are computed a block of
+    rows at a time as dense products, so memory stays at a block of n values.
+    """
+    n = X.shape[0]
+    k = min(k, n)
+    step = max(1, max_values_per_block // max(n, 1))
+    rows, cols, vals = [], [], []
+    for start in range(0, n, step):
+        sim = X[start : start + step] @ X.T
+        idx = np.argpartition(-sim, k - 1, axis=1)[:, :k] if k < n else np.broadcast_to(np.arange(n), sim.shape)
+        rows.append(np.repeat(np.arange(start, start + sim.shape[0]), k))
+        cols.append(idx.ravel())
+        vals.append(np.take_along_axis(sim, idx, axis=1).ravel())
+    vals = np.concatenate(vals)
+    # As sklearn's cosine distance: 1 - similarity clipped to [0, 2], then back to a similarity.
+    vals = 1.0 - np.clip(1.0 - vals, 0.0, 2.0)
+    return sp.csr_matrix((vals.astype(np.float32), (np.concatenate(rows), np.concatenate(cols))), shape=(n, n))
+
+
 def cosine_topk_leiden_from_terminal_dist(adata, dist_key=TERMINAL_CELL_DIST_KEY, topk=100, random_state=0):
-    """Build a cosine top-k graph from terminal-cell distributions."""
+    """Build a cosine top-k graph from terminal-cell distributions.
+
+    The distributions are mostly dense (every terminal cell is reachable from
+    early cells), so they are compared as a dense float32 matrix.
+    """
     assert dist_key in adata.obsm, f"Need adata.obsm['{dist_key}']"
-    NearestNeighbors, normalize = _sklearn_neighbors_and_normalize()
+    _, normalize = _sklearn_neighbors_and_normalize()
     X = adata.obsm[dist_key]
-    X = sp.csr_matrix(X) if not sp.issparse(X) else X.tocsr()
+    X = X.toarray() if sp.issparse(X) else np.asarray(X)
     n = adata.n_obs
-    Xn = normalize(X, norm="l2", axis=1, copy=True)
-    nn = NearestNeighbors(n_neighbors=min(topk + 1, n), metric="cosine", algorithm="brute", n_jobs=-1)
-    nn.fit(Xn)
-    S = nn.kneighbors_graph(Xn, mode="distance").tocsr()
-    S.data = (1.0 - S.data).astype(np.float32)
+    Xn = normalize(X.astype(np.float32, copy=False), norm="l2", axis=1)
+    S = _cosine_topk_neighbors(Xn, topk + 1)
     S.setdiag(0.0)
     S.eliminate_zeros()
     S = _topk_csr_rows(S.maximum(S.T).tocsr(), k=topk)

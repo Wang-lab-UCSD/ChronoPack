@@ -30,7 +30,10 @@ def split_by_cell_type(adata, cell_type_key: str = "cell_type", sender: str = "T
 def detection_series(adata, layer: Optional[str] = None) -> pd.Series:
     """Calculate fraction of cells with nonzero expression for each gene."""
     X = adata.layers[layer] if layer is not None and layer in adata.layers else adata.X
-    det = (to_dense(X) > 0).mean(axis=0)
+    if hasattr(X, "tocsr"):  # sparse: count detections without densifying
+        det = np.asarray((X > 0).sum(axis=0)).ravel() / X.shape[0]
+    else:
+        det = (np.asarray(X) > 0).mean(axis=0)
     return pd.Series(np.asarray(det).ravel(), index=adata.var_names.astype(str))
 
 

@@ -9,6 +9,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import scanpy as sc
+import scipy.sparse as sp
 
 from chronopack._core._keys import DEFAULT_COUNTS_LAYER, DEFAULT_TIME_KEY
 from chronopack._core._provenance import record_provenance
@@ -33,6 +34,9 @@ def read_time_tagged_dge(
     metadata_cols: Sequence[str] = (TIME_TAG_KEY, "COUNTS"),
     time_col: str = TIME_TAG_KEY,
     sample_key: str = SAMPLE_KEY,
+    sparse: bool = True,
+    dtype=np.float64,
+    chunksize: int = 2000,
 ) -> ad.AnnData:
     """Read time-tagged DGE CSV tables into one AnnData object.
 
@@ -40,7 +44,11 @@ def read_time_tagged_dge(
     prefixed with the sample name, metadata columns are moved into ``obs``,
     expression columns become ``X``, missing genes across samples are filled
     with zero, and ``obs['time']``/``obs['time_group']`` are added from the time
-    tag column.
+    tag column. Genes are ordered as they first appear across the samples.
+
+    ``X`` is a sparse CSR matrix of ``dtype`` by default (``sparse=False`` returns
+    a dense array). Each table is read ``chunksize`` cells at a time and stored
+    sparse as it is read, so a large dense table is never held in memory whole.
     """
     sample_paths = [Path(path) for path in sample_paths]
     if sample_names is None:
@@ -50,33 +58,46 @@ def read_time_tagged_dge(
     if time_col not in metadata_cols:
         raise ChronoPackError(f"time_col {time_col!r} must be included in metadata_cols.")
 
-    frames: list[pd.DataFrame] = []
+    metadata_frames: list[pd.DataFrame] = []
+    matrices: list[sp.csr_matrix] = []
+    sample_genes: list[pd.Index] = []
     for path, sample in zip(sample_paths, sample_names):
-        df = pd.read_csv(path, sep=",", index_col=0)
-        missing = [col for col in metadata_cols if col not in df.columns]
+        header = pd.read_csv(path, sep=",", index_col=0, nrows=0)
+        missing = [col for col in metadata_cols if col not in header.columns]
         if missing:
             raise ChronoPackError(f"{path} is missing metadata columns: {missing}.")
-        df.index = f"{sample}_" + df.index.astype(str)
-        frames.append(df)
+        genes = header.columns.drop(list(metadata_cols))
+        meta_chunks, blocks = [], []
+        for chunk in pd.read_csv(path, sep=",", index_col=0, chunksize=chunksize):
+            meta_chunks.append(chunk.loc[:, list(metadata_cols)])
+            blocks.append(sp.csr_matrix(chunk.loc[:, genes].fillna(0).to_numpy(dtype=dtype)))
+        meta = pd.concat(meta_chunks) if meta_chunks else header.loc[:, list(metadata_cols)]
+        meta.index = f"{sample}_" + meta.index.astype(str)
+        metadata_frames.append(meta)
+        matrices.append(sp.vstack(blocks, format="csr") if blocks else sp.csr_matrix((0, len(genes)), dtype=dtype))
+        sample_genes.append(genes)
 
-    total_rows = sum(frame.shape[0] for frame in frames)
-    unique_rows = len(set().union(*(set(frame.index) for frame in frames)))
-    if total_rows != unique_rows:
+    obs_names = pd.Index(np.concatenate([meta.index.to_numpy() for meta in metadata_frames]))
+    if obs_names.has_duplicates:
         raise ChronoPackError("Sample-prefixed cell IDs are not unique.")
 
-    df = pd.concat(frames).fillna(0)
-    metadata = df.loc[:, list(metadata_cols)].copy()
-    matrix = df.drop(columns=list(metadata_cols))
-    if matrix.columns.duplicated().any():
-        dupes = matrix.columns[matrix.columns.duplicated()].unique().tolist()
-        raise ChronoPackError(f"Duplicate gene identifiers after loading: {dupes[:5]}.")
+    all_genes = pd.Index(list(dict.fromkeys(gene for genes in sample_genes for gene in genes)))
+    aligned = []
+    for matrix, genes in zip(matrices, sample_genes):
+        cols = all_genes.get_indexer(genes)[matrix.indices].astype(matrix.indices.dtype)
+        block = sp.csr_matrix((matrix.data, cols, matrix.indptr), shape=(matrix.shape[0], len(all_genes)))
+        block.sort_indices()
+        aligned.append(block)
+    X = sp.vstack(aligned, format="csr")
+    if not sparse:
+        X = X.toarray()
+    metadata = pd.concat(metadata_frames).fillna(0)
 
-    adata = ad.AnnData(matrix)
-    adata.obs = metadata
+    adata = ad.AnnData(X=X, obs=metadata, var=pd.DataFrame(index=all_genes))
 
     source_map = {}
-    for frame, sample in zip(frames, sample_names):
-        source_map.update({barcode: sample for barcode in frame.index})
+    for meta, sample in zip(metadata_frames, sample_names):
+        source_map.update({barcode: sample for barcode in meta.index})
     adata.obs[sample_key] = adata.obs_names.map(source_map).astype("category")
     add_time_metadata(adata, time_col=time_col)
     if time_col in adata.obs:

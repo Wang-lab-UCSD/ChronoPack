@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ import scipy.sparse as sp
 
 from chronopack._backends.r._bridge import source_r_resource
 from chronopack._core import record_provenance, validate_adata
-from chronopack._core._keys import GENE_DYNAMICS_KEY
+from chronopack._core._keys import CHRONOPACK_UNS_KEY, GENE_DYNAMICS_KEY
 from chronopack._core._validation import ChronoPackError
 
 
@@ -321,6 +322,116 @@ def _write_genes_x_cells_csv(matrix_gc, genes, cells, path, max_values_per_chunk
             pd.DataFrame(block, index=genes[start : start + step], columns=cells).to_csv(handle, header=start == 0)
 
 
+PRESCREEN_KEY = "time_association_prescreen"
+PRESCREEN_RECORD = "prescreen_time_association.json"
+
+
+def prescreen_time_association(
+    adata,
+    *,
+    layer="counts",
+    time_key="time",
+    df=3,
+    p_threshold=0.2,
+    library_size_key="total_counts",
+    chunk_size=2000,
+):
+    """Cheap per-gene test of time association, to choose genes for the tradeSeq fits.
+
+    Each gene's log-normalized expression, ``log1p(count / library size * median
+    library size)``, is regressed on a polynomial of degree ``df`` in time by least
+    squares, and an F test against a constant gives ``pvalue``. Genes with
+    ``pvalue < p_threshold`` are marked ``keep``.
+
+    Use ``df`` = the tradeSeq screen's knots - 1 (3 for the default 4-knot screen).
+    With ``df=3`` and ``p_threshold=0.2``, on the K562 + TNF-alpha and co-culture
+    K562 / THP1 fits (12 time tags, or merged into 6), this kept 32-41% of genes
+    and 97-99% of the genes that the tradeSeq screen called nominally significant
+    (p < 0.05), including every gene ranked in its top 500. It was not validated
+    for the per-lineage tests of a multi-lineage fit.
+
+    The test is not independent of tradeSeq's, so the FDR must still count every
+    screened gene. The screen is recorded in ``adata.uns``; tradeSeq inputs written
+    from the subset (``fit_gene_dynamics(..., prepare_inputs=True)``) note the
+    number of screened genes, and the fit's q-values are adjusted over all of them
+    (genes left out count as p = 1).
+
+    Returns a DataFrame indexed by ``adata.var_names`` with ``F``, ``df``,
+    ``pvalue`` and ``keep``; subset with ``adata[:, result["keep"]]``.
+    """
+    from scipy import stats
+
+    validate_adata(adata, time_key=time_key, layer=layer)
+    X = adata.layers[layer] if layer is not None else adata.X
+    time = pd.to_numeric(adata.obs[time_key].astype(str), errors="coerce").to_numpy(float)
+    if np.isnan(time).any():
+        raise ChronoPackError(f"adata.obs[{time_key!r}] contains non-numeric values.")
+    n_times = np.unique(time).size
+    if not 1 <= int(df) < n_times:
+        raise ChronoPackError(f"df must be between 1 and the number of time points - 1 ({n_times - 1}), got {df}.")
+    df = int(df)
+    if library_size_key is not None and library_size_key in adata.obs:
+        libsize = adata.obs[library_size_key].to_numpy(float)
+    else:
+        libsize = np.asarray(X.sum(axis=1)).ravel().astype(float)
+    if (libsize <= 0).any():
+        raise ChronoPackError("Every cell needs a positive library size.")
+
+    n = adata.n_obs
+    ts = (time - time.mean()) / time.std()
+    Q, _ = np.linalg.qr(np.column_stack([ts**k for k in range(df + 1)]))
+    scale = np.median(libsize) / libsize
+    if sp.issparse(X):
+        X = X.tocsc()
+    rss0, rss1 = np.empty(adata.n_vars), np.empty(adata.n_vars)
+    for start in range(0, adata.n_vars, chunk_size):
+        block = X[:, start : start + chunk_size]
+        block = block.toarray() if sp.issparse(block) else np.asarray(block, dtype=float)
+        Y = np.log1p(block * scale[:, None])
+        rss0[start : start + chunk_size] = ((Y - Y.mean(axis=0)) ** 2).sum(axis=0)
+        rss1[start : start + chunk_size] = ((Y - Q @ (Q.T @ Y)) ** 2).sum(axis=0)
+    df_resid = n - df - 1
+    with np.errstate(divide="ignore", invalid="ignore"):
+        F = np.clip(rss0 - rss1, 0, None) / df / (rss1 / df_resid)
+    F = np.where(rss0 <= 0, 0.0, np.where(rss1 <= 0, np.inf, F))
+    pvalue = stats.f.sf(F, df, df_resid)
+    result = pd.DataFrame(
+        {"F": F, "df": df, "pvalue": pvalue, "keep": pvalue < p_threshold},
+        index=adata.var_names.copy(),
+    )
+    record_provenance(
+        adata,
+        PRESCREEN_KEY,
+        analysis="prescreen_time_association",
+        parameters={"layer": layer, "time_key": time_key, "df": df, "p_threshold": p_threshold,
+                    "library_size_key": library_size_key},
+        result_keys={"n_genes_screened": int(adata.n_vars), "n_genes_kept": int(result["keep"].sum())},
+    )
+    return result
+
+
+def _write_prescreen_record(adata, output_dir, n_genes_written):
+    """Note in the tradeSeq inputs how many genes a time-association pre-screen considered."""
+    path = Path(output_dir) / PRESCREEN_RECORD
+    entry = (adata.uns.get(CHRONOPACK_UNS_KEY) or {}).get(PRESCREEN_KEY)
+    if entry is None:
+        path.unlink(missing_ok=True)  # inputs rewritten without a pre-screen
+        return None
+    record = {
+        "n_genes_screened": int(entry["result_keys"]["n_genes_screened"]),
+        "n_genes_kept": int(entry["result_keys"]["n_genes_kept"]),
+        "n_genes_written": int(n_genes_written),
+        "parameters": {k: (v.item() if hasattr(v, "item") else v) for k, v in dict(entry["parameters"]).items()},
+    }
+    path.write_text(json.dumps(record, indent=2))
+    return path
+
+
+def _prescreened_gene_count(input_dir):
+    path = Path(input_dir) / PRESCREEN_RECORD
+    return int(json.loads(path.read_text())["n_genes_screened"]) if path.exists() else None
+
+
 def prepare_tradeseq_inputs(
     adata,
     output_dir,
@@ -381,6 +492,9 @@ def prepare_tradeseq_inputs(
     _write_genes_x_cells_csv(matrix_gc, genes, cells, paths["counts"])
     time_df.to_csv(paths["cell_times"], index=False)
     pd.Series(genes, name="gene").to_csv(paths["subset_genes"], index=False)
+    prescreen_path = _write_prescreen_record(adata, output_dir, len(genes))
+    if prescreen_path is not None:
+        paths["prescreen"] = prescreen_path
 
     paths["cell_libsize_full"] = output_dir / "cell_libsize_full.csv"
     pd.DataFrame({"cell_id": cells, "libsize_full": adata.obs["total_counts"].to_numpy()}).to_csv(
@@ -444,9 +558,10 @@ def _run_tradeseq_backend(
     tag,
     verbose,
     lineage_weights=None,
+    fdr_n_tests=None,
 ):
     try:
-        from rpy2.robjects import StrVector, r
+        from rpy2.robjects import NULL, StrVector, r
     except ImportError as exc:
         raise ImportError("tradeSeq backend execution requires the optional 'rpy2' dependency.") from exc
 
@@ -476,6 +591,7 @@ def _run_tradeseq_backend(
         sce_screen_aliases=StrVector(legacy_outputs.get("sce_screen", [])),
         screen_genes_aliases=StrVector(legacy_outputs.get("screen_genes", [])),
         tag=str(tag),
+        fdr_n_tests=NULL if fdr_n_tests is None else int(fdr_n_tests),
         verbose=bool(verbose),
     )
 
@@ -566,6 +682,11 @@ def fit_gene_dynamics(
     (``counts_genes_x_cells.{tag}.csv.gz``, ...); ``tag="full"`` reads the
     unfiltered count matrix, so genes removed from the tradeSeq inputs (e.g. as
     low-count) can be fitted too, on the same cells and offsets.
+
+    If the inputs were written from genes kept by
+    :func:`prescreen_time_association`, ``input_dir`` records how many genes were
+    screened and the q-values are adjusted over all of them (``fdr_n_tests`` in
+    the provenance), not only over the genes fitted.
 
     tradeSeq SingleCellExperiment objects are retained as sidecar RDS files.
     Scalar association-test outputs are written to ``adata.var`` when
@@ -663,6 +784,10 @@ def fit_gene_dynamics(
         if target is not None:
             _write_association_to_var(target, association, selected_genes, key_added)
     elif run_backend:
+        fdr_n_tests = _prescreened_gene_count(input_dir)
+        metadata["fdr_n_tests"] = fdr_n_tests
+        if fdr_n_tests is not None and verbose:
+            print(f"q-values are adjusted over the {fdr_n_tests} genes of the time-association pre-screen.")
         backend_result = _run_tradeseq_backend(
             input_dir=input_dir,
             n_points=n_points,
@@ -675,6 +800,7 @@ def fit_gene_dynamics(
             tag=tag,
             verbose=verbose,
             lineage_weights=lineage_weights,
+            fdr_n_tests=fdr_n_tests,
         )
         association, significant, selected_genes, sidecar_paths = _read_tradeseq_outputs(
             backend_result,

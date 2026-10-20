@@ -50,8 +50,9 @@ STAGES = {
         (f"{T}/04_TradeSeqFits.K562.ipynb",),
         (f"{T}/04_TradeSeqFits.THP1.ipynb",),
     ],
-    # Optional: the two-lineage K562 + TNF-alpha fit (not used downstream). Needs
-    # more memory than 90G; run with --mem 160G --allow-bigcompute.
+    # Optional: the two-lineage K562 + TNF-alpha fit (not used downstream). Fits in the
+    # default 90G on a regular node (~85 min, 2026-10-20). Avoid --allow-bigcompute for
+    # tradeSeq stages: the all-cells K562 fit took ~3 h there vs 18 min on a regular node.
     "TradeSeqFitsTwoLineage": [(f"{K}/04_TradeSeqFits.TwoLineage.ipynb",)],
     # Optional: figures of both experiments (need GetTrajectories and TradeSeqFits).
     "Visualization": [(f"{K}/05_Visualization.ipynb",), (f"{T}/05_Visualization.ipynb",)],

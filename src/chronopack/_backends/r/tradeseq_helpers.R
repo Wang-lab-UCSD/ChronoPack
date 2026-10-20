@@ -193,7 +193,15 @@ fit_tradeseq_sce <- function(counts_sub, pseudotime, cell_weights, offset,
   }
 }
 
-association_df_single <- function(sce, n_points = 9) {
+# Benjamini-Hochberg q-values over n_tests genes: NULL counts the p-values given; a larger n_tests also counts
+# genes removed before the fit (e.g. by a time-association pre-screen) as p = 1.
+bh_adjust <- function(p, n_tests = NULL) {
+  n <- sum(!is.na(p))
+  if (!is.null(n_tests)) n <- max(n, as.integer(n_tests))
+  p.adjust(p, method = "BH", n = n)
+}
+
+association_df_single <- function(sce, n_points = 9, n_tests = NULL) {
   asso_res <- tradeSeq::associationTest(
     sce,
     global = FALSE,
@@ -206,7 +214,7 @@ association_df_single <- function(sce, n_points = 9) {
   if (!"meanLogFC" %in% names(asso_df) && ncol(asso_df) == 4) {
     names(asso_df) <- c("waldStat_1", "df_1", "pvalue_1", "meanLogFC")
   }
-  asso_df$qval_1 <- p.adjust(asso_df$pvalue_1, method = "BH")
+  asso_df$qval_1 <- bh_adjust(asso_df$pvalue_1, n_tests)
   asso_df
 }
 
@@ -232,7 +240,7 @@ annotate_sce_association <- function(sce, asso_df,
   sce
 }
 
-association_df_multilineage <- function(sce, n_points = 9) {
+association_df_multilineage <- function(sce, n_points = 9, n_tests = NULL) {
   asso_res <- tradeSeq::associationTest(
     sce,
     global = TRUE,
@@ -243,13 +251,13 @@ association_df_multilineage <- function(sce, n_points = 9) {
   asso_res <- asso_res[order(asso_res[, "waldStat_1"], decreasing = TRUE), , drop = FALSE]
   asso_df <- as.data.frame(asso_res)
   if ("pvalue" %in% names(asso_df)) {
-    asso_df$qval <- p.adjust(asso_df$pvalue, method = "BH")
+    asso_df$qval <- bh_adjust(asso_df$pvalue, n_tests)
   }
   if ("pvalue_1" %in% names(asso_df)) {
-    asso_df$qval_1 <- p.adjust(asso_df$pvalue_1, method = "BH")
+    asso_df$qval_1 <- bh_adjust(asso_df$pvalue_1, n_tests)
   }
   if ("pvalue_2" %in% names(asso_df)) {
-    asso_df$qval_2 <- p.adjust(asso_df$pvalue_2, method = "BH")
+    asso_df$qval_2 <- bh_adjust(asso_df$pvalue_2, n_tests)
   }
   asso_df
 }
@@ -310,6 +318,7 @@ run_tradeseq_single_lineage <- function(input_dir,
                                         screen_genes_aliases = character(),
                                         tag = "",
                                         seed = 123,
+                                        fdr_n_tests = NULL,
                                         verbose = TRUE) {
   old_wd <- getwd()
   on.exit(setwd(old_wd), add = TRUE)
@@ -340,7 +349,7 @@ run_tradeseq_single_lineage <- function(input_dir,
     workers = workers,
     verbose = verbose
   )
-  asso_df <- association_df_single(sce_screen, n_points = n_points)
+  asso_df <- association_df_single(sce_screen, n_points = n_points, n_tests = fdr_n_tests)
   asso_df <- asso_df[!is.na(asso_df$waldStat_1), , drop = FALSE]
   sce_screen <- annotate_sce_association(sce_screen, asso_df)
   sce_screen_paths <- save_rds_with_aliases(
@@ -471,6 +480,7 @@ run_tradeseq_weighted_lineages <- function(input_dir,
                                            screen_genes_aliases = character(),
                                            tag = "",
                                            seed = 123,
+                                           fdr_n_tests = NULL,
                                            verbose = TRUE) {
   old_wd <- getwd()
   on.exit(setwd(old_wd), add = TRUE)
@@ -497,7 +507,7 @@ run_tradeseq_weighted_lineages <- function(input_dir,
     workers = workers,
     verbose = verbose
   )
-  asso_df <- association_df_multilineage(sce_screen, n_points = n_points)
+  asso_df <- association_df_multilineage(sce_screen, n_points = n_points, n_tests = fdr_n_tests)
   wald_cols <- grep("^waldStat", names(asso_df), value = TRUE)
   asso_df <- asso_df[rowSums(!is.na(asso_df[, wald_cols, drop = FALSE])) > 0, , drop = FALSE]
   stat_cols <- grep("^(waldStat|pvalue|qval|meanLogFC)", names(asso_df), value = TRUE)

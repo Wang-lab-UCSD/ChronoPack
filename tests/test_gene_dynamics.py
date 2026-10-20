@@ -351,3 +351,94 @@ def test_prepare_tradeseq_inputs_sparse_counts_match_dense_text_across_chunks(tm
     _gene_dynamics._write_genes_x_cells_csv(sp.csr_matrix(counts.T), genes, cells, tmp_path / "chunked.csv.gz", max_values_per_chunk=14)
     assert _counts_lines(tmp_path / "chunked.csv.gz") == _counts_lines(tmp_path / "dense.csv.gz")
     assert len(_counts_lines(tmp_path / "chunked.csv.gz")) == 12
+
+
+def _time_course_adata(sparse_counts=False, seed=0):
+    import scipy.sparse as sp
+
+    rng = np.random.default_rng(seed)
+    n_per, times = 60, np.arange(1, 7)
+    time = np.repeat(times, n_per)
+    libsize = rng.integers(2000, 6000, size=time.size)
+    base = rng.uniform(0.0005, 0.005, size=8)
+    shape = np.ones((time.size, 8))
+    shape[:, 0] = np.exp(0.5 * (time - 1))                       # rising
+    shape[:, 1] = np.exp(-0.5 * (time - 3.5) ** 2) * 4 + 1       # transient
+    counts = rng.poisson(libsize[:, None] * base * shape).astype(float)
+    obs = pd.DataFrame({"time": time, "total_counts": libsize}, index=[f"c{i}" for i in range(time.size)])
+    layer = sp.csr_matrix(counts) if sparse_counts else counts
+    return AnnData(X=layer.copy(), obs=obs, var=pd.DataFrame(index=[f"g{j}" for j in range(8)]), layers={"counts": layer})
+
+
+def test_prescreen_time_association_matches_a_least_squares_f_test():
+    from scipy import stats
+
+    adata = _time_course_adata()
+    res = cp.tl.prescreen_time_association(adata, df=3, p_threshold=0.2, chunk_size=3)
+
+    assert res.index.tolist() == adata.var_names.tolist()
+    assert res.loc["g0", "pvalue"] < 1e-10 and res.loc["g1", "pvalue"] < 1e-10
+    assert res["keep"].tolist() == (res["pvalue"] < 0.2).tolist()
+    # Reference: ordinary least squares on [1, t, t^2, t^3] for one gene.
+    t = adata.obs["time"].to_numpy(float)
+    lib = adata.obs["total_counts"].to_numpy(float)
+    y = np.log1p(adata.layers["counts"][:, 5] * (np.median(lib) / lib))
+    X = np.column_stack([np.ones_like(t), t, t**2, t**3])
+    rss1 = np.sum((y - X @ np.linalg.lstsq(X, y, rcond=None)[0]) ** 2)
+    rss0 = np.sum((y - y.mean()) ** 2)
+    F = (rss0 - rss1) / 3 / (rss1 / (len(y) - 4))
+    np.testing.assert_allclose(res.loc["g5", "F"], F, rtol=1e-8)
+    np.testing.assert_allclose(res.loc["g5", "pvalue"], stats.f.sf(F, 3, len(y) - 4), rtol=1e-8)
+
+    sparse = cp.tl.prescreen_time_association(_time_course_adata(sparse_counts=True), df=3)
+    np.testing.assert_allclose(sparse["F"].to_numpy(), res["F"].to_numpy(), rtol=1e-10)
+    entry = adata.uns[CHRONOPACK_UNS_KEY]["time_association_prescreen"]
+    assert entry["result_keys"]["n_genes_screened"] == 8
+    with pytest.raises(cp._core._validation.ChronoPackError):
+        cp.tl.prescreen_time_association(adata, df=6)
+
+
+def test_prescreened_inputs_make_q_values_count_every_screened_gene(tmp_path, monkeypatch):
+    import json
+
+    adata = _time_course_adata()
+    res = cp.tl.prescreen_time_association(adata, p_threshold=0.2)
+    kept = adata[:, res["keep"]].copy()
+    paths = _gene_dynamics.prepare_tradeseq_inputs(kept, tmp_path)
+    record = json.loads((tmp_path / "prescreen_time_association.json").read_text())
+    assert paths["prescreen"].endswith("prescreen_time_association.json")
+    assert record["n_genes_screened"] == 8 and record["n_genes_written"] == kept.n_vars == record["n_genes_kept"]
+
+    seen = {}
+
+    def fake_run_backend(**kwargs):
+        seen.update(kwargs)
+        return object()
+
+    association = pd.DataFrame({"waldStat_1": [1.0], "df_1": [3.0], "pvalue_1": [0.5], "meanLogFC": [0.1], "qval_1": [0.5]},
+                               index=[kept.var_names[0]])
+    monkeypatch.setattr(_gene_dynamics, "_run_tradeseq_backend", fake_run_backend)
+    monkeypatch.setattr(_gene_dynamics, "_read_tradeseq_outputs",
+                        lambda result, input_dir: (association, association.iloc[:0], [], {}))
+    cp.tl.fit_gene_dynamics(input_dir=tmp_path, verbose=False)
+    assert seen["fdr_n_tests"] == 8
+
+    # Inputs rewritten without a pre-screen drop the record, and q-values count only the fitted genes again.
+    _gene_dynamics.prepare_tradeseq_inputs(_time_course_adata(), tmp_path)
+    assert not (tmp_path / "prescreen_time_association.json").exists()
+    cp.tl.fit_gene_dynamics(input_dir=tmp_path, verbose=False)
+    assert seen["fdr_n_tests"] is None
+
+
+def test_r_bh_adjust_counts_prescreened_genes_as_p_one():
+    pytest.importorskip("rpy2")
+    from rpy2.robjects import FloatVector, NULL, r
+    from chronopack._backends.r._bridge import source_r_resource
+
+    source_r_resource("tradeseq_helpers.R")
+    p = [0.001, 0.01, 0.02, 0.2, float("nan")]
+    default = np.array(r["bh_adjust"](FloatVector(p), NULL))
+    np.testing.assert_allclose(default, np.array(r["p.adjust"](FloatVector(p), method="BH")), equal_nan=True)
+    padded = np.array(r["bh_adjust"](FloatVector(p), 10))
+    full = np.array(r["p.adjust"](FloatVector(p[:4] + [1.0] * 6), method="BH"))[:4]
+    np.testing.assert_allclose(padded[:4], full)

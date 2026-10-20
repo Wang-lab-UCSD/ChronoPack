@@ -42,7 +42,9 @@ manuscript env and the puromycin experiment refer to the old layout.
   Compare with `verification/compare_runs.py STAGE NEW_DATA REF_DATA` and
   `verification/compare_tradeseq_outputs.R NEW_DATA REF_DATA` (r8's data root
   is the r8 run folder itself). Jobs request 90G (96G never fits outside
-  bigcompute).
+  bigcompute). The default excludes bigcompute; keep tradeSeq stages off it (2026-10-20: the
+  all-cells K562 fit took 18 min at 90G on a regular node vs ~3 h on bigcompute in r9, and the
+  two-lineage fit ~85 min at 90G).
 - `verification_runs/` is gitignored (run records only).
 - Puromycin removed: gene clustering does not depend on it (job 934429,
   `verification_runs/dimred_without_puromycin_20260930/`: all broad/fine

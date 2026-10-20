@@ -51,6 +51,13 @@ Changes since the previous collaborator test (2026-10-19):
   - The terminal-fate cosine graph is computed with dense float32 products
     instead of sparse ones. On K562 + TNF-alpha, 32 of 3.4M edges differ (ties at
     the 500th neighbour) and the trajectory clusters are identical.
+- `cp.tl.prescreen_time_association()`: optional pre-screen of genes before the
+  tradeSeq fits (least-squares F test on a cubic in time, keep p < 0.2). It kept
+  32-41% of genes and 97-99% of the nominally significant ones in the three
+  single-lineage fits (12 time tags or 6 merged). Inputs written from the
+  pre-screened genes record how many were screened, and the fits' q-values count
+  all of them. The `03_PrepareForTradeSeq` notebooks include it as a commented-out
+  cell; the analyses do not use it.
 
 Benchmark datasets, comparator methods, gold standards, and benchmarking
 metrics for GRN and C2C remain outside ChronoPack for this release.

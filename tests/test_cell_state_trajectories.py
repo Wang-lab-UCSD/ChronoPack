@@ -130,7 +130,7 @@ def test_cell_state_trajectory_result_supports_legacy_mapping_access():
 
     assert result["T_pruned"] is matrix
     assert result.as_dict()["T_sym"] is matrix
-    assert set(result.keys()) == {"tmaps", "transitions_long", "tmats", "T_full", "T_pruned", "T_sym"}
+    assert set(result.keys()) == {"tmaps", "transitions_long", "tmats", "T_full", "T_pruned", "T_sym", "growth"}
 
 
 def test_merge_trajectory_graphs_matches_block_embedding():
@@ -310,7 +310,7 @@ def test_result_builds_full_matrix_and_long_table_only_when_accessed():
     result = CellStateTrajectoryResult(tmaps=[], transitions_long=lambda: calls.append("long") or pd.DataFrame(),
                                        tmats={}, T_full=full, T_pruned=None, T_sym=None)
     assert result["T_pruned"] is None and calls == []
-    assert set(result.keys()) == {"tmaps", "transitions_long", "tmats", "T_full", "T_pruned", "T_sym"}
+    assert set(result.keys()) == {"tmaps", "transitions_long", "tmats", "T_full", "T_pruned", "T_sym", "growth"}
     assert result["T_full"].shape == (2, 2) and calls == ["T_full"]
     result.T_full
     assert calls == ["T_full"]
@@ -347,3 +347,159 @@ def test_dense_cosine_graph_matches_sklearn_sparse_neighbors():
     assert S.shape == ref.shape
     np.testing.assert_allclose(S.toarray(), ref.toarray(), atol=1e-6)
     assert (S.toarray() > 0).sum() == (ref.toarray() > 0).sum()
+
+
+def _chain_graph_adata(n_per_time=20, n_times=3, seed=0):
+    """Symmetric graph linking each time slice to the next, with some explicit zero entries."""
+    rng = np.random.default_rng(seed)
+    n = n_per_time * n_times
+    rows, cols, vals = [], [], []
+    for t in range(n_times - 1):
+        for i in range(t * n_per_time, (t + 1) * n_per_time):
+            js = rng.choice(np.arange((t + 1) * n_per_time, (t + 2) * n_per_time), size=5, replace=False)
+            rows += [i] * 5
+            cols += js.tolist()
+            vals += rng.random(5).tolist()
+    vals[0] = 0.0  # stored zero, as in the OT graph
+    G = sp.csr_matrix((vals, (rows, cols)), shape=(n, n))
+    G = G.maximum(G.T).tocsr()
+    adata = AnnData(obs=pd.DataFrame({"time": np.repeat(np.arange(n_times), n_per_time)}, index=[f"c{i}" for i in range(n)]))
+    adata.obsp["ot_graph"] = G
+    return adata
+
+
+def test_ot_force_directed_matches_weighted_igraph_layout():
+    import random
+
+    import igraph
+
+    from chronopack.tl import ot_force_directed
+
+    adata = _chain_graph_adata()
+    adata.uns["draw_graph"] = {"params": {"layout": "existing"}}
+    ot_force_directed(adata, random_state=3)
+    Y = adata.obsm["ot_force_directed"]
+    assert Y.shape == (adata.n_obs, 2) and np.isfinite(Y).all()
+    assert not [k for k in adata.obsm if k.startswith("X_draw_graph")]
+    assert adata.uns["draw_graph"] == {"params": {"layout": "existing"}}
+    prov = adata.uns["chronopack"]["ot_force_directed"]
+    assert prov["parameters"]["layout"] == "fr" and prov["parameters"]["weighted"]
+
+    # Same as a weighted Fruchterman-Reingold layout in igraph from scanpy's random start.
+    G = sp.triu(adata.obsp["ot_graph"], k=1).tocoo()
+    keep = G.data != 0
+    g = igraph.Graph(n=adata.n_obs, edges=list(zip(G.row[keep].tolist(), G.col[keep].tolist())), directed=False)
+    g.es["weight"] = G.data[keep].tolist()
+    np.random.seed(3)
+    init = np.random.random((adata.n_obs, 2))
+    random.seed(3)
+    expected = np.asarray(g.layout_fruchterman_reingold(weights="weight", niter=1000, seed=init.tolist()).coords)
+    np.testing.assert_allclose(Y, expected, rtol=1e-6, atol=1e-8)
+
+    # Deterministic, and the weights matter.
+    again = ot_force_directed(adata, random_state=3, copy=True)
+    np.testing.assert_array_equal(again.obsm["ot_force_directed"], Y)
+    unweighted = ot_force_directed(adata, random_state=3, weighted=False, copy=True)
+    assert not np.allclose(unweighted.obsm["ot_force_directed"], Y)
+
+
+def test_ot_force_directed_errors():
+    import pytest
+    from importlib.util import find_spec
+
+    from chronopack.tl import ot_force_directed
+
+    adata = _chain_graph_adata()
+    with pytest.raises(KeyError):
+        ot_force_directed(adata, graph_key="missing")
+    if find_spec("fa2_modified") is None:
+        with pytest.raises(ImportError):
+            ot_force_directed(adata, layout="fa")
+
+
+def _write_raw_tmaps(path, rng, sizes):
+    """WOT-style map files (tmaps_<t>_<t+1>.h5ad) holding couplings with uneven row sums (growth)."""
+    names = [[f"t{t}_c{i}" for i in range(n)] for t, n in enumerate(sizes, start=1)]
+    couplings = []
+    for t in range(len(sizes) - 1):
+        C = rng.random((sizes[t], sizes[t + 1])) ** 3 * rng.uniform(0.2, 3.0, size=(sizes[t], 1))
+        AnnData(X=C, obs=pd.DataFrame(index=names[t]), var=pd.DataFrame(index=names[t + 1])).write_h5ad(
+            path / f"tmaps_{t + 1}_{t + 2}.h5ad")
+        couplings.append(C)
+    obs = pd.DataFrame({"time": np.repeat(np.arange(1, len(sizes) + 1), sizes)},
+                       index=[name for block in names for name in block])
+    return couplings, obs
+
+
+def test_workflow_keeps_wot_growth_weights(tmp_path):
+    import pytest
+
+    from chronopack.tl import coupling_from_kernel
+    from chronopack.tl._trajectories import run_wot_transport_workflow, tmap_growth
+
+    couplings, obs = _write_raw_tmaps(tmp_path, np.random.default_rng(7), [5, 6, 4])
+    adata = AnnData(X=np.zeros((len(obs), 1)), obs=obs, var=pd.DataFrame(index=["g0"]))
+    result = run_wot_transport_workflow(adata, tmp_path, compute_transport_maps=False, transition_topk=None,
+                                        attach_graph=False)
+
+    expected = np.concatenate([C.sum(axis=1) / C.sum(axis=1).mean() for C in couplings])
+    assert result.growth.index.equals(adata.obs_names)
+    np.testing.assert_allclose(result.growth.iloc[:11], expected)
+    assert result.growth.iloc[11:].isna().all()  # the last time point has no outgoing map
+    pd.testing.assert_series_equal(tmap_growth(tmp_path).sort_index(), result.growth.dropna().sort_index(),
+                                   check_names=False)
+    assert "ot_growth" not in adata.obs  # only written with attach_graph
+
+    # The couplings come back from the row-normalized matrix, each map divided by its mean row sum.
+    C = coupling_from_kernel(result.T_full, result.growth).toarray()
+    np.testing.assert_allclose(C[:5, 5:11], couplings[0] / couplings[0].sum(axis=1).mean())
+    np.testing.assert_allclose(C[5:11, 11:], couplings[1] / couplings[1].sum(axis=1).mean())
+    assert not C[11:].any()
+    with pytest.raises(ValueError):
+        coupling_from_kernel(result.T_full, np.full(adata.n_obs, np.nan))
+
+
+def test_growth_weighted_fates_match_wot(tmp_path):
+    import pytest
+
+    wot = pytest.importorskip("wot")
+    from chronopack.tl._trajectories import run_wot_transport_workflow, terminal_fates_from_terminal_clusters
+
+    sizes = [12, 15, 10, 14]
+    _, obs = _write_raw_tmaps(tmp_path, np.random.default_rng(8), sizes)
+    last = obs.index[obs["time"] == len(sizes)]
+    obs["traj_clusters"] = "0"
+    obs.loc[last, "traj_clusters"] = np.array(["a", "b"])[np.arange(len(last)) % 2]
+    adata = AnnData(X=np.zeros((len(obs), 1)), obs=obs, var=pd.DataFrame(index=["g0"]))
+    result = run_wot_transport_workflow(adata, tmp_path, compute_transport_maps=False, transition_topk=None,
+                                        attach_graph=False)
+
+    model = wot.tmap.TransportMapModel.from_directory(str(tmp_path / "tmaps"))
+    sets = {f: list(last[obs.loc[last, "traj_clusters"] == f]) for f in ("a", "b")}
+    res = model.fates(model.population_from_cell_sets(sets, at_time=float(len(sizes))))
+    expected = pd.DataFrame(res.X, index=res.obs_names, columns=res.var_names).loc[adata.obs_names, ["a", "b"]]
+
+    def fates(growth):
+        tmp = adata.copy()
+        CalculateTerminalFatesAcrossCells(tmp, result.T_full, growth=growth)
+        F, names = terminal_fates_from_terminal_clusters(tmp)
+        return pd.DataFrame(F, index=tmp.obs_names, columns=names)[["a", "b"]].to_numpy(), tmp
+
+    weighted, tmp = fates(result.growth)
+    np.testing.assert_allclose(weighted, expected.to_numpy(), atol=1e-6)  # terminal_cell_dist is stored as float32
+    assert tmp.uns["chronopack"]["terminal_cell_dist"]["parameters"]["growth"] == "per-cell values"
+    default, tmp = fates(None)
+    assert np.abs(default - expected.to_numpy()).max() > 1e-2  # the Markov-chain default differs
+    assert tmp.uns["chronopack"]["terminal_cell_dist"]["parameters"]["growth"] is None
+
+    adata.obs["ot_growth"] = result.growth.to_numpy()
+    by_key, tmp = fates("ot_growth")
+    np.testing.assert_array_equal(by_key, weighted)
+    assert tmp.uns["chronopack"]["terminal_cell_dist"]["parameters"]["growth"] == "ot_growth"
+
+    with pytest.raises(KeyError):
+        CalculateTerminalFatesAcrossCells(adata.copy(), result.T_full, growth="missing")
+    bad = result.growth.copy()
+    bad.iloc[0] = np.nan
+    with pytest.raises(ValueError):
+        CalculateTerminalFatesAcrossCells(adata.copy(), result.T_full, growth=bad)

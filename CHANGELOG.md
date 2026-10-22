@@ -58,6 +58,30 @@ Changes since the previous collaborator test (2026-10-19):
   pre-screened genes record how many were screened, and the fits' q-values count
   all of them. The `03_PrepareForTradeSeq` notebooks include it as a commented-out
   cell; the analyses do not use it.
+- `cp.tl.ot_force_directed()`: force-directed layout of the WOT transition graph
+  (`obsp["ot_graph"]`), an alternative to the OT-UMAP, stored in
+  `obsm["ot_force_directed"]`. It runs `scanpy.tl.draw_graph` (Fruchterman-Reingold
+  through python-igraph by default, weighted by the transition probabilities;
+  `layout="fa"` for ForceAtlas2 needs `fa2-modified`). The analyses still use the
+  OT-UMAP.
+- Optional growth weighting of the terminal-fate calculation:
+  `cluster_cells_to_trajectories(..., growth=...)` (and
+  `CalculateTerminalFatesAcrossCells`) weights each transition by the descendant
+  mass of the cell it reaches, using WOT's growth weights (each cell's coupling
+  row sum relative to its map's mean), as WOT's `TransportMapModel.fates` does.
+  With the unpruned transition matrix it reproduces WOT's fates. The default
+  (`growth=None`) is unchanged: a Markov chain on the row-normalized transitions.
+  `get_trajectories` now keeps the growth weights (`result.growth`, and
+  `adata.obs["ot_growth"]` when it attaches the graph), and
+  `cp.tl.coupling_from_kernel(T, growth)` rebuilds the couplings from a transition
+  matrix. The terminal-cell distributions record `topk` and `growth` in
+  `adata.uns["chronopack"]["terminal_cell_dist"]`. On the current data, unpruned
+  growth-weighted fates match WOT's to 1e-7; with the analyses' pruned graph,
+  growth weighting changes fate probabilities by 0.014 (K562 + TNF-alpha) and
+  0.029 (co-culture K562 cells) on average and the dominant fate of 3% and 7% of
+  cells, mostly near 50/50. The analyses keep the default.
+- The `wot` extra now lists `igraph` and `leidenalg`, which the Leiden clustering
+  of trajectories already needed (the conda environment file already had them).
 
 Benchmark datasets, comparator methods, gold standards, and benchmarking
 metrics for GRN and C2C remain outside ChronoPack for this release.

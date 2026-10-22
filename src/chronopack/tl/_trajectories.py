@@ -14,7 +14,9 @@ from chronopack._core import record_provenance, validate_adata
 from chronopack._core._keys import (
     CELL_STATE_TRAJECTORIES_KEY,
     CELL_STATE_TRAJECTORY_CLUSTER_KEY,
+    OT_FORCE_DIRECTED_KEY,
     OT_GRAPH_KEY,
+    OT_GROWTH_KEY,
     OT_UMAP_KEY,
     TERMINAL_CELL_DIST_INDEX_KEY,
     TERMINAL_CELL_DIST_KEY,
@@ -54,17 +56,22 @@ class CellStateTrajectoryResult:
     in one cell x cell matrix) hold all n_t x n_t+1 couplings, which is large for
     big time points. Either may be given as a zero-argument function; it is then
     built the first time it is accessed.
+
+    ``growth`` holds WOT's growth weight of each cell (its coupling row sum
+    relative to its map's mean, see :func:`tmap_growth`) as a Series indexed like
+    ``adata.obs_names``; cells at the last time point are NaN.
     """
 
-    _FIELDS = ("tmaps", "transitions_long", "tmats", "T_full", "T_pruned", "T_sym")
+    _FIELDS = ("tmaps", "transitions_long", "tmats", "T_full", "T_pruned", "T_sym", "growth")
 
-    def __init__(self, tmaps, transitions_long, tmats, T_full, T_pruned, T_sym):
+    def __init__(self, tmaps, transitions_long, tmats, T_full, T_pruned, T_sym, growth=None):
         self.tmaps = tmaps
         self._transitions_long = transitions_long
         self.tmats = tmats
         self._T_full = T_full
         self.T_pruned = T_pruned
         self.T_sym = T_sym
+        self.growth = growth
 
     @property
     def transitions_long(self) -> pd.DataFrame:
@@ -103,8 +110,8 @@ class CellStateTrajectoryResult:
         return iter(self._FIELDS)
 
 
-def read_tmap(fpath):
-    """Read a WOT transport map and return a row-normalized sparse matrix."""
+def _read_tmap_with_growth(fpath):
+    """:func:`read_tmap` plus each source cell's coupling row sum divided by the map's mean row sum."""
     fpath = Path(fpath)
     ad = _scanpy().read_h5ad(fpath)
     t_src, t_tgt = map(float, fpath.stem.split("_")[1:])
@@ -112,7 +119,14 @@ def read_tmap(fpath):
     row_sums = np.asarray(T.sum(axis=1)).ravel()
     inv_row = 1.0 / np.maximum(row_sums, 1e-12)
     T_norm = T.multiply(inv_row[:, None])
-    return t_src, t_tgt, T_norm, ad.obs_names.to_numpy(), ad.var_names.to_numpy()
+    mean = row_sums.mean() if row_sums.size else 0.0
+    growth = row_sums / mean if mean > 0 else row_sums
+    return (t_src, t_tgt, T_norm, ad.obs_names.to_numpy(), ad.var_names.to_numpy()), growth
+
+
+def read_tmap(fpath):
+    """Read a WOT transport map and return a row-normalized sparse matrix."""
+    return _read_tmap_with_growth(fpath)[0]
 
 
 def _renormalize_rows(T):
@@ -199,6 +213,49 @@ def read_tmaps(tmap_path):
     return [read_tmap(fp) for fp in sorted(Path(tmap_path).glob("*.h5ad"))]
 
 
+def _read_tmaps_with_growth(tmap_path):
+    tmaps, parts = [], []
+    for fp in sorted(Path(tmap_path).glob("*.h5ad")):
+        tmap, growth = _read_tmap_with_growth(fp)
+        tmaps.append(tmap)
+        parts.append(pd.Series(growth, index=pd.Index(tmap[3]).astype(str)))
+    growth = pd.concat(parts) if parts else pd.Series(dtype=float)
+    growth.name = OT_GROWTH_KEY
+    return tmaps, growth
+
+
+def tmap_growth(tmap_path):
+    """WOT growth weight of every source cell of the maps in a directory.
+
+    The weight is the cell's row sum in its WOT coupling divided by the mean row
+    sum of that map, so the cells of each time point average 1. It is the growth
+    that WOT's ``TransportMapModel.fates`` and ``pull_back`` carry along (see the
+    ``growth`` option of :func:`CalculateTerminalFatesAcrossCells`). Returns a
+    Series indexed by cell; cells of the last time point have no outgoing map
+    and are not included.
+    """
+    return _read_tmaps_with_growth(tmap_path)[1]
+
+
+def coupling_from_kernel(T, growth):
+    """Scale each row of a row-normalized transition matrix by the cell's growth weight.
+
+    Returns ``diag(growth) @ T``: from the transition matrices ChronoPack keeps
+    (e.g. ``result.T_full``) and ``result.growth``, this gives WOT's couplings, each
+    map divided by its mean row sum. ``growth`` is ordered like the rows of ``T``.
+    Cells without a growth weight (NaN, e.g. the last time point) must have empty
+    rows; they stay empty. For a pruned ``T`` each row sums to the cell's growth
+    weight, i.e. the kept transitions carry the cell's full coupling mass.
+    """
+    T = sp.csr_matrix(T)
+    g = np.asarray(growth, dtype=float).ravel()
+    if g.shape != (T.shape[0],):
+        raise ValueError(f"growth has {g.size} values for a matrix with {T.shape[0]} rows.")
+    missing = ~np.isfinite(g)
+    if (missing & (np.diff(T.indptr) > 0)).any():
+        raise ValueError("growth is missing (NaN/inf) for cells that have outgoing transitions.")
+    return (sp.diags(np.where(missing, 0.0, g), format="csr") @ T).tocsr()
+
 def extract_wot_couplings(tmap_path, make_dense=False):
     """Read all WOT maps from a directory into tmaps, long table, and tmats."""
     tmaps = read_tmaps(tmap_path)
@@ -230,6 +287,10 @@ def run_wot_transport_workflow(
     pruned graph is built map by map, so the full n_t x n_t+1 couplings are only
     held as the maps themselves; ``T_full`` and ``transitions_long`` on the result
     are built when first accessed.
+
+    The transition matrices are row-normalized; each cell's WOT growth weight
+    (:func:`tmap_growth`) is kept as ``result.growth`` and, with ``attach_graph``,
+    in ``adata.obs["ot_growth"]`` (NaN at the last time point).
     """
     tmap_dir = Path(tmap_dir)
     tmap_dir.mkdir(parents=True, exist_ok=True)
@@ -242,15 +303,18 @@ def run_wot_transport_workflow(
         ot_model = wot.ot.OTModel(adata, **kwargs)
         ot_model.compute_all_transport_maps(tmap_out=str(tmap_dir / "tmaps"))
 
-    tmaps = read_tmaps(tmap_dir)
+    tmaps, growth = _read_tmaps_with_growth(tmap_dir)
     tmats = transition_matrices_from_tmaps(tmaps)
     obs_names = adata.obs_names.copy()
+    growth = growth.reindex(obs_names.astype(str))
+    growth.index = obs_names
     if use_unpruned_as_pruned:
         T_pruned = embed_transition_matrices(obs_names, tmats)
     else:
         T_pruned = embed_transition_matrices(obs_names, tmats, topk=transition_topk, mass=transition_mass)
     T_sym = symmetrize_graph(T_pruned, symmetrize)
     if attach_graph:
+        adata.obs[OT_GROWTH_KEY] = growth.to_numpy()
         adata.obsp[graph_key] = T_sym
         adata.uns[graph_key] = {
             "connectivities_key": graph_key,
@@ -277,6 +341,7 @@ def run_wot_transport_workflow(
         T_full=lambda: embed_transition_matrices(obs_names, tmats),
         T_pruned=T_pruned,
         T_sym=T_sym,
+        growth=growth,
     )
 
 
@@ -319,12 +384,94 @@ def get_trajectories(
             **kwargs,
         },
         result_keys={
+            "obs": [OT_GROWTH_KEY],
             "obsp": [graph_key],
             "obsm": [umap_key],
-            "sidecar": ["tmaps", "transitions_long", "tmats", "T_full", "T_pruned", "T_sym"],
+            "sidecar": ["tmaps", "transitions_long", "tmats", "T_full", "T_pruned", "T_sym", "growth"],
         },
     )
     return (target, result) if copy else result
+
+
+def ot_force_directed(
+    adata,
+    *,
+    graph_key=OT_GRAPH_KEY,
+    key_added=OT_FORCE_DIRECTED_KEY,
+    layout="fr",
+    weighted=True,
+    init_pos=None,
+    random_state=0,
+    copy=False,
+    **layout_kwargs,
+):
+    """Force-directed layout of the WOT transition graph, an alternative to the OT-UMAP.
+
+    Lays out ``adata.obsp[graph_key]`` (the graph written by :func:`get_trajectories`)
+    with :func:`scanpy.tl.draw_graph` and stores the coordinates in
+    ``adata.obsm[key_added]``. Cells are linked only to their transitions at the
+    neighbouring time points, so the layout spreads time along one axis and fates
+    along the other.
+
+    ``layout="fr"`` (Fruchterman-Reingold, through python-igraph) needs no
+    dependency beyond Leiden clustering's; with ``weighted=True`` stronger
+    transitions pull harder, and ``niter`` defaults to 1000. ``layout="fa"``
+    (ForceAtlas2) needs the ``fa2-modified`` package. ``init_pos`` is an ``obsm``
+    key to start from (e.g. ``"ot_umap"``); by default cells start at random
+    positions drawn with ``random_state``. Other keyword arguments go to the
+    layout function. Modifies ``adata`` in place, or returns a copy with
+    ``copy=True``.
+    """
+    from importlib.util import find_spec
+
+    sc = _scanpy()
+    target = adata.copy() if copy else adata
+    if graph_key not in target.obsp:
+        raise KeyError(f"adata.obsp[{graph_key!r}] not found; run get_trajectories first.")
+    if layout == "fa":
+        if find_spec("fa2_modified") is None:
+            raise ImportError("layout='fa' (ForceAtlas2) needs the fa2-modified package: pip install fa2-modified")
+    elif weighted:
+        layout_kwargs.setdefault("weights", "weight")
+    if layout == "fr":
+        layout_kwargs.setdefault("niter", 1000)
+
+    # draw_graph turns every stored entry into an undirected edge, so a symmetric matrix would give each pair two
+    # parallel edges (twice the pull); pass each pair once, with the larger of its two weights.
+    G = sp.csr_matrix(target.obsp[graph_key])
+    adjacency = sp.triu(G.maximum(G.T), k=1).tocsr()
+    original_uns = target.uns.get("draw_graph")
+    tmp_ext = "_chronopack_tmp"
+    sc.tl.draw_graph(
+        target,
+        layout=layout,
+        adjacency=adjacency,
+        init_pos=init_pos if init_pos is not None else False,
+        random_state=random_state,
+        key_added_ext=tmp_ext,
+        **layout_kwargs,
+    )
+    target.obsm[key_added] = target.obsm.pop(f"X_draw_graph_{tmp_ext}")
+    if original_uns is None:
+        target.uns.pop("draw_graph", None)
+    else:
+        target.uns["draw_graph"] = original_uns
+    record_provenance(
+        target,
+        key_added,
+        analysis="ot_force_directed_layout",
+        backend="scanpy.tl.draw_graph",
+        parameters={
+            "graph_key": graph_key,
+            "layout": layout,
+            "weighted": bool(weighted and layout != "fa"),
+            "init_pos": init_pos,
+            "random_state": random_state,
+            **{k: v for k, v in layout_kwargs.items() if k != "weights"},
+        },
+        result_keys={"obsm": [key_added]},
+    )
+    return target if copy else None
 
 
 def prune_transition_rows(M, topk=None, mass=None):
@@ -475,7 +622,23 @@ def _topk_csr_rows(M_csr, k=100, eps=1e-12):
     return topk_csr_rows(M_csr, k=k, renorm=False, eps=eps)
 
 
-def CalculateTerminalFatesAcrossCells(adata, T, topk=None):
+def _resolve_growth(adata, growth):
+    """Per-cell growth weights in ``adata.obs_names`` order from an obs key, a Series or an array."""
+    if growth is None:
+        return None
+    if isinstance(growth, str):
+        if growth not in adata.obs:
+            raise KeyError(f"adata.obs[{growth!r}] not found; get_trajectories stores the WOT growth weights there.")
+        growth = adata.obs[growth]
+    if isinstance(growth, pd.Series):
+        growth = growth.reindex(adata.obs_names)
+    g = np.asarray(growth, dtype=float).ravel()
+    if g.shape != (adata.n_obs,):
+        raise ValueError(f"growth has {g.size} values for {adata.n_obs} cells.")
+    return g
+
+
+def CalculateTerminalFatesAcrossCells(adata, T, topk=None, growth=None):
     """Compute terminal-cell fate distributions for every cell.
 
     Each cell's distribution over the cells of the last time point is propagated
@@ -485,6 +648,19 @@ def CalculateTerminalFatesAcrossCells(adata, T, topk=None):
     exact; an integer keeps only each cell's ``topk`` largest terminal-cell
     probabilities at every step (renormalized), an approximation that sharpens
     early cells' fate probabilities.
+
+    ``growth`` (default ``None``: every cell counts equally) weights the
+    transitions by the cells' growth, as WOT's ``TransportMapModel.fates`` does: an
+    obs key (``"ot_growth"``, stored by :func:`get_trajectories`), a Series indexed
+    by cell, or an array in ``adata.obs_names`` order. Each cell's descendant mass
+    at the last time point is ``M_i = growth_i * sum_j P_ij M_j`` (``M = 1`` at the
+    last time point), and the step from cell ``i`` follows ``P_ij M_j``
+    (renormalized), so a cell's distribution is that of its descendants' mass
+    rather than of a single random walk. With the unpruned transition matrix and
+    ``growth=result.growth`` this reproduces WOT's fates. Growth weights are only
+    needed before the last time point; there they must be finite and non-negative.
+    Since ``T`` is row-normalized at every step, it may also be a coupling matrix
+    (pass its row sums as ``growth`` to keep them).
     """
     assert sp.issparse(T), "T must be a scipy sparse matrix."
     assert T.shape == (adata.n_obs, adata.n_obs), "T must be n_cells x n_cells."
@@ -500,8 +676,16 @@ def CalculateTerminalFatesAcrossCells(adata, T, topk=None):
     n_last = idx_last.size
     n = adata.n_obs
     print(f"Terminal timepoint: {time_levels_nonempty[-1]} | n_terminal={n_last}")
+    g = _resolve_growth(adata, growth)
+    if g is not None:
+        before_last = np.concatenate(idx_by_time[:-1])
+        bad = ~np.isfinite(g[before_last]) | (g[before_last] < 0)
+        if bad.any():
+            raise ValueError(f"growth must be finite and non-negative before the last time point; {int(bad.sum())} cells are not.")
     D_by_time = [None] * len(idx_by_time)
     D_by_time[-1] = sp.identity(n_last, format="csr", dtype=np.float64)
+    mass_by_time = [None] * len(idx_by_time)  # descendant mass at the last time point (with growth)
+    mass_by_time[-1] = np.ones(n_last)
     for ti in range(len(idx_by_time) - 2, -1, -1):
         ii = idx_by_time[ti]
         future_idx = np.concatenate(idx_by_time[ti + 1 :])
@@ -511,7 +695,15 @@ def CalculateTerminalFatesAcrossCells(adata, T, topk=None):
         inv = np.zeros_like(rs, dtype=np.float64)
         nz = rs > 0
         inv[nz] = 1.0 / (rs[nz] + 1e-15)
-        D_t = ((sp.diags(inv, format="csr") @ A) @ D_future).tocsr()
+        P = sp.diags(inv, format="csr") @ A
+        if g is not None:
+            W = (P @ sp.diags(np.concatenate(mass_by_time[ti + 1 :]), format="csr")).tocsr()
+            s = np.asarray(W.sum(axis=1)).ravel()
+            inv_s = np.zeros_like(s)
+            inv_s[s > 0] = 1.0 / s[s > 0]
+            P = sp.diags(inv_s, format="csr") @ W
+            mass_by_time[ti] = g[ii] * s
+        D_t = (P @ D_future).tocsr()
         if topk is not None:
             D_t = topk_csr_rows(D_t, k=topk, renorm=True)
         else:
@@ -539,6 +731,14 @@ def CalculateTerminalFatesAcrossCells(adata, T, topk=None):
     D_full = sp.diags(1.0 / np.where(rs > 0, rs, 1.0), format="csr") @ D_full
     adata.obsm[TERMINAL_CELL_DIST_KEY] = D_full.astype(np.float32)
     adata.uns[TERMINAL_CELL_DIST_INDEX_KEY] = idx_last
+    record_provenance(
+        adata,
+        TERMINAL_CELL_DIST_KEY,
+        analysis="terminal_cell_distributions",
+        backend="chronopack",
+        parameters={"topk": topk, "growth": growth if growth is None or isinstance(growth, str) else "per-cell values"},
+        result_keys={"obsm": [TERMINAL_CELL_DIST_KEY], "uns": [TERMINAL_CELL_DIST_INDEX_KEY]},
+    )
     print(f"Stored adata.obsm['{TERMINAL_CELL_DIST_KEY}'] with shape {D_full.shape} (sparse nnz={D_full.nnz})")
     return D_full
 
@@ -594,13 +794,15 @@ def terminal_fate_trajectory_clustering(
     graph_topk=500,
     random_state=0,
     directed=False,
+    growth=None,
 ):
     """Compute terminal fate distributions and Leiden trajectory clusters.
 
     ``terminal_topk`` is passed to :func:`CalculateTerminalFatesAcrossCells` as
-    ``topk``: ``None`` (default) for exact distributions.
+    ``topk``: ``None`` (default) for exact distributions. ``growth`` (default
+    ``None``) is passed on as well, to weight the transitions by WOT's growth.
     """
-    CalculateTerminalFatesAcrossCells(adata, T, topk=terminal_topk)
+    CalculateTerminalFatesAcrossCells(adata, T, topk=terminal_topk, growth=growth)
     S = cosine_topk_leiden_from_terminal_dist(
         adata,
         dist_key=TERMINAL_CELL_DIST_KEY,
@@ -629,11 +831,24 @@ def cluster_cells_to_trajectories(
     graph_topk=500,
     random_state=0,
     directed=False,
+    growth=None,
 ):
     """Cluster cells into cell-state trajectories from a square cell-state graph.
 
     ``terminal_topk=None`` (default) uses exact terminal-cell distributions; an
     integer keeps each cell's ``terminal_topk`` largest at every step.
+
+    ``S`` is usually the pruned transition matrix (``result.T_pruned`` from
+    :func:`get_trajectories`); passing ``result.T_full`` instead uses every WOT
+    transition (and, with ``growth``, gives exactly WOT's fates) while the OT
+    graph and OT-UMAP stay pruned, at the cost of memory for large time points.
+
+    ``growth=None`` (default) treats the transitions as a Markov chain, every cell
+    counting equally. ``growth="ot_growth"`` (or a Series of
+    ``result.growth``, e.g. concatenated across per-cell-type runs) weights them by
+    WOT's growth weights, so terminal distributions, and with them the trajectory
+    clusters and fate probabilities, follow descendant mass as in WOT's
+    ``TransportMapModel.fates``; see :func:`CalculateTerminalFatesAcrossCells`.
     """
     if S is None:
         if OT_GRAPH_KEY not in adata.obsp:
@@ -648,6 +863,7 @@ def cluster_cells_to_trajectories(
         graph_topk=graph_topk,
         random_state=random_state,
         directed=directed,
+        growth=growth,
     )
 
 
@@ -1151,6 +1367,7 @@ __all__ = [
     "cluster_cells_to_trajectories",
     "compute_terminal_fate_probabilities",
     "cosine_topk_leiden_from_terminal_dist",
+    "coupling_from_kernel",
     "early_fate_correlations",
     "embed_block",
     "extract_wot_couplings",
@@ -1159,12 +1376,14 @@ __all__ = [
     "keep_topk",
     "mass_retention_plots_and_umap",
     "merge_trajectory_graphs",
+    "ot_force_directed",
     "read_tmap",
     "rotate_embedding_to_time",
     "run_wot_transport_workflow",
     "sparse_adjacency_from_tmats",
     "terminal_fate_trajectory_clustering",
     "terminal_fates_from_terminal_clusters",
+    "tmap_growth",
     "topk_csr_rows",
     "trajectory_soft_memberships",
 ]

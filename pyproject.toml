@@ -40,6 +40,8 @@ scanpy = [
   "scanpy",
 ]
 wot = [
+  "igraph",
+  "leidenalg",
   "scanpy",
   "wot==1.0.8.post2",
 ]

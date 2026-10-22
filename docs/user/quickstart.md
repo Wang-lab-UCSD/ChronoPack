@@ -82,7 +82,9 @@ cp.pl.mode_sankey(traj, pairs=[("K562a", "THP1")], top_k=100, output="mode_switc
 cp.tl.topk_mode_recovery(traj, pairs=[("K562a", "THP1")], k=100)
 ```
 
-GRN and C2C workflows also return transparent result objects:
+GRN and C2C workflows also return transparent result objects. How the TF
+ranking works, its defaults and known limitations are described in
+`docs/user/grn.md`:
 
 ```python
 tfs = cp.tl.grn.rank_regulators(
@@ -90,6 +92,7 @@ tfs = cp.tl.grn.rank_regulators(
     is_ligand=True,
     human_tf_path="hs_tfs.txt",
     ligand_receptor_path="interaction_input_CellChatDB.csv",
+    omnipath_snapshot="omnipath_snapshot_2025-10-21",  # fixed OmniPath tables (analyses/resources/)
 )
 targets = cp.tl.grn.score_targets("asso_df.1trajectory.lfdr.csv", valid_targets="protein_coding_genes.csv")
 grn = cp.tl.grn.infer(targets, tfs, valid_targets="protein_coding_genes.csv", name="ChronoPack_K562")

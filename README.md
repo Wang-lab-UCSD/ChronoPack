@@ -12,7 +12,8 @@ AnnData, result objects, and reusable plotting wrappers.
 - `chronopack.tl`: cell-state trajectories, fate outputs, gene dynamics,
   gene-trajectory characterization, dynamic-mode clustering, and cross-context
   comparison of dynamic modes.
-- `chronopack.tl.grn`: GRN inference and regulator/target scoring.
+- `chronopack.tl.grn`: GRN inference and regulator/target scoring (how the TF
+  ranking works and its known limitations: `docs/user/grn.md`).
 - `chronopack.tl.c2c`: cell-cell communication inference.
 - `chronopack.pl`: reusable plotting wrappers, including R-backed plotting
   rendered to SVG/PDF/PNG.

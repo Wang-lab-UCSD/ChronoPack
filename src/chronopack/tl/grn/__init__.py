@@ -7,6 +7,7 @@ from ._inference import (
     TargetGeneScoreResult,
     build_chronopack_ranked_edges,
     build_omnipath_tf_graph,
+    expressed_genes,
     infer,
     load_omnipath_tf_resources,
     rank_omnipath_tfs,
@@ -21,6 +22,7 @@ from ._inference import (
 __all__ = [
     "GRNResult",
     "TargetGeneScoreResult",
+    "expressed_genes",
     "infer",
     "rank_regulators",
     "save_omnipath_snapshot",

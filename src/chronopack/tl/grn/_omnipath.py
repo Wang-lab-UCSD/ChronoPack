@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import re
-from collections import defaultdict
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
 import networkx as nx
 import numpy as np
 import pandas as pd
+from scipy import sparse
 
 
 DEFAULT_DROP_SOURCES = {
@@ -46,6 +47,31 @@ class OmniPathTfGraph:
     split_interactions: pd.DataFrame
     merged_interactions: pd.DataFrame
 
+
+# OmniPath resources by the kind of evidence they hold (base names; "X_Y" tokens are X's data processed by Y).
+PPI_RESOURCES = {"BioGRID", "DIP", "DOMINO", "DeathDomain", "ELM", "HINT", "HPRD", "HuRI", "InnateDB", "IntAct",
+                 "LMPID", "Lit-BM-17", "MPPI", "PDZBase"}
+ENZYME_SUBSTRATE_RESOURCES = {"DEPOD", "HPRD-phos", "KEA", "Li2012", "MIMP", "PhosphoNetworks", "PhosphoPoint",
+                              "PhosphoSite", "ProtMapper", "dbPTM", "iPTMnet", "phosphoELM"}
+LIGAND_RECEPTOR_RESOURCES = {"Baccin2019", "CellCall", "CellChatDB", "CellPhoneDB", "CellTalkDB", "Cellinker", "DLRP",
+                             "EMBRACE", "Fantom5", "Guide2Pharma", "HPMR", "ICELLNET", "Kirouac2010", "LRdb",
+                             "Ramilowski2015", "UniProt", "Wojtowicz2020", "connectomeDB2020", "iTALK", "scConnect",
+                             "talklr"}
+TEXT_MINED_OR_PREDICTED_RESOURCES = {"REACH", "Sparser", "RLIMS-P", "NetworKIN", "Kinexus", "STRING"}
+PHYSICAL_RESOURCES = PPI_RESOURCES | ENZYME_SUBSTRATE_RESOURCES | LIGAND_RECEPTOR_RESOURCES
+
+# Second-messenger steps that OmniPath's protein-protein signaling tables cannot hold (cAMP, IP3/Ca2+, DAG):
+# adenylyl cyclases -> cAMP -> PKA catalytic subunits and EPAC; phospholipase C -> IP3/Ca2+ -> calcineurin and
+# CaMKII/IV, and -> DAG -> classical/novel PKC isoforms and RasGRPs. Added as activating edges when absent.
+_ADCY = [f"ADCY{i}" for i in range(1, 11)]
+_PLC = ["PLCB1", "PLCB2", "PLCB3", "PLCB4", "PLCG1", "PLCG2"]
+SECOND_MESSENGER_BRIDGES = (
+    [(a, t, "cAMP") for a in _ADCY for t in ("PRKACA", "PRKACB", "RAPGEF3", "RAPGEF4")]
+    + [(p, t, "IP3/Ca2+") for p in _PLC for t in ("PPP3CA", "PPP3CB", "PPP3CC", "CAMK2A", "CAMK2B", "CAMK2D",
+                                                  "CAMK2G", "CAMK4")]
+    + [(p, t, "DAG") for p in _PLC for t in ("PRKCA", "PRKCB", "PRKCG", "PRKCD", "PRKCE", "PRKCH", "PRKCQ",
+                                             "RASGRP1", "RASGRP3")]
+)
 
 SNAPSHOT_FILES = {"signaling": "signaling.csv.gz", "transcriptional": "transcriptional.csv.gz"}
 SNAPSHOT_METADATA = "metadata.json"
@@ -208,6 +234,143 @@ def filter_signaling_interactions(
     interactions = interactions[interactions["sources"].str.contains(source_pattern)]
     interactions = interactions[interactions["n_sources"] >= 1]
     return interactions
+
+
+def resolve_conflicting_signs(interactions: pd.DataFrame) -> pd.DataFrame:
+    """Use OmniPath's consensus sign for edges flagged both stimulatory and inhibitory.
+
+    Some resources call an edge activating and others inhibiting; OmniPath then sets
+    both ``is_stimulation`` and ``is_inhibition`` and records the majority in
+    ``consensus_stimulation`` / ``consensus_inhibition``. Where that consensus is one
+    sign, the edge gets that sign; where it is tied (or the consensus columns are
+    absent) the edge keeps both flags.
+    """
+
+    df = interactions.copy()
+    if not {"consensus_stimulation", "consensus_inhibition"}.issubset(df.columns):
+        return df
+    stim = df["is_stimulation"].fillna(False).astype(bool)
+    inhib = df["is_inhibition"].fillna(False).astype(bool)
+    c_stim = df["consensus_stimulation"].fillna(False).astype(bool)
+    c_inhib = df["consensus_inhibition"].fillna(False).astype(bool)
+    resolve = stim & inhib & (c_stim ^ c_inhib)
+    df.loc[resolve, "is_stimulation"] = c_stim[resolve]
+    df.loc[resolve, "is_inhibition"] = c_inhib[resolve]
+    return df
+
+
+def _source_tokens(sources) -> list[str]:
+    if not isinstance(sources, str):
+        return []
+    return [token.strip() for token in re.split(r"[;|]", sources) if token.strip()]
+
+
+def evidence_class(resource: str) -> str:
+    """``"physical"``, ``"text-mined/predicted"`` or ``"activity flow"`` for an OmniPath resource token.
+
+    Physical: protein-protein interaction, enzyme-substrate (incl. sites mapped by
+    ProtMapper, MIMP or KEA) and ligand-receptor resources. Activity flow: pathway
+    resources (SIGNOR, SPIKE, SignaLink, ...) that record that A acts on B, directly
+    or not.
+    """
+
+    base, _, via = resource.partition("_")
+    if base in TEXT_MINED_OR_PREDICTED_RESOURCES:
+        return "text-mined/predicted"
+    if base in PHYSICAL_RESOURCES or via in {"ProtMapper", "MIMP", "KEA"} or via in LIGAND_RECEPTOR_RESOURCES:
+        return "physical"
+    return "activity flow"
+
+
+# Tokens naming an aggregator whose records also appear as "<origin>_<aggregator>" tokens (e.g. REACH_ProtMapper).
+AGGREGATOR_TOKENS = {"ProtMapper", "MIMP", "KEA"}
+
+
+def has_physical_evidence(sources, *, include_text_mined: bool = True) -> bool:
+    """Whether an OmniPath ``sources`` string includes a physical-interaction resource.
+
+    A bare aggregator token (``ProtMapper``, ``MIMP``, ``KEA``) defers to the
+    ``<origin>_<aggregator>`` tokens that come with it, so text-mined sites
+    (``REACH_ProtMapper``) are not counted as curated through ``ProtMapper``.
+    """
+
+    tokens = _source_tokens(sources)
+    specific = [token for token in tokens if token not in AGGREGATOR_TOKENS]
+    classes = {evidence_class(token) for token in specific}
+    for aggregator in AGGREGATOR_TOKENS.intersection(tokens):
+        if not any(token.endswith("_" + aggregator) for token in specific):
+            classes.add("physical")
+    return "physical" in classes or (include_text_mined and "text-mined/predicted" in classes)
+
+
+def edge_evidence_weight(attrs: dict, mode: str = "uniform") -> float:
+    """Evidence weight of a graph edge: 1 (``"uniform"``), the number of distinct
+    primary resources (``"resources"``) or ``1 + log2(1 + n references)``
+    (``"references"``)."""
+
+    if mode == "uniform":
+        return 1.0
+    if mode == "resources":
+        return float(max(1, len({token.partition("_")[0] for token in _source_tokens(attrs.get("sources"))})))
+    if mode == "references":
+        refs = attrs.get("references")
+        n = len({token.split(":")[-1] for token in re.split(r"[;|]", refs) if token.strip()}) if isinstance(refs, str) else 0
+        return 1.0 + float(np.log2(1 + n))
+    raise ValueError(f"edge_weight must be 'uniform', 'resources' or 'references', got {mode!r}.")
+
+
+def cellchat_receptor_subunits(receptor: str) -> list[str]:
+    """Gene symbols of a CellChat receptor name.
+
+    CellChat joins the subunits of a receptor complex with ``_`` (``IL6R_IL6ST``,
+    ``IL2RA_IL2RB_IL2RG``) and abbreviates some (``TGFbR1_R2`` is TGFBR1 + TGFBR2,
+    ``ACVR1_TGFbR`` is ACVR1 + TGFBR1 + TGFBR2).
+    """
+
+    out, prev = [], None
+    for token in str(receptor).split("_"):
+        token = token.strip().upper()
+        if not token:
+            continue
+        if re.fullmatch(r"R\d+", token) and prev is not None:
+            token = re.sub(r"R\d+$", "", prev) + token
+        if token == "TGFBR":
+            out += ["TGFBR1", "TGFBR2"]
+        else:
+            out.append(token)
+        prev = token
+    return list(dict.fromkeys(out))
+
+
+def ligand_receptor_seed(
+    lr_df: pd.DataFrame,
+    ligand: str,
+    *,
+    nodes=None,
+    ligand_col: str = "ligand",
+    receptor_col: str = "receptor",
+) -> dict[str, float]:
+    """Seed mass on a ligand's receptors: each receptor (complex) gets an equal share,
+    split equally over its subunits (restricted to ``nodes`` when given)."""
+
+    if lr_df is None or len(lr_df) == 0:
+        return {}
+    df = lr_df[[ligand_col, receptor_col]].dropna()
+    receptors = df.loc[df[ligand_col].astype(str).str.strip() == str(ligand), receptor_col].astype(str).str.strip()
+    complexes = []
+    for receptor in dict.fromkeys(receptors):
+        if not receptor:
+            continue
+        parts = [receptor] if nodes is not None and receptor in nodes else cellchat_receptor_subunits(receptor)
+        if nodes is not None:
+            parts = [part for part in parts if part in nodes]
+        if parts:
+            complexes.append(parts)
+    seed = {}
+    for parts in complexes:
+        for part in parts:
+            seed[part] = seed.get(part, 0.0) + 1.0 / len(complexes) / len(parts)
+    return seed
 
 
 def _is_valid_symbol(symbol: str) -> bool:
@@ -400,13 +563,46 @@ def build_omnipath_tf_graph(
     *,
     known_symbols: set[str] | None = None,
     drop_sources: set[str] = DEFAULT_DROP_SOURCES,
+    conflicting_signs: str = "consensus",
+    evidence: str = "all",
+    second_messenger_bridges: bool = True,
 ) -> OmniPathTfGraph:
-    """Build the split signed OmniPath graph and corresponding TF list."""
+    """Build the split signed OmniPath graph and corresponding TF list.
 
+    ``conflicting_signs="consensus"`` (default) gives edges flagged both
+    stimulatory and inhibitory OmniPath's consensus sign
+    (:func:`resolve_conflicting_signs`); ``"stimulation"`` keeps both flags, which
+    the diffusion treats as activating (ChronoPack before 2026-10-21).
+
+    ``evidence="all"`` (default) keeps every directed signed edge. OmniPath's
+    signaling edges are not all physical: many come only from pathway (activity
+    flow) resources that record that A acts on B, directly or not.
+    ``"physical"`` keeps edges supported by at least one protein-protein,
+    enzyme-substrate or ligand-receptor resource (text-mined or predicted ones
+    included), ``"physical_curated"`` only by curated or experimental ones
+    (:func:`evidence_class`).
+
+    ``second_messenger_bridges=True`` (default) adds the activating steps through
+    cAMP, IP3/Ca2+ and DAG that a protein network lacks
+    (:data:`SECOND_MESSENGER_BRIDGES`: adenylyl cyclases -> PKA/EPAC, phospholipase C
+    -> calcineurin/CaMK and -> PKC/RasGRP), where OmniPath has no edge; ``False``
+    gives the graph used before 2026-10-21.
+    """
+
+    if conflicting_signs not in ("consensus", "stimulation"):
+        raise ValueError(f"conflicting_signs must be 'consensus' or 'stimulation', got {conflicting_signs!r}.")
+    if evidence not in ("all", "physical", "physical_curated"):
+        raise ValueError(f"evidence must be 'all', 'physical' or 'physical_curated', got {evidence!r}.")
     omnipath_tfs = set(resources.transcriptional["source_genesymbol"].unique())
     overlap = build_overlap_with_complexes(resources.human_tfs, omnipath_tfs)
     overlap_tfs = overlap["overlap_tfs"]
     interactions = filter_signaling_interactions(resources.signaling, drop_sources=drop_sources)
+    if conflicting_signs == "consensus":
+        interactions = resolve_conflicting_signs(interactions)
+    if evidence != "all":
+        keep = interactions["sources"].map(
+            lambda value: has_physical_evidence(value, include_text_mined=evidence == "physical"))
+        interactions = interactions[keep.astype(bool)].copy()
 
     base_tfs = set()
     for tf in overlap_tfs:
@@ -423,6 +619,16 @@ def build_omnipath_tf_graph(
         only_two_parts=True,
     )
     merged = merge_duplicate_edges(expanded, prefer_sign_map=prefer_sign_map)
+    if second_messenger_bridges:
+        present = set(zip(merged["u"], merged["v"]))
+        bridges = pd.DataFrame(
+            [(u, v, True, False, 1, f"ChronoPack_second_messenger_{via}", np.nan, False)
+             for u, v, via in SECOND_MESSENGER_BRIDGES if (u, v) not in present],
+            columns=["u", "v", "is_stimulation", "is_inhibition", "curation_effort", "sources", "references",
+                     "unsigned_for_diffusion"],
+        )
+        merged = pd.concat([merged, bridges[[c for c in bridges.columns if c in merged.columns or c in ("u", "v")]]],
+                           ignore_index=True)
     graph = build_digraph_from_merged(merged)
     tfs = sorted(explode_tf_set(overlap_tfs, known_symbols=known_symbols) & set(graph.nodes()))
 
@@ -431,6 +637,45 @@ def build_omnipath_tf_graph(
         tfs=tfs,
         interactions=interactions,
         split_interactions=expanded,
+        merged_interactions=merged,
+    )
+
+
+def restrict_tf_graph(
+    graph_bundle: OmniPathTfGraph,
+    genes,
+    *,
+    scope: str = "network",
+    receptor_genes=None,
+) -> OmniPathTfGraph:
+    """Remove the nodes whose genes are not all in ``genes`` (e.g. those expressed in a cell type).
+
+    ``scope="network"`` applies this to every node (receptors, signaling proteins
+    and TFs). ``scope="tfs"`` applies it only to the ends of the network: the TFs
+    and the receptors in ``receptor_genes``; signaling proteins in between stay,
+    since many are barely detected by single-cell RNA-seq. A complex node such as
+    ``IRF9_STAT1_STAT2`` counts as expressed when every subunit is in ``genes``.
+    """
+
+    if scope not in ("network", "tfs"):
+        raise ValueError(f"scope must be 'network' or 'tfs', got {scope!r}.")
+    genes = {str(gene) for gene in genes}
+    ends = set(graph_bundle.tfs) | {str(gene) for gene in (receptor_genes or ())}
+
+    def expressed(node):
+        return all(part in genes for part in str(node).split("_") if part)
+
+    keep = [node for node in graph_bundle.graph.nodes
+            if (scope == "tfs" and node not in ends) or expressed(node)]
+    graph = graph_bundle.graph.subgraph(keep).copy()
+    kept = set(keep)
+    merged = graph_bundle.merged_interactions
+    merged = merged[merged["u"].isin(kept) & merged["v"].isin(kept)].copy()
+    return OmniPathTfGraph(
+        graph=graph,
+        tfs=[tf for tf in graph_bundle.tfs if tf in kept],
+        interactions=graph_bundle.interactions,
+        split_interactions=graph_bundle.split_interactions,
         merged_interactions=merged,
     )
 
@@ -480,19 +725,35 @@ def build_signed_row_normalized_transitions(
     w_signed: float = 1.0,
     w_unsigned: float = 0.5,
     treat_unsigned_as_positive: bool = True,
+    edge_weight: str = "uniform",
+    tied_signs: str = "split",
 ) -> tuple[dict, dict, dict, dict]:
-    """Build positive/negative transition maps for signed absorbing diffusion."""
+    """Build positive/negative transition maps for signed absorbing diffusion.
+
+    Each node's outgoing mass is split over its edges in proportion to
+    ``w_signed`` / ``w_unsigned`` times the edge's evidence weight
+    (:func:`edge_evidence_weight`; ``"uniform"`` by default).
+
+    Edges flagged both stimulatory and inhibitory (resources disagree and
+    OmniPath's consensus is tied, or duplicates merged with both signs) carry
+    signal of unknown sign with ``tied_signs="split"`` (default): half of the mass
+    keeps its sign and half flips, so the edge passes mass on but adds no net
+    direction. ``"stimulation"`` treats them as activating (ChronoPack before
+    2026-10-22).
+    """
+
+    if tied_signs not in ("stimulation", "split"):
+        raise ValueError(f"tied_signs must be 'stimulation' or 'split', got {tied_signs!r}.")
 
     tfs = set(tfs)
-    lr_graph = build_lr_graph(lr_df, ligand_col, receptor_col) if is_ligand else None
     lr_receptors = {}
-    if is_ligand and lr_graph is not None:
-        for ligand in lr_graph.nodes:
-            receptors = list(lr_graph.successors(ligand))
-            if restrict_lr_to_nodes_in_G:
-                receptors = [receptor for receptor in receptors if receptor in graph]
-            if receptors:
-                lr_receptors[ligand] = receptors
+    if is_ligand and lr_df is not None and len(lr_df):
+        # Receptor complexes (e.g. IL6R_IL6ST) are seeded at their subunits; see ligand_receptor_seed.
+        for ligand in lr_df[ligand_col].dropna().astype(str).str.strip().unique():
+            seed = ligand_receptor_seed(lr_df, ligand, nodes=graph if restrict_lr_to_nodes_in_G else None,
+                                        ligand_col=ligand_col, receptor_col=receptor_col)
+            if seed:
+                lr_receptors[ligand] = list(seed)
 
     t_pos = {}
     t_neg = {}
@@ -508,15 +769,20 @@ def build_signed_row_normalized_transitions(
         pos_edges = []
         neg_edges = []
         for target in graph.successors(source):
-            sign = edge_sign_from_attrs(graph.get_edge_data(source, target, {}) or {})
-            if sign == -1:
-                neg_edges.append((target, w_signed))
+            attrs = graph.get_edge_data(source, target, {}) or {}
+            sign = edge_sign_from_attrs(attrs)
+            evidence = edge_evidence_weight(attrs, edge_weight)
+            if tied_signs == "split" and attrs.get("is_stimulation") and attrs.get("is_inhibition"):
+                pos_edges.append((target, w_signed * evidence / 2))
+                neg_edges.append((target, w_signed * evidence / 2))
+            elif sign == -1:
+                neg_edges.append((target, w_signed * evidence))
             elif sign == +1:
-                pos_edges.append((target, w_signed))
+                pos_edges.append((target, w_signed * evidence))
             elif treat_unsigned_as_positive:
-                pos_edges.append((target, w_unsigned))
+                pos_edges.append((target, w_unsigned * evidence))
             else:
-                pos_edges.append((target, w_unsigned))
+                pos_edges.append((target, w_unsigned * evidence))
 
         denom = sum(weight for _, weight in pos_edges) + sum(weight for _, weight in neg_edges)
         if denom <= 0:
@@ -543,11 +809,17 @@ def signed_absorbing_diffusion_impulse(
     min_steps: int = 10,
     tol_mass: float = 1e-12,
 ) -> tuple[dict, dict, np.ndarray, np.ndarray, pd.DataFrame]:
-    """Run signed impulse diffusion with TF nodes as absorbing states."""
+    """Run signed impulse diffusion with TF nodes as absorbing states.
+
+    Positive mass moves along activating edges and switches sign along
+    inhibitory ones; mass reaching a TF is absorbed. Each step is two sparse
+    matrix-vector products (the same result as following every edge in turn).
+    """
 
     idx = {node: i for i, node in enumerate(nodes)}
-    x_pos = np.zeros(len(nodes), dtype=float)
-    x_neg = np.zeros(len(nodes), dtype=float)
+    n = len(nodes)
+    x_pos = np.zeros(n, dtype=float)
+    x_neg = np.zeros(n, dtype=float)
 
     for node, value in seed.items():
         if node in idx:
@@ -558,51 +830,42 @@ def signed_absorbing_diffusion_impulse(
         raise ValueError("Seed has zero mass; seed nodes are not in graph.")
     x_pos /= total
 
-    tfs = list(tfs)
-    absorbed_pos = defaultdict(float)
-    absorbed_neg = defaultdict(float)
+    def transposed(transitions):
+        rows, cols, vals = [], [], []
+        for source, edges in transitions.items():
+            for target, prob in edges:
+                rows.append(idx[target])
+                cols.append(idx[source])
+                vals.append(prob)
+        return sparse.csr_matrix((vals, (rows, cols)), shape=(n, n))
+
+    pos_t, neg_t = transposed(t_pos), transposed(t_neg)
+    tf_names = list(dict.fromkeys(tf for tf in tfs if tf in idx))
+    tf_idx = np.array([idx[tf] for tf in tf_names], dtype=int)
+    absorbed_pos_arr = np.zeros(len(tf_names))
+    absorbed_neg_arr = np.zeros(len(tf_names))
+    reached_pos = np.zeros(len(tf_names), dtype=bool)
+    reached_neg = np.zeros(len(tf_names), dtype=bool)
     hist = []
 
     for step in range(max_steps):
-        y_pos = np.zeros_like(x_pos)
-        y_neg = np.zeros_like(x_neg)
+        y_pos = pos_t @ x_pos + neg_t @ x_neg
+        y_neg = pos_t @ x_neg + neg_t @ x_pos
 
-        for source in nodes:
-            source_idx = idx[source]
-            pos_mass = x_pos[source_idx]
-            neg_mass = x_neg[source_idx]
-            if pos_mass == 0 and neg_mass == 0:
-                continue
-
-            for target, prob in t_pos.get(source, []):
-                target_idx = idx[target]
-                y_pos[target_idx] += pos_mass * prob
-                y_neg[target_idx] += neg_mass * prob
-
-            for target, prob in t_neg.get(source, []):
-                target_idx = idx[target]
-                y_neg[target_idx] += pos_mass * prob
-                y_pos[target_idx] += neg_mass * prob
-
-        absorbed_step = 0.0
-        for tf in tfs:
-            tf_idx = idx.get(tf)
-            if tf_idx is None:
-                continue
-            ap = y_pos[tf_idx]
-            an = y_neg[tf_idx]
-            if ap:
-                absorbed_pos[tf] += float(ap)
-            if an:
-                absorbed_neg[tf] += float(an)
-            absorbed_step += float(ap + an)
-            y_pos[tf_idx] = 0.0
-            y_neg[tf_idx] = 0.0
+        ap = y_pos[tf_idx]
+        an = y_neg[tf_idx]
+        absorbed_pos_arr += ap
+        absorbed_neg_arr += an
+        reached_pos |= ap != 0
+        reached_neg |= an != 0
+        absorbed_step = float(ap.sum() + an.sum())
+        y_pos[tf_idx] = 0.0
+        y_neg[tf_idx] = 0.0
 
         x_pos = alpha * y_pos
         x_neg = alpha * y_neg
         transient_mass = float(x_pos.sum() + x_neg.sum())
-        absorbed_total = float(sum(absorbed_pos.values()) + sum(absorbed_neg.values()))
+        absorbed_total = float(absorbed_pos_arr.sum() + absorbed_neg_arr.sum())
         hist.append(
             {
                 "step": step,
@@ -615,7 +878,9 @@ def signed_absorbing_diffusion_impulse(
         if step >= min_steps and transient_mass < tol_mass:
             break
 
-    return dict(absorbed_pos), dict(absorbed_neg), x_pos, x_neg, pd.DataFrame(hist)
+    absorbed_pos = {tf: float(v) for tf, v, hit in zip(tf_names, absorbed_pos_arr, reached_pos) if hit}
+    absorbed_neg = {tf: float(v) for tf, v, hit in zip(tf_names, absorbed_neg_arr, reached_neg) if hit}
+    return absorbed_pos, absorbed_neg, x_pos, x_neg, pd.DataFrame(hist)
 
 
 def run_tf_diffusion_ranking(
@@ -634,14 +899,16 @@ def run_tf_diffusion_ranking(
     max_steps: int = 80,
     min_steps: int = 10,
     tol_mass: float = 1e-12,
+    edge_weight: str = "uniform",
+    tied_signs: str = "split",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Rank TFs by signed absorbing diffusion from a source node or ligand."""
 
     tfs = list(tfs)
-    t_pos, t_neg, _, lr_map = build_signed_row_normalized_transitions(
+    t_pos, t_neg, _, _ = build_signed_row_normalized_transitions(
         graph,
         tfs=tfs,
-        is_ligand=is_ligand,
+        is_ligand=False,  # ligand seeds come from ligand_receptor_seed below
         lr_df=lr_df,
         ligand_col=ligand_col,
         receptor_col=receptor_col,
@@ -649,17 +916,17 @@ def run_tf_diffusion_ranking(
         w_signed=w_signed,
         w_unsigned=w_unsigned,
         treat_unsigned_as_positive=True,
+        edge_weight=edge_weight,
+        tied_signs=tied_signs,
     )
 
     nodes = list(graph.nodes)
     seed = {}
     if is_ligand:
-        receptors = lr_map.get(source, [])
-        if len(receptors) == 0:
+        seed = ligand_receptor_seed(lr_df, source, nodes=graph if restrict_lr_to_nodes_in_G else None,
+                                    ligand_col=ligand_col, receptor_col=receptor_col)
+        if not seed:
             raise ValueError(f"No ligand-receptor targets found for ligand '{source}'.")
-        weight = 1.0 / len(receptors)
-        for receptor in receptors:
-            seed[receptor] = seed.get(receptor, 0.0) + weight
     else:
         if source not in graph:
             raise ValueError(f"Source '{source}' not in graph.")
@@ -676,6 +943,17 @@ def run_tf_diffusion_ranking(
         min_steps=min_steps,
         tol_mass=tol_mass,
     )
+
+    if sum(absorbed_pos.values()) + sum(absorbed_neg.values()) <= 0:
+        dead = [node for node in seed if node in graph and graph.out_degree(node) == 0]
+        raise ValueError(
+            f"No signal from '{source}' reaches any TF (seeded at {sorted(seed)}"
+            + (f"; without outgoing OmniPath edges: {sorted(dead)}" if dead else "")
+            + "), so every TF would score 0."
+        )
+    if not any(absorbed_pos.get(tf, 0.0) > absorbed_neg.get(tf, 0.0) for tf in tfs):
+        warnings.warn(f"No TF receives net activating signal from '{source}'; priority_act is 0 for every TF.",
+                      stacklevel=2)
 
     rows = []
     for tf in tfs:
@@ -716,6 +994,8 @@ def rank_omnipath_tfs(
     max_steps: int = 80,
     min_steps: int = 10,
     tol_mass: float = 1e-12,
+    edge_weight: str = "uniform",
+    tied_signs: str = "split",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Convenience wrapper to rank TFs for a source in an OmniPath TF graph."""
 
@@ -734,4 +1014,6 @@ def rank_omnipath_tfs(
         max_steps=max_steps,
         min_steps=min_steps,
         tol_mass=tol_mass,
+        edge_weight=edge_weight,
+        tied_signs=tied_signs,
     )

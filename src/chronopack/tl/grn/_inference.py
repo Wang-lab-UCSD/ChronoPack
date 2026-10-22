@@ -17,12 +17,19 @@ from ._omnipath import (
     OmniPathTfGraph,
     OmniPathTfResources,
     build_omnipath_tf_graph,
+    cellchat_receptor_subunits,
     load_omnipath_tf_resources,
     rank_omnipath_tfs,
+    ligand_receptor_seed,
     read_omnipath_snapshot,
+    restrict_tf_graph,
     run_tf_diffusion_ranking,
     save_omnipath_snapshot,
 )
+
+# OmniPath graphs built by rank_regulators, reused across calls (building one takes ~30 s).
+_TF_GRAPH_CACHE: dict = {}
+_TF_GRAPH_CACHE_SIZE = 4
 
 
 @dataclass
@@ -272,6 +279,50 @@ def score_targets(association: str | Path, *, valid_targets: str | Path) -> Targ
     )
 
 
+def expressed_genes(adata, *, min_cells: int = 1, min_fraction: float = 0.0, layer: str | None = "counts") -> list[str]:
+    """Genes detected (count > 0) in at least ``min_cells`` cells and ``min_fraction`` of the cells of ``adata``.
+
+    Pass the cells of one cell type (e.g. ``adata[adata.obs["cell_type"] == "THP1"]``)
+    and give the result to :func:`rank_regulators` as ``expressed_genes``. Uses
+    ``layer`` (``counts`` by default, ``adata.X`` if absent).
+
+    The default (detected in any cell) is deliberate: signaling proteins are
+    rarely captured by single-cell RNA-seq (in the K562 and THP1 data RELA is
+    detected in 4-7% of cells, TNFRSF1A in 4%, IKBKG in 0.3%), so a percentage
+    cutoff removes genuine pathway members; at 5% the TNF receptor TNFRSF1A and
+    RELA drop out.
+    """
+    X = adata.layers[layer] if layer is not None and layer in adata.layers else adata.X
+    detected = np.asarray((X > 0).sum(axis=0)).ravel()
+    keep = (detected >= min_cells) & (detected >= min_fraction * adata.n_obs)
+    return [str(gene) for gene in np.asarray(adata.var_names)[keep]]
+
+
+def _path_key(path) -> tuple:
+    path = Path(path).resolve()
+    files = sorted(path.glob("*")) if path.is_dir() else [path]
+    return (str(path), tuple((f.name, f.stat().st_mtime_ns) for f in files if f.is_file()))
+
+
+def _cached_tf_graph(*, human_tf_path, ligand_receptor_path, organism, omnipath_snapshot, **graph_kwargs):
+    import datetime
+
+    key = (_path_key(human_tf_path), _path_key(ligand_receptor_path), organism,
+           _path_key(omnipath_snapshot) if omnipath_snapshot is not None else ("download", datetime.date.today()),
+           tuple(sorted(graph_kwargs.items())))
+    if key not in _TF_GRAPH_CACHE:
+        resources = load_omnipath_tf_resources(
+            human_tf_path=human_tf_path,
+            ligand_receptor_path=ligand_receptor_path,
+            organism=organism,
+            omnipath_snapshot=omnipath_snapshot,
+        )
+        _TF_GRAPH_CACHE[key] = (resources, build_omnipath_tf_graph(resources, **graph_kwargs))
+        while len(_TF_GRAPH_CACHE) > _TF_GRAPH_CACHE_SIZE:
+            _TF_GRAPH_CACHE.pop(next(iter(_TF_GRAPH_CACHE)))
+    return _TF_GRAPH_CACHE[key]
+
+
 def rank_regulators(
     *,
     source: str,
@@ -286,31 +337,92 @@ def rank_regulators(
     min_steps: int = 10,
     tol_mass: float = 1e-12,
     omnipath_snapshot: str | Path | None = None,
+    conflicting_signs: str = "consensus",
+    edge_weight: str = "uniform",
+    evidence: str = "all",
+    second_messenger_bridges: bool = True,
+    expressed_genes: Iterable[str] | None = None,
+    expression_scope: str = "tfs",
+    tied_signs: str = "split",
 ) -> pd.DataFrame:
     """Rank TFs downstream of one upstream signal by signed OmniPath diffusion.
 
     Mass starts at ``source`` (for a ligand, ``is_ligand=True``, at its receptors
-    from the ligand-receptor table), spreads over OmniPath signaling edges,
-    flipping sign across inhibitory edges, and is absorbed by TFs (human TFs
-    with OmniPath transcriptional targets). Returns one row per TF sorted by
-    ``priority_act`` (net activating mass absorbed).
+    from the ligand-receptor table: each receptor gets an equal share, and a
+    receptor complex such as ``IL6R_IL6ST`` is split over its subunits), spreads
+    over OmniPath signaling edges, flipping sign across inhibitory edges, and is
+    absorbed by TFs (human TFs with OmniPath transcriptional targets). Returns one
+    row per TF sorted by ``priority_act`` (net activating mass absorbed). Raises
+    ``ValueError`` if no mass reaches any TF (e.g. the receptor has no outgoing
+    OmniPath edges, as for IL17RA, TNFRSF11A or IL12RB2 in the 2025-10-21 snapshot).
+
+    Edges that OmniPath flags both stimulatory and inhibitory take its consensus
+    sign (``conflicting_signs="consensus"``, default); ``"stimulation"`` treats
+    them as activating, as ChronoPack did before 2026-10-21. Edges whose
+    consensus is tied keep both flags; ``tied_signs="split"`` (default) treats
+    them as of unknown sign (half the mass keeps its sign, half flips; see
+    :func:`build_signed_row_normalized_transitions`), ``"stimulation"`` as
+    activating (ChronoPack before 2026-10-22).
+
+    ``second_messenger_bridges=True`` (default) adds the cAMP, IP3/Ca2+ and DAG
+    steps that OmniPath's protein network lacks (adenylyl cyclase -> PKA/EPAC,
+    phospholipase C -> calcineurin/CaMK/PKC/RasGRP); ``False`` gives the graph used
+    before 2026-10-21. ``edge_weight="resources"`` / ``"references"`` splits each
+    node's mass over its edges by the evidence for them, and
+    ``evidence="physical"`` / ``"physical_curated"`` keeps only edges with
+    physical-interaction support; both are off by default (see
+    :func:`build_omnipath_tf_graph` and :func:`edge_evidence_weight`).
+
+    ``expressed_genes`` (e.g. from :func:`expressed_genes` on the responding cell
+    type) removes genes that are not expressed before the diffusion; ``None``
+    (default) uses the whole human network. ``expression_scope="tfs"`` (default)
+    removes only unexpressed TFs and ligand receptors, the ends of the network;
+    ``"network"`` also removes unexpressed signaling proteins, which risks dropping
+    genuine pathway members that single-cell RNA-seq rarely detects (e.g. IKBKG).
+    The source receptor (``is_ligand=False``) must be expressed in either case.
+
+    The OmniPath graph is built once per set of inputs and options and reused by
+    later calls in the same session.
 
     OmniPath is downloaded (or taken from the ``omnipath`` client's cache), so the
     ranking can change slightly as the database is updated. Pass
     ``omnipath_snapshot``, a folder written by :func:`save_omnipath_snapshot`, to
     use fixed OmniPath tables instead.
+
+    The ranking is a prior from a generic signaling network. It finds TFs one or
+    two steps from the receptor well, and is weaker for TFs reached through long
+    kinase cascades, for the choice among STATs, and against hub TFs that rank high
+    for many signals. Why the defaults were chosen, how the ranking was checked and
+    its known limitations: ``docs/user/grn.md`` in the ChronoPack repository.
     """
-    resources = load_omnipath_tf_resources(
+    resources, graph_bundle = _cached_tf_graph(
         human_tf_path=human_tf_path,
         ligand_receptor_path=ligand_receptor_path,
         organism=organism,
         omnipath_snapshot=omnipath_snapshot,
+        conflicting_signs=conflicting_signs,
+        evidence=evidence,
+        second_messenger_bridges=second_messenger_bridges,
     )
-    graph_bundle = build_omnipath_tf_graph(resources)
+    source = str(source)
+    if expressed_genes is not None:
+        full = graph_bundle
+        receptors = {gene for receptor in resources.ligand_receptor["receptor"].dropna().astype(str)
+                     for gene in cellchat_receptor_subunits(receptor)}
+        expressed_set = {str(gene) for gene in expressed_genes}
+        if not is_ligand:
+            receptors.add(source)
+        graph_bundle = restrict_tf_graph(full, expressed_set, scope=expression_scope, receptor_genes=receptors)
+        if is_ligand:
+            seed = ligand_receptor_seed(resources.ligand_receptor, source, nodes=full.graph)
+            if seed and not ligand_receptor_seed(resources.ligand_receptor, source, nodes=graph_bundle.graph):
+                raise ValueError(f"None of the receptors of ligand '{source}' ({sorted(seed)}) is in expressed_genes.")
+        elif source in full.graph and source not in graph_bundle.graph:
+            raise ValueError(f"Source '{source}' is not in expressed_genes.")
     ranking, _history = rank_omnipath_tfs(
         graph_bundle,
         resources.ligand_receptor,
-        source=str(source),
+        source=source,
         is_ligand=bool(is_ligand),
         w_signed=w_signed,
         w_unsigned=w_unsigned,
@@ -318,6 +430,8 @@ def rank_regulators(
         max_steps=max_steps,
         min_steps=min_steps,
         tol_mass=tol_mass,
+        edge_weight=edge_weight,
+        tied_signs=tied_signs,
     )
     return ranking
 
@@ -386,6 +500,7 @@ __all__ = [
     "save_omnipath_snapshot",
     "run_tf_diffusion_ranking",
     "infer",
+    "expressed_genes",
     "rank_regulators",
     "score_targets",
     "build_chronopack_ranked_edges",

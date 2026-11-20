@@ -31,9 +31,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/anjambor/ChronoPack_IP"
-Repository = "https://github.com/anjambor/ChronoPack_IP"
-Documentation = "https://github.com/anjambor/ChronoPack_IP/tree/main/docs"
+Homepage = "https://github.com/Wang-lab-UCSD/ChronoPack"
+Repository = "https://github.com/Wang-lab-UCSD/ChronoPack"
+Documentation = "https://github.com/Wang-lab-UCSD/ChronoPack/tree/main/docs"
 
 [project.optional-dependencies]
 scanpy = [

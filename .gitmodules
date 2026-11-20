@@ -1,0 +1,3 @@
+[submodule "ChronoPack_Figures"]
+	path = ChronoPack_Figures
+	url = https://github.com/anjambor/ChronoPack_Figures.git

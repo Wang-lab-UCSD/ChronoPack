@@ -27,7 +27,8 @@ class GeneTrajectoryClusteringResult:
     assignments: dict[int, pd.Series]
     centroid_distances: dict[int, pd.Series] = field(default_factory=dict)
     pca: pd.DataFrame | None = None
-    # Joint shape + derivative features (rows = trajectories) the distances are computed on.
+    # Features (rows = trajectories) the distances are computed on: the joint shape + derivative features, or
+    # their top ``n_pcs`` principal-component scores when ``n_pcs`` is set.
     features: pd.DataFrame | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     key_added: str = GENE_TRAJECTORY_CLUSTERING_KEY
@@ -317,8 +318,36 @@ def cluster_gene_trajectories(
     wss_fraction: float = 0.95,
     variance_threshold: float = 0.99,
     pca_columns: int = 4,
+    n_pcs: int | None = None,
 ):
-    """Compute candidate clustering labels and metrics for every requested k once."""
+    """Compute candidate clustering labels and metrics for every requested k once.
+
+    Trajectories are clustered by Ward.D2 hierarchical clustering on Euclidean distances between joint
+    features: row-z-scored fitted curves and row-z-scored time derivatives, each block scaled by its total
+    column variance and weighted by ``sqrt(1 - alpha)`` and ``sqrt(alpha)``.
+
+    Parameters
+    ----------
+    traj
+        Gene-trajectory AnnData from :func:`align_gene_trajectories` (obs = trajectories, var = time points).
+    k
+        Candidate numbers of clusters; one ``cutree`` of the same tree per value.
+    alpha
+        Weight of the derivative block, in [0, 1].
+    reference
+        Optional larger trajectory AnnData (same time points, containing every row of ``traj``). Standardization,
+        block scaling and the ``n_pcs`` PCA are fit on it and ``traj`` is placed within it.
+    wss_fraction
+        WSS-resolution fraction used by the k-selection metrics.
+    variance_threshold, pca_columns
+        Settings of the separate descriptive PCA of the curves (``result.pca``). They do not affect the
+        clustering.
+    n_pcs
+        ``None`` (default): cluster on the full joint features. An integer: cluster on the top ``n_pcs``
+        principal-component scores of the joint features (centred, not scaled, not whitened; fit on
+        ``reference`` when given). The k-selection metrics and centroid distances are computed in the same
+        space. ``n_pcs`` equal to the rank of the joint features reproduces the full-feature clustering.
+    """
     try:
         from rpy2.robjects import r
     except ImportError as exc:
@@ -330,6 +359,10 @@ def cluster_gene_trajectories(
     k_grid = [int(x) for x in k]
     if not k_grid:
         raise ValueError("At least one candidate k is required.")
+    if n_pcs is not None:
+        if isinstance(n_pcs, bool) or int(n_pcs) != n_pcs or int(n_pcs) < 1:
+            raise ValueError("n_pcs must be None or a positive integer.")
+        n_pcs = int(n_pcs)
 
     source_r_resource("dimred_clustering_helpers.R")
     tmp_ctx = TemporaryDirectory()  # R hand-off files only
@@ -351,6 +384,7 @@ def cluster_gene_trajectories(
             variance_threshold=float(variance_threshold),
             pca_columns=int(pca_columns),
             **({"reference_traj_mat_path": str(reference_path)} if reference_path is not None else {}),
+            **({"n_pcs": n_pcs} if n_pcs is not None else {}),
         )
         metrics = pd.read_csv(work_dir / "cluster_metrics.csv")
         if "K" in metrics.columns and "k" not in metrics.columns:
@@ -359,6 +393,7 @@ def cluster_gene_trajectories(
         distances_df = _read_matrix(work_dir / "cluster_centroid_distances.csv")
         pca = _read_matrix(work_dir / "gene_trajectory_X_pca.csv")
         features = _read_matrix(work_dir / "cluster_features.csv").loc[traj.obs_names.astype(str)]
+        feature_pca = pd.read_csv(work_dir / "cluster_feature_pca.csv")
     finally:
         tmp_ctx.cleanup()
 
@@ -380,6 +415,10 @@ def cluster_gene_trajectories(
         "wss_fraction": float(wss_fraction),
         "variance_threshold": float(variance_threshold),
         "pca_columns": int(pca_columns),
+        "n_pcs": n_pcs,
+        "n_pcs_variance_explained": (
+            None if n_pcs is None else float(feature_pca["variance_explained"].iloc[0])
+        ),
         "n_trajectories": int(traj.n_obs),
         "reference_n_trajectories": None if reference is None else int(reference.n_obs),
     }

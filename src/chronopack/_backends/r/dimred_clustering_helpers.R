@@ -1119,6 +1119,27 @@ scale_by_total_column_variance <- function(M) {
   M / scale_factor
 }
 
+# Optionally replace the joint clustering features by their top n_pcs principal-component scores.
+# The PCA (centred, unscaled) is fit on all rows of X_joint_ref (the reference) and the requested rows are
+# projected onto it. Scores are not whitened, so Euclidean distances are the full distances projected onto
+# the top-n_pcs subspace; with n_pcs = rank they equal the full distances (PCA is a centring + rotation).
+# n_pcs = NULL returns the requested rows of X_joint_ref unchanged.
+project_joint_features_to_pcs <- function(X_joint_ref, row_ids, n_pcs = NULL) {
+  if (is.null(n_pcs)) {
+    return(list(X = X_joint_ref[row_ids, , drop = FALSE], variance_explained = NA_real_))
+  }
+  n_pcs <- as.integer(n_pcs)
+  max_pcs <- min(nrow(X_joint_ref), ncol(X_joint_ref))
+  if (length(n_pcs) != 1 || is.na(n_pcs) || n_pcs < 1 || n_pcs > max_pcs) {
+    stop("`n_pcs` must be NULL or an integer between 1 and min(n_trajectories, n_features) = ", max_pcs, ".")
+  }
+  pca <- prcomp(X_joint_ref, center = TRUE, scale. = FALSE)
+  rot <- pca$rotation[, seq_len(min(n_pcs, ncol(pca$rotation))), drop = FALSE]
+  scores <- sweep(X_joint_ref[row_ids, , drop = FALSE], 2, pca$center, "-") %*% rot
+  colnames(scores) <- paste0("PC", seq_len(ncol(scores)))
+  list(X = scores, variance_explained = sum(pca$sdev[seq_len(ncol(rot))]^2) / sum(pca$sdev^2))
+}
+
 prepare_dimred_clustering_inputs <- function(X_mat, Xd_mat) {
   list(
     X_n = scale_by_total_column_variance(X_mat),
@@ -1402,7 +1423,8 @@ chronopack_cluster_trajectory_matrix_to_files <- function(
   wss_fraction = 0.95,
   variance_threshold = 0.99,
   pca_columns = 4,
-  reference_traj_mat_path = NULL
+  reference_traj_mat_path = NULL,
+  n_pcs = NULL
 ) {
   output_dir <- normalizePath(output_dir, mustWork = FALSE)
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
@@ -1437,10 +1459,12 @@ chronopack_cluster_trajectory_matrix_to_files <- function(
     variance_threshold = variance_threshold
   )
   clustering_inputs <- prepare_dimred_clustering_inputs(X_ref, Xd_ref)
-  X_joint <- cbind(
+  X_joint_ref <- cbind(
     sqrt(1 - alpha) * clustering_inputs$X_n,
     sqrt(alpha) * clustering_inputs$Xd_n
-  )[rownames(traj_mat), , drop = FALSE]
+  )
+  joint_pca <- project_joint_features_to_pcs(X_joint_ref, rownames(traj_mat), n_pcs)
+  X_joint <- joint_pca$X
   D_joint <- dist(X_joint, method = "euclidean")
   hc <- hclust(D_joint, method = "ward.D2")
   clust_eval <- calculate_trajectory_clustering_metrics(
@@ -1477,8 +1501,12 @@ chronopack_cluster_trajectory_matrix_to_files <- function(
   write_matrix_csv(centroid_distances, paths$centroid_distances)
   write_matrix_csv(pca_res$pca_X$x, paths$pca_X)
   write_matrix_csv(pca_res$pca_Xd$x, paths$pca_Xd)
-  # The joint (shape + derivative) features the distances and clusters come from.
+  # The features the distances and clusters come from: the joint (shape + derivative) features, or their top
+  # n_pcs principal-component scores.
   write_matrix_csv(X_joint, paths$features)
+  write.csv(data.frame(n_pcs = if (is.null(n_pcs)) NA_integer_ else as.integer(n_pcs),
+                       variance_explained = joint_pca$variance_explained),
+            file.path(output_dir, "cluster_feature_pca.csv"), row.names = FALSE)
 
   list(
     paths = paths,
@@ -1489,7 +1517,9 @@ chronopack_cluster_trajectory_matrix_to_files <- function(
       wss_fraction = wss_fraction,
       variance_threshold = variance_threshold,
       pca_columns = pca_columns,
-      reference_traj_mat_path = reference_traj_mat_path
+      reference_traj_mat_path = reference_traj_mat_path,
+      n_pcs = n_pcs,
+      n_pcs_variance_explained = joint_pca$variance_explained
     )
   )
 }

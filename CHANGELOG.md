@@ -168,6 +168,11 @@ Changes since the previous collaborator test (2026-10-19):
     the quickstart and `analyses/grn/GRNInference.ipynb` link to it.
 - The `wot` extra now lists `igraph` and `leidenalg`, which the Leiden clustering
   of trajectories already needed (the conda environment file already had them).
+- `cp.tl.cluster_gene_trajectories(n_pcs=...)`: optional clustering of gene
+  trajectories on the top `n_pcs` principal-component scores of the joint curve +
+  derivative features (PCA fit on `reference` when given) instead of the full
+  features. The default (`n_pcs=None`) is unchanged. The descriptive
+  `variance_threshold` / `pca_columns` PCA still does not affect the clusters.
 
 Benchmark datasets, comparator methods, gold standards, and benchmarking
 metrics for GRN and C2C remain outside ChronoPack for this release.

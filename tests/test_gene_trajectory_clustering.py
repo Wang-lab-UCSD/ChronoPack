@@ -116,3 +116,108 @@ def test_cluster_gene_trajectories_returns_joint_features():
     labels = result.assignments[2].to_numpy()
     centroid = f[labels == labels[0]].mean(axis=0)
     assert np.linalg.norm(f[0] - centroid) == pytest.approx(result.centroid_distances[2].iloc[0], rel=1e-9)
+
+
+def _toy_traj(n=20, n_t=8, seed=0):
+    ad = pytest.importorskip("anndata")
+    rng = np.random.default_rng(seed)
+    t = np.linspace(0.1, 1, n_t)
+    X = np.vstack([np.sin(np.pi * t * (1 + i % 4)) + (i % 3) * t + rng.normal(0, 0.1, t.size) for i in range(n)])
+    return ad.AnnData(
+        X=X,
+        obs=pd.DataFrame(index=[f"g{i}_A" for i in range(n)]),
+        var=pd.DataFrame({"time": t}, index=[f"t{i}" for i in range(t.size)]),
+    )
+
+
+def _joint_features(traj, alpha):
+    """Numpy version of the R joint features: z-scored curves and derivatives, block-scaled, alpha-weighted."""
+    _, fit_z, ddt_z = gc.standardize_gene_trajectories(traj)
+
+    def scale(M):
+        return M / np.sqrt(M.var(axis=0, ddof=1).sum())
+
+    return np.hstack([np.sqrt(1 - alpha) * scale(fit_z.to_numpy()), np.sqrt(alpha) * scale(ddt_z.to_numpy())])
+
+
+def test_cluster_gene_trajectories_default_uses_full_joint_features():
+    pytest.importorskip("rpy2")
+    traj = _toy_traj()
+    result = gc.cluster_gene_trajectories(traj, k=[2, 3, 4], alpha=0.3)
+
+    np.testing.assert_allclose(result.features.to_numpy(), _joint_features(traj, 0.3), rtol=1e-6, atol=1e-8)
+    assert result.metadata["n_pcs"] is None
+    assert result.metadata["n_pcs_variance_explained"] is None
+
+
+def test_cluster_gene_trajectories_full_rank_pcs_reproduce_default():
+    pytest.importorskip("rpy2")
+    from scipy.spatial.distance import pdist
+
+    traj = _toy_traj()
+    k = [2, 3, 4, 5, 6]
+    full = gc.cluster_gene_trajectories(traj, k=k, alpha=0.3)
+    n_features = full.features.shape[1]
+    pcs = gc.cluster_gene_trajectories(traj, k=k, alpha=0.3, n_pcs=n_features)
+
+    assert pcs.features.shape == (traj.n_obs, n_features)
+    assert list(pcs.features.columns) == [f"PC{i}" for i in range(1, n_features + 1)]
+    # PCA is a centring + rotation: same distances, same tree, same metrics.
+    np.testing.assert_allclose(pdist(pcs.features.to_numpy()), pdist(full.features.to_numpy()), atol=1e-10)
+    for kk in k:
+        np.testing.assert_array_equal(pcs.assignments[kk].to_numpy(), full.assignments[kk].to_numpy())
+        np.testing.assert_allclose(pcs.centroid_distances[kk], full.centroid_distances[kk], atol=1e-10)
+    for col in ("WSS", "mean_silhouette"):
+        np.testing.assert_allclose(pcs.metrics[col], full.metrics[col], atol=1e-10)
+    assert pcs.metadata["n_pcs_variance_explained"] == pytest.approx(1.0)
+
+
+def test_cluster_gene_trajectories_truncated_pcs():
+    pytest.importorskip("rpy2")
+    traj = _toy_traj()
+    result = gc.cluster_gene_trajectories(traj, k=[2, 3], alpha=0.3, n_pcs=3)
+
+    F = _joint_features(traj, 0.3)
+    Fc = F - F.mean(axis=0)
+    _, s, Vt = np.linalg.svd(Fc, full_matrices=False)
+    scores = Fc @ Vt[:3].T
+    # Same subspace up to the sign of each component.
+    got = result.features.to_numpy()
+    np.testing.assert_allclose(np.abs(got), np.abs(scores), rtol=1e-5, atol=1e-8)
+    assert result.metadata["n_pcs"] == 3
+    assert result.metadata["n_pcs_variance_explained"] == pytest.approx((s[:3] ** 2).sum() / (s**2).sum(), rel=1e-6)
+    # Metrics and centroid distances are computed in PC space.
+    labels = result.assignments[2].to_numpy()
+    centroid = got[labels == labels[0]].mean(axis=0)
+    assert np.linalg.norm(got[0] - centroid) == pytest.approx(result.centroid_distances[2].iloc[0], rel=1e-9)
+
+
+def test_cluster_gene_trajectories_pcs_fit_on_reference():
+    pytest.importorskip("rpy2")
+    reference = _toy_traj(n=30)
+    subset = reference[reference.obs_names[::2]].copy()
+    on_ref = gc.cluster_gene_trajectories(reference, k=[2, 3], alpha=0.3, n_pcs=4)
+    on_sub = gc.cluster_gene_trajectories(subset, k=[2, 3], alpha=0.3, n_pcs=4, reference=reference)
+    alone = gc.cluster_gene_trajectories(subset, k=[2, 3], alpha=0.3, n_pcs=4)
+
+    # The subset is projected onto the reference PCs, not onto PCs of its own.
+    np.testing.assert_allclose(
+        on_sub.features.to_numpy(), on_ref.features.loc[subset.obs_names].to_numpy(), rtol=1e-8, atol=1e-10
+    )
+    assert not np.allclose(np.abs(alone.features.to_numpy()), np.abs(on_sub.features.to_numpy()))
+    assert on_sub.metadata["n_pcs_variance_explained"] == pytest.approx(on_ref.metadata["n_pcs_variance_explained"])
+
+
+@pytest.mark.parametrize("bad", [0, -1, 2.5, True])
+def test_cluster_gene_trajectories_rejects_invalid_n_pcs(bad):
+    traj = _toy_traj()
+    with pytest.raises(ValueError, match="n_pcs"):
+        gc.cluster_gene_trajectories(traj, k=[2], alpha=0.3, n_pcs=bad)
+
+
+def test_cluster_gene_trajectories_rejects_too_many_pcs():
+    pytest.importorskip("rpy2")
+    traj = _toy_traj()
+    with pytest.raises(Exception, match="n_pcs"):
+        gc.cluster_gene_trajectories(traj, k=[2], alpha=0.3, n_pcs=traj.n_vars * 2 + 5)
+

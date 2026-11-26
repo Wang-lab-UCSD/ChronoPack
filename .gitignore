@@ -47,4 +47,4 @@ verification_runs/
 .github/workflows/ci.yml
 
 # Internal design notes and unreleased feature proposals; keep out of the public repo
-docs/developer/notes/
+docs/developer/

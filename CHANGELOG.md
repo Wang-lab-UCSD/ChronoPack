@@ -69,8 +69,7 @@ Changes since the previous collaborator test (2026-10-19):
   share of UMIs, and per-gene flags `composition_explainable` (falls >= 0.5 log2 only
   under total-count normalisation) and `composition_masked`. Warns when the trend
   reaches 0.1 log2. Largest trend: K562 + TNF-alpha +0.03, co-culture K562 -0.04,
-  THP1 -0.08 (negligible); PBMC + LPS CD14 monocytes -0.57 and FCGR3A monocytes
-  -0.35 (strong), NK -0.11, other lymphocytes < 0.1.
+  THP1 -0.08 (all negligible).
 - `cp.tl.response_heterogeneity()` / `cp.pl.response_heterogeneity()`: share of
   cells that respond at each time point. Cells are scored on a module of induced
   genes (automatic, restricted to `gene_dynamics_pvalue_1 < 0.05` when present, or

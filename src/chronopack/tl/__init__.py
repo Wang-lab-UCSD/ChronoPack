@@ -29,6 +29,12 @@ __all__ = [
     "cluster_gene_trajectories",
     "standardize_gene_trajectories",
     "topk_mode_recovery",
+    "CompositionQCResult",
+    "composition_qc",
+    "tmm_factors",
+    "tmm_norm_factors",
+    "ResponseHeterogeneityResult",
+    "response_heterogeneity",
 ]
 
 
@@ -68,6 +74,14 @@ def __getattr__(name):
         from . import _gene_clustering
 
         return getattr(_gene_clustering, name)
+    if name in {"CompositionQCResult", "composition_qc", "tmm_factors", "tmm_norm_factors"}:
+        from . import _composition
+
+        return getattr(_composition, name)
+    if name in {"ResponseHeterogeneityResult", "response_heterogeneity"}:
+        from . import _response_heterogeneity
+
+        return getattr(_response_heterogeneity, name)
     if name == "topk_mode_recovery":
         from . import _mode_conservation
 

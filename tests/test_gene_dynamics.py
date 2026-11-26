@@ -34,7 +34,8 @@ def test_prepare_tradeseq_inputs_writes_expected_files(tmp_path):
     assert genes["gene"].tolist() == ["g0", "g1", "g2"]
     assert libs.to_dict(orient="list") == {"cell_id": ["c0", "c1"], "libsize_full": [4, 3]}
     assert sorted(p.name for p in tmp_path.iterdir()) == [
-        "cell_libsize_full.csv", "cell_times.csv.gz", "counts_genes_x_cells.csv.gz", "subset_genes.csv",
+        "cell_libsize_full.csv", "cell_times.csv.gz", "counts_genes_x_cells.csv.gz", "library_size.json",
+        "subset_genes.csv",
     ]
 
 

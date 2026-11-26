@@ -51,6 +51,34 @@ Changes since the previous collaborator test (2026-10-19):
   - The terminal-fate cosine graph is computed with dense float32 products
     instead of sparse ones. On K562 + TNF-alpha, 32 of 3.4M edges differ (ties at
     the 500th neighbour) and the trajectory clusters are identical.
+- Composition-robust library sizes for the tradeSeq fits (opt-in):
+  `fit_gene_dynamics(..., normalization="tmm")` / `prepare_tradeseq_inputs(normalization="tmm")`
+  write each cell's library size as `total_counts` x the TMM factor of its pseudobulk
+  sample (`norm_groupby`, default the time column), so a block of strongly induced
+  genes taking a growing share of every library no longer pulls every other gene
+  down. `cp.tl.tmm_factors()` computes the factors (`obs["tmm_factor"]`; identical to
+  `edgeR::calcNormFactors(..., lib.size=)`); run it before
+  `prescreen_time_association` when fitting a pre-screened subset. The choice is
+  recorded in `library_size.json` next to the inputs and in the fit's provenance;
+  the default (`"total"`) is unchanged. On K562 + TNF-alpha, TMM changes fitted
+  log2 fold changes by at most 0.09 (THP1: 0.2, mostly repressed genes falling about 0.1 less).
+- `cp.tl.composition_qc()` / `cp.pl.composition_qc()`: how much library composition
+  moves total-count-normalised expression over time (per cell type with `groupby`),
+  from pseudobulks and before any fit: the apparent log2 shift of an unchanged gene
+  (what `normalization="tmm"` removes) and its 3-point trend, the induced genes'
+  share of UMIs, and per-gene flags `composition_explainable` (falls >= 0.5 log2 only
+  under total-count normalisation) and `composition_masked`. Warns when the trend
+  reaches 0.1 log2. Largest trend: K562 + TNF-alpha +0.03, co-culture K562 -0.04,
+  THP1 -0.08 (negligible); PBMC + LPS CD14 monocytes -0.57 and FCGR3A monocytes
+  -0.35 (strong), NK -0.11, other lymphocytes < 0.1.
+- `cp.tl.response_heterogeneity()` / `cp.pl.response_heterogeneity()`: share of
+  cells that respond at each time point. Cells are scored on a module of induced
+  genes (automatic, restricted to `gene_dynamics_pvalue_1 < 0.05` when present, or
+  `genes=`), the share still at the baseline level is compared with what count
+  noise leaves there when every cell responds equally (simulated per time point),
+  and the excess is reported as `nonresponder_share` with a bootstrap interval and
+  a call ("all respond", "non-responders", "indeterminate", "no response"), per
+  `groupby` group (e.g. trajectory clusters). Score in `obs["response_score"]`.
 - `cp.tl.prescreen_time_association()`: optional pre-screen of genes before the
   tradeSeq fits (least-squares F test on a cubic in time, keep p < 0.2). It kept
   32-41% of genes and 97-99% of the nominally significant ones in the three

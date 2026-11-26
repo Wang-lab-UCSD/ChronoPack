@@ -441,6 +441,9 @@ def prepare_tradeseq_inputs(
     gene_subset=None,
     cell_weights=None,
     tag="",
+    normalization="total",
+    norm_groupby=None,
+    norm_factor_key="tmm_factor",
 ):
     """Write the tradeSeq CSV inputs from an AnnData object.
 
@@ -451,12 +454,44 @@ def prepare_tradeseq_inputs(
     size-factor offsets. ``cell_weights`` (cells x lineages, e.g. from
     ``cp.tl.trajectory_soft_memberships``) is written to ``cell_weights.csv`` for a
     multi-lineage fit (``fit_gene_dynamics(lineage_weights="cell_weights.csv")``).
+
+    ``normalization`` sets the library sizes:
+
+    - ``"total"`` (default): ``obs["total_counts"]``, i.e. per-cell total-count normalisation.
+    - ``"tmm"``: ``obs["total_counts"] * obs[norm_factor_key]``, composition-robust TMM library sizes, so a block of
+      strongly induced genes taking a growing share of every library does not pull every other gene down (see
+      :func:`composition_qc`). If ``obs[norm_factor_key]`` is missing it is computed here with
+      :func:`tmm_factors` over ``adata``'s genes and pseudobulk samples ``norm_groupby`` (default ``time_key``); to
+      fit a subset of genes, run ``tmm_factors`` on the unsubsetted AnnData first.
+
+    The choice is recorded in ``library_size.json``. The fits, :func:`predict_gene_dynamics` and
+    :func:`observed_gene_dynamics` all read ``cell_libsize_full.csv``, so curves, tests and observed means use the
+    same normalisation.
     """
     validate_adata(adata, time_key=time_key, layer=layer)
     if "total_counts" not in adata.obs:
         raise ChronoPackError("tradeSeq inputs need per-cell library sizes in obs['total_counts'].")
+    if normalization not in {"total", "tmm"}:
+        raise ChronoPackError(f"normalization must be 'total' or 'tmm', got {normalization!r}.")
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    libsize = adata.obs["total_counts"].to_numpy(float)
+    norm_record = {"normalization": normalization}
+    if normalization == "tmm":
+        from ._composition import tmm_factors
+
+        if norm_factor_key not in adata.obs:
+            groupby = time_key if norm_groupby is None else norm_groupby
+            tmm_factors(adata, groupby=groupby, layer=layer, key_added=norm_factor_key)
+        factor = adata.obs[norm_factor_key].to_numpy(float)
+        if not np.all(np.isfinite(factor) & (factor > 0)):
+            raise ChronoPackError(f"obs[{norm_factor_key!r}] must be positive and finite.")
+        libsize = libsize * factor
+        entry = (adata.uns.get(CHRONOPACK_UNS_KEY) or {}).get(norm_factor_key) or {}
+        norm_record.update({"norm_factor_key": norm_factor_key,
+                            "groupby": dict(entry.get("parameters") or {}).get("groupby"),
+                            "multiplier": dict(entry.get("result_keys") or {}).get("multiplier")})
 
     if gene_subset is None:
         gene_subset = adata.var_names.astype(str).to_list()
@@ -497,9 +532,10 @@ def prepare_tradeseq_inputs(
         paths["prescreen"] = prescreen_path
 
     paths["cell_libsize_full"] = output_dir / "cell_libsize_full.csv"
-    pd.DataFrame({"cell_id": cells, "libsize_full": adata.obs["total_counts"].to_numpy()}).to_csv(
-        paths["cell_libsize_full"], index=False
-    )
+    pd.DataFrame({"cell_id": cells, "libsize_full": libsize if normalization == "tmm"
+                  else adata.obs["total_counts"].to_numpy()}).to_csv(paths["cell_libsize_full"], index=False)
+    paths["library_size"] = output_dir / LIBRARY_SIZE_RECORD
+    paths["library_size"].write_text(json.dumps(_json_safe(norm_record), indent=2))
 
     if cell_weights is not None:
         weights = pd.DataFrame(cell_weights)
@@ -514,6 +550,23 @@ def prepare_tradeseq_inputs(
         weights.to_csv(paths["cell_weights"], index_label="cell_id")
 
     return {key: str(path) for key, path in paths.items()}
+
+
+LIBRARY_SIZE_RECORD = "library_size.json"
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value.item() if hasattr(value, "item") else value
+
+
+def _library_size_record(input_dir):
+    """The normalisation recorded with the tradeSeq inputs ("total" for inputs written before it was recorded)."""
+    path = Path(input_dir) / LIBRARY_SIZE_RECORD
+    return json.loads(path.read_text()) if path.exists() else {"normalization": "total", "recorded": False}
 
 
 def _read_tradeseq_outputs(result, input_dir):
@@ -659,6 +712,8 @@ def fit_gene_dynamics(
     outputs=None,
     legacy_outputs=None,
     tag="",
+    normalization="total",
+    norm_groupby=None,
     verbose=True,
     copy=False,
     return_model=True,
@@ -687,6 +742,11 @@ def fit_gene_dynamics(
     :func:`prescreen_time_association`, ``input_dir`` records how many genes were
     screened and the q-values are adjusted over all of them (``fdr_n_tests`` in
     the provenance), not only over the genes fitted.
+
+    ``normalization`` (``"total"`` or ``"tmm"``) and ``norm_groupby`` set the library sizes written with
+    ``prepare_inputs=True``; see :func:`prepare_tradeseq_inputs`. Without ``prepare_inputs`` the fit uses whatever
+    the inputs in ``input_dir`` were written with (recorded in the provenance as ``library_size``); asking for a
+    different normalisation than the one recorded there raises an error.
 
     tradeSeq SingleCellExperiment objects are retained as sidecar RDS files.
     Scalar association-test outputs are written to ``adata.var`` when
@@ -745,7 +805,17 @@ def fit_gene_dynamics(
                 time_key=time_key,
                 cell_weights=cell_weights,
                 tag="",
+                normalization=normalization,
+                norm_groupby=norm_groupby,
             )
+        )
+    library_size = _library_size_record(input_dir)
+    if run_backend and library_size["normalization"] != normalization and (
+        prepare_inputs or normalization != "total"
+    ):
+        raise ChronoPackError(
+            f"The inputs in {input_dir} were written with normalization={library_size['normalization']!r}, not "
+            f"{normalization!r}; rewrite them with prepare_inputs=True."
         )
 
     metadata = {
@@ -761,6 +831,7 @@ def fit_gene_dynamics(
         "legacy_outputs": legacy_outputs,
         "lineage_weights": lineage_weights,
         "prepared_paths": prepared_paths,
+        "library_size": library_size,
     }
 
     association = None

@@ -43,6 +43,10 @@ def __getattr__(name):
         from . import _mode_conservation_plots
 
         return getattr(_mode_conservation_plots, name)
+    if name in {"composition_qc", "response_heterogeneity"}:
+        from . import _response_plots
+
+        return getattr(_response_plots, name)
     if name == "gene_dynamics_curves":
         from ._gene_dynamics_plots import gene_dynamics_curves
 
@@ -69,12 +73,14 @@ __all__ = [
     "cluster_pair_representative_genes",
     "cluster_violin",
     "clustering_metrics",
+    "composition_qc",
     "fdr_wald_break",
     "gene_dynamics_curves",
     "gene_trajectory",
     "mode_chord",
     "mode_proportions",
     "mode_sankey",
+    "response_heterogeneity",
     "c2c",
     "cell_trajectories",
     "r_plotting_resource_path",

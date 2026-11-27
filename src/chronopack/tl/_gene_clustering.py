@@ -235,20 +235,103 @@ def align_gene_trajectories(
     return traj
 
 
+ONSET_GATES = ("band", "band_or_tags")
+_ONSET_GATE_DEFAULTS = {
+    "delta": 0.2,
+    "hold_minutes": 20.0,
+    "level": 0.95,
+    "n_draws": 1000,
+    "seed": 0,
+    "tag_span_minutes": 30.0,
+    "min_tags": 3,
+    "min_tag_counts": 10,
+}
+
+
 def compute_gene_trajectory_descriptors(
     traj,
     *,
     inplace: bool = True,
     descriptor_args: dict[str, Any] | None = None,
     key_added: str = GENE_TRAJECTORY_KEY,
+    onset_gate: str | None = None,
+    sce_dict: dict[str, Any] | None = None,
+    onset_gate_args: dict[str, Any] | None = None,
 ):
-    """Compute trajectory descriptors from ``traj.X`` and append them to ``traj.obs``."""
+    """Compute trajectory descriptors from ``traj.X`` and append them to ``traj.obs``.
+
+    The baseline is the first grid point; changes are measured on ``traj.X``'s scale
+    (log1p of the fitted mean).
+
+    - ``direction``: ``"induced"`` or ``"repressed"``, the sign of the largest change
+      from baseline.
+    - ``t_peak``: time of the largest change from baseline (either sign);
+      ``t_peak_censored`` is True when that is the last grid point, i.e. the gene
+      is still changing (or level) at the end of the window and the true peak is at
+      or after it. ``t_peak`` then holds the window end, a lower bound.
+    - ``t_half``: first time the change reaches half of the peak change, in the
+      gene's own direction.
+    - ``t_onset``: first time the z-scored trajectory departs from the mean of the
+      first ``N_minutes`` by more than ``z_diff_threshold`` for
+      ``require_consecutive`` grid points, counting only departures in the gene's
+      ``direction`` (an induced gene's onset cannot land on a dip, nor a
+      repressed gene's on a bump). NaN when there is no such departure.
+    - ``baseline_exp``, ``peak_exp``, ``peak_dlogexp``, ``peak_dexp``,
+      ``peak_log2fc``: levels at baseline and peak and the change between them.
+    - ``auc_norm``, ``owp``, ``owp_ddt``: persistence measures. They are not
+      oriented by direction: ``auc_norm`` is the area under the min-max-scaled
+      curve (time spent near the maximum, so time before repression for repressed
+      genes), and ``owp`` / ``owp_ddt`` use only rises above the baseline (NA for
+      most repressed genes).
+    - ``mean_curv``, ``max_curv``, ``mean_turn``, ``max_turn``: curvature and
+      turning angles of the min-max-scaled curve; turning angles depend on the
+      grid spacing.
+
+    Times (``t_onset``, ``t_half``, ``t_peak``) are grid positions on the aligned
+    axis divided by each context's ``scale_map`` factor: real minutes (the
+    context's own clock) after the alignment origin, i.e. after the context's
+    response onset as set by ``offset_map`` (stimulation itself when the offset
+    is 0).
+
+    Gated onset (opt-in, experimental; ``t_onset`` itself is not gated)
+    -------------------------------------------------------------------
+    ``onset_gate`` adds a gate on ``t_onset`` that may later become the default:
+
+    - ``onset_gate_pass``: whether the gene passes the gate.
+
+      - ``"band"`` (variant 1): the simultaneous 95% band of the change from
+        baseline (log scale, from the NB-GAM coefficient covariance) keeps its
+        lower edge, in the gene's direction, above ``delta`` (0.2, a 22% change)
+        for ``hold_minutes`` (20) of the context's own minutes.
+      - ``"band_or_tags"`` (variant 2): the band, or a run of at least
+        ``min_tags`` (3) consecutive sampling times covering at least
+        ``tag_span_minutes`` (30) of the context's own minutes, whose pooled mean
+        count per cell is more than ``delta`` past the fit's baseline in the
+        gene's direction, counting only sampling times with at least
+        ``min_tag_counts`` (10) UMIs. The tag rule has no formal error control:
+        its evidence is agreement between independent sampling times.
+
+    - ``t_onset_gated``: ``t_onset`` where ``onset_gate_pass``, else NaN.
+
+    The gate reads the tradeSeq fits behind ``traj``: ``sce_dict`` (context ->
+    SCE path), or the paths recorded by :func:`align_gene_trajectories`. The tag
+    rule needs discrete sampling times and the SCE's counts assay.
+    ``onset_gate_args`` overrides ``delta``, ``hold_minutes``, ``level``,
+    ``n_draws``, ``seed``, ``tag_span_minutes``, ``min_tags`` and
+    ``min_tag_counts``.
+    """
     try:
         from rpy2.robjects import r
     except ImportError as exc:
         raise ImportError("Gene-trajectory descriptor calculation requires optional dependency 'rpy2'.") from exc
 
     validate_adata(traj)
+    if onset_gate is not None and onset_gate not in ONSET_GATES:
+        raise ValueError(f"onset_gate must be None or one of {ONSET_GATES}.")
+    gate_args = {**_ONSET_GATE_DEFAULTS, **(onset_gate_args or {})}
+    unknown = set(gate_args) - set(_ONSET_GATE_DEFAULTS)
+    if unknown:
+        raise ValueError(f"Unknown onset_gate_args: {sorted(unknown)}.")
     target = traj if inplace else traj.copy()
     time_grid = np.asarray(target.var["time"], dtype=float)
     source_r_resource("dimred_clustering_helpers.R")
@@ -284,20 +367,85 @@ def compute_gene_trajectory_descriptors(
         )
         desc = pd.read_csv(desc_path, index_col=0)
         desc = desc.loc[target.obs_names]
+        if onset_gate is not None:
+            desc = _add_onset_gate(target, desc, onset_gate, sce_dict, gate_args, alignment_meta, work_dir)
     finally:
         tmp_ctx.cleanup()
 
     for col in desc.columns:
         target.obs[col] = desc[col].to_numpy()
+    parameters = {"descriptor_args": descriptor_args or {}}
+    if onset_gate is not None:
+        parameters.update(onset_gate=onset_gate, onset_gate_args=gate_args)
     record_provenance(
         target,
         f"{key_added}_descriptors",
         analysis="gene_expression_trajectory_descriptors",
         backend="R",
-        parameters={"descriptor_args": descriptor_args or {}},
+        parameters=parameters,
         result_keys={"obs": list(desc.columns)},
     )
     return None if inplace else target
+
+
+def _add_onset_gate(traj, desc, onset_gate, sce_dict, gate_args, alignment_meta, work_dir):
+    """Per context, run the onset gate on the tradeSeq fit and add the gated-onset columns to ``desc``."""
+    from rpy2.robjects import FloatVector, StrVector, r
+
+    if not {"gene", "cell_type"} <= set(traj.obs.columns):
+        raise ValueError("onset_gate needs traj.obs['gene'] and traj.obs['cell_type'] (from align_gene_trajectories).")
+    sources = {**alignment_meta.get("source_sce", {}), **{str(k): v for k, v in (sce_dict or {}).items()}}
+    time_map = alignment_meta.get("time_map", {})
+    offset_map = alignment_meta.get("offset_map", {})
+    scale_map = alignment_meta.get("scale_map_use", alignment_meta.get("scale_map", {}))
+    lineage_pick = int(alignment_meta.get("lineage_pick", 1))
+    # Aligned minutes of the grid: var["time"] holds grid position / n, as for the descriptor times.
+    n_grid = traj.n_vars
+    grid_minutes = np.round(np.asarray(traj.var["time"], dtype=float) * n_grid, 6)
+    tags = onset_gate == "band_or_tags"
+
+    parts = []
+    obs = traj.obs.loc[desc.index]
+    for ctx in pd.unique(obs["cell_type"].astype(str)):
+        if ctx not in sources:
+            raise ValueError(f"onset_gate needs the tradeSeq SCE for context {ctx!r}: pass sce_dict.")
+        if ctx not in time_map:
+            raise ValueError(f"No time_map entry for context {ctx!r} in the alignment metadata.")
+        rows = obs.index[obs["cell_type"].astype(str) == ctx]
+        direction = desc.loc[rows, "direction"].map({"induced": 1.0, "repressed": -1.0}).fillna(0.0)
+        out_path = work_dir / f"onset_gate.{ctx}.csv"
+        sce = sources[ctx]
+        r["chronopack_onset_gate_from_sce"](
+            str(sce) if isinstance(sce, (str, Path)) else sce,
+            StrVector(obs.loc[rows, "gene"].astype(str).tolist()),
+            FloatVector(direction.tolist()),
+            FloatVector(grid_minutes.tolist()),
+            float(time_map[ctx]),
+            offset=float(offset_map.get(ctx, 0.0)),
+            scale=float(scale_map.get(ctx, 1.0)),
+            output_path=str(out_path),
+            lineage_pick=lineage_pick,
+            delta=float(gate_args["delta"]),
+            hold_minutes=float(gate_args["hold_minutes"]),
+            level=float(gate_args["level"]),
+            n_draws=int(gate_args["n_draws"]),
+            seed=int(gate_args["seed"]),
+            tags=tags,
+            min_tags=int(gate_args["min_tags"]),
+            min_tag_counts=float(gate_args["min_tag_counts"]),
+        )
+        res = pd.read_csv(out_path)
+        res.index = rows
+        parts.append(res.drop(columns="gene"))
+    gate = pd.concat(parts).loc[desc.index]
+
+    desc = desc.copy()
+    passed = gate["onset_band_pass"].astype("boolean").fillna(False).astype(bool)
+    if tags:
+        passed = passed | (gate["onset_tag_span"].fillna(0) >= float(gate_args["tag_span_minutes"]) - 1e-9)
+    desc["onset_gate_pass"] = passed.to_numpy()
+    desc["t_onset_gated"] = np.where(passed.to_numpy(), desc["t_onset"].to_numpy(dtype=float), np.nan)
+    return desc
 
 
 def _write_subset_matrix(traj, work_dir: Path, basename: str) -> tuple[Path, Path]:

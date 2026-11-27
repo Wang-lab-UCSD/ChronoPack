@@ -279,6 +279,9 @@ def trajectory_features(
     width: float = 6.5,
     height: float = 5,
     title: str | None = None,
+    censored: bool = True,
+    censored_color: str = "#E7298A",
+    censored_label: str = "censored (at window end)",
     **kwargs,
 ) -> RPlotResult:
     """Scatter of trajectories in a feature space, coloured by ``color`` (TESTING ``feature_plot_pc_simple``).
@@ -289,8 +292,22 @@ def trajectory_features(
     there (NaN) are left out. Categorical colours default to the dynamic-mode palette
     (``MODE_COLORS``) when every label is a named mode. Extra keyword arguments go to
     the R ``feature_plot_pc_simple``.
+
+    With ``censored=True``, a numeric ``color`` with a ``<color>_censored`` column
+    (e.g. ``t_peak_censored``) draws its censored trajectories in ``censored_color``,
+    labelled ``censored_label`` in the legend, instead of the colour scale's top
+    colour; the scale covers the uncensored values only.
     """
     data = _gene_labels(adata).reset_index(drop=True)
+    censored_col = f"{color}_censored"
+    use_censored = (
+        censored
+        and censored_col in adata.obs
+        and pd.api.types.is_numeric_dtype(adata.obs[color])
+        and censored_col not in (x, y)
+    )
+    if use_censored:
+        data[censored_col] = adata.obs[censored_col].astype("boolean").fillna(False).astype(bool).to_numpy()
     for name in dict.fromkeys([x, y, color] if basis is None else [color]):
         if name not in adata.obs:
             raise KeyError(f"Trajectory observation column '{name}' is not available.")
@@ -317,6 +334,8 @@ def trajectory_features(
         title=title,
         width=float(width),
         height=float(height),
+        **({"censored_col": censored_col, "censored_color": censored_color, "censored_label": censored_label}
+           if use_censored else {}),
         **kwargs,
     )
     return RPlotResult("trajectory_features", data=data, output=rendered, preview_png=preview, metadata={"x": x, "y": y, "color": color})

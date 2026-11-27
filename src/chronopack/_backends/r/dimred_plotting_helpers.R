@@ -44,7 +44,10 @@ feature_plot_pc_simple <- function(
   gene_label_segment_color = "grey45",
   gene_label_segment_size = 0.25,
   gene_label_seed = 1,
-  check_overlap = FALSE          # only relevant for shadow mode
+  check_overlap = FALSE,         # only relevant for shadow mode
+  censored_col = NULL,           # logical column; TRUE rows are drawn in censored_color, outside the colour scale
+  censored_color = "#E7298A",
+  censored_label = "censored"
 ) {
   stopifnot(is.data.frame(pc_df))
   stopifnot(all(c(x, y, feature) %in% colnames(pc_df)))
@@ -117,6 +120,15 @@ feature_plot_pc_simple <- function(
   df_plot <- pc_df
   df_plot$.row_id <- if (!is.null(rownames(df_plot))) rownames(df_plot) else as.character(seq_len(nrow(df_plot)))
 
+  # Censored values (e.g. t_peak at the window end) get their own colour instead of the scale's top colour.
+  df_plot$.censored <- FALSE
+  if (!is.null(censored_col)) {
+    if (!(censored_col %in% colnames(df_plot))) stop("censored_col not found: ", censored_col)
+    if (!is.numeric(df_plot[[feature]])) stop("censored_col applies to numeric features only.")
+    cens <- as.logical(df_plot[[censored_col]])
+    df_plot$.censored <- !is.na(cens) & cens
+  }
+
   # Parse rownames of form {gene}_{cell_type} using the last underscore
   df_plot$.parsed_gene <- sub("_(?=[^_]+$).*", "", df_plot$.row_id, perl = TRUE)
   df_plot$.parsed_gene[df_plot$.parsed_gene == ""] <- df_plot$.row_id
@@ -129,8 +141,9 @@ feature_plot_pc_simple <- function(
     if (!is.null(floor)) v[v < floor] <- floor
     df_plot[[feature]] <- v
 
-    lo <- min(df_plot[[feature]], na.rm = TRUE)
-    hi <- max(df_plot[[feature]], na.rm = TRUE)
+    v_scale <- if (any(!df_plot$.censored)) df_plot[[feature]][!df_plot$.censored] else df_plot[[feature]]
+    lo <- min(v_scale, na.rm = TRUE)
+    hi <- max(v_scale, na.rm = TRUE)
   } else {
     df_plot[[feature]] <- as.factor(df_plot[[feature]])
     levs <- levels(df_plot[[feature]])
@@ -261,10 +274,29 @@ feature_plot_pc_simple <- function(
 
   p <- ggplot2::ggplot(df_plot, aes_map)
 
+  df_obs <- df_plot[!df_plot$.censored, , drop = FALSE]
+  if (any(df_plot$.censored)) {
+    df_cens <- df_plot[df_plot$.censored, , drop = FALSE]
+    df_cens$.censored_label <- censored_label
+    p <- p +
+      ggplot2::geom_point(
+        data = df_cens,
+        mapping = ggplot2::aes_string(x = x, y = y, shape = ".censored_label"),
+        inherit.aes = FALSE,
+        colour = censored_color,
+        size = point_size_scalar
+      ) +
+      ggplot2::scale_shape_manual(
+        values = stats::setNames(16, censored_label),
+        name = NULL,
+        guide = ggplot2::guide_legend(override.aes = list(colour = censored_color, size = 2.5), order = 2)
+      )
+  }
+
   if (use_size_mapping) {
-    p <- p + ggplot2::geom_point(shape = 16)
+    p <- p + ggplot2::geom_point(data = df_obs, shape = 16)
   } else {
-    p <- p + ggplot2::geom_point(size = point_size_scalar, shape = 16)
+    p <- p + ggplot2::geom_point(data = df_obs, size = point_size_scalar, shape = 16)
   }
 
   p <- p +
@@ -2858,7 +2890,10 @@ plot_cluster_violin <- function(
   print_summary = TRUE,
   print_top_genes = TRUE,
   plot_width = 7.2,
-  plot_height = 4.8
+  plot_height = 4.8,
+  censored_col = NULL,        # logical column; TRUE points are drawn in censored_color
+  censored_color = "#E7298A",
+  censored_label = "censored"
 ) {
   compare_mode <- match.arg(compare_mode)
   topk_mode <- match.arg(topk_mode)
@@ -2875,6 +2910,12 @@ plot_cluster_violin <- function(
   }
   if (!(cluster_col %in% colnames(df0))) {
     stop("cluster_col not found in pc_df: ", cluster_col)
+  }
+  df0$.censored <- FALSE
+  if (!is.null(censored_col)) {
+    if (!(censored_col %in% colnames(df0))) stop("censored_col not found in pc_df: ", censored_col)
+    cens <- as.logical(df0[[censored_col]])
+    df0$.censored <- !is.na(cens) & cens
   }
 
   # ---- ensure key exists ----
@@ -3054,6 +3095,7 @@ plot_cluster_violin <- function(
       mean_wald = mean(waldStat_1, na.rm = TRUE),
       min_wald = min(waldStat_1, na.rm = TRUE),
       max_wald = max(waldStat_1, na.rm = TRUE),
+      n_censored = sum(.censored),
       .groups = "drop"
     ) %>%
     dplyr::rename(group = .group)
@@ -3183,10 +3225,23 @@ plot_cluster_violin <- function(
   # ---- plot ----
   options(repr.plot.width = plot_width, repr.plot.height = plot_height)
 
+  df_plot$.status <- factor(ifelse(df_plot$.censored, censored_label, "observed"),
+                            levels = c("observed", censored_label))
   p <- ggplot(df_plot, aes(x = .group, y = .data[[feature]], fill = .group)) +
     geom_violin(trim = FALSE, alpha = 0.35, color = NA) +
-    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.75) +
-    geom_jitter(width = 0.12, height = 0, size = 0.5, alpha = 0.35) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.75)
+  if (any(df_plot$.censored)) {
+    # Censored genes stay in the violin and box; only their points are coloured.
+    p <- p +
+      geom_jitter(aes(colour = .status, alpha = .status), width = 0.12, height = 0, size = 0.5) +
+      scale_colour_manual(values = stats::setNames(c("black", censored_color), c("observed", censored_label)),
+                          breaks = censored_label, name = NULL) +
+      scale_alpha_manual(values = stats::setNames(c(0.35, 0.7), c("observed", censored_label)), guide = "none") +
+      guides(colour = guide_legend(override.aes = list(size = 2, alpha = 1)))
+  } else {
+    p <- p + geom_jitter(width = 0.12, height = 0, size = 0.5, alpha = 0.35)
+  }
+  p <- p +
     theme_classic(base_size = 12) +
     labs(
       title = plot_title,
@@ -3194,9 +3249,8 @@ plot_cluster_violin <- function(
       y = y_title
     ) +
     guides(fill = "none")
-
-  if (identical(feature, "t_peak") && !isTRUE(trim_percentiles)) {
-    p <- p + scale_y_continuous(limits = c(0, 1))
+  if (any(df_plot$.censored)) {
+    p <- p + theme(legend.position = "bottom")
   }
 
   print(p)
@@ -5936,11 +5990,13 @@ chronopack_plot_cluster_pair_genes_csv <- function(data_path, output, sce_paths,
 # cp.pl.cluster_violin: TESTING.ipynb cell 111, one plot_cluster_violin() panel per feature,
 # combined with patchwork. Returns the per-group summaries.
 chronopack_plot_cluster_violin_csv <- function(data_path, output, features, plot_titles,
-                                               width = 7, height = 3.5, dpi = 300, ...) {
+                                               width = 7, height = 3.5, dpi = 300, censored_cols = NULL, ...) {
   chronopack_attach_plot_packages()
   pc_df_subset <- chronopack_read_plot_table(data_path)
   res <- chronopack_without_display(lapply(seq_along(features), function(i) {
-    plot_cluster_violin(pc_df_subset, feature = features[[i]], plot_title = plot_titles[[i]], ...)
+    cc <- if (is.null(censored_cols)) "" else as.character(censored_cols[[i]])
+    plot_cluster_violin(pc_df_subset, feature = features[[i]], plot_title = plot_titles[[i]],
+                        censored_col = if (nzchar(cc)) cc else NULL, ...)
   }))
   fig <- Reduce(`+`, lapply(res, `[[`, "plot"))
   chronopack_save_plot(fig, output, width = width, height = height, dpi = dpi)

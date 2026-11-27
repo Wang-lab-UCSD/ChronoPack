@@ -300,6 +300,9 @@ def cluster_violin(
     output: str | Path | None = None,
     width: float | None = None,
     height: float = 3.5,
+    censored: bool = True,
+    censored_color: str = "#E7298A",
+    censored_label: str = "censored (at window end)",
     **kwargs,
 ) -> RPlotResult:
     """Violin plots of trajectory descriptors (``features``, e.g. ``t_peak``) per context.
@@ -309,12 +312,24 @@ def cluster_violin(
     ``waldStat_1``. One panel per feature, side by side (``width`` defaults to 3.5
     inches per panel); ``data`` holds the per-group summaries. Extra keyword
     arguments go to the R ``plot_cluster_violin``.
+
+    With ``censored=True``, a feature with a ``<feature>_censored`` column in
+    ``adata.obs`` (e.g. ``t_peak_censored`` from
+    :func:`~chronopack.tl.compute_gene_trajectory_descriptors`) has its censored
+    genes drawn as ``censored_color`` points; they stay in the violin, box and
+    summaries at their stored value (the window end), and ``data`` counts them in
+    ``n_censored``.
     """
     features = [features] if isinstance(features, str) else [str(f) for f in features]
     plot_titles = [""] * len(features) if plot_titles is None else [str(t) for t in plot_titles]
     if len(plot_titles) != len(features):
         raise ValueError("Pass one plot title per feature.")
-    table = _obs_table(adata, ["gene", "cell_type", cluster_col, "waldStat_1", *features])
+    censored_cols = [
+        f"{f}_censored" if censored and f"{f}_censored" in adata.obs else "" for f in features
+    ]
+    table = _obs_table(
+        adata, ["gene", "cell_type", cluster_col, "waldStat_1", *features, *[c for c in censored_cols if c]]
+    )
     rendered, preview, value = _draw(
         "chronopack_plot_cluster_violin_csv",
         output,
@@ -336,6 +351,9 @@ def cluster_violin(
         trim_upper=float(trim_upper),
         width=float(3.5 * len(features) if width is None else width),
         height=float(height),
+        censored_cols=censored_cols,
+        censored_color=censored_color,
+        censored_label=censored_label,
         **kwargs,
     )
     summary = _r_to_pandas(value) if value is not None else None

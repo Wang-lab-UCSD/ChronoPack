@@ -85,8 +85,9 @@ get_descriptors <- function(
     )
   }
 
+  # sign = 0: departures in either direction; +1 / -1: only departures in that direction.
   calc_onset_zdiff <- function(y, tt, N_minutes = 10, z_diff_threshold = 0.25,
-                               require_consecutive = 1, mode = c("early_lm", "horizontal")) {
+                               require_consecutive = 1, mode = c("early_lm", "horizontal"), sign = 0) {
     mode <- match.arg(mode)
     keep <- is.finite(y) & is.finite(tt)
     y <- y[keep]; tt <- tt[keep]
@@ -105,7 +106,8 @@ get_descriptors <- function(
       df$blue_fit <- mean(early_df$expr_z, na.rm = TRUE)
     }
 
-    above <- abs(df$expr_z - df$blue_fit) > z_diff_threshold
+    dev <- df$expr_z - df$blue_fit
+    above <- if (sign == 0) abs(dev) > z_diff_threshold else sign * dev > z_diff_threshold
     if (require_consecutive <= 1) {
       onset_idx <- which(above)[1]
     } else {
@@ -155,15 +157,32 @@ get_descriptors <- function(
       (expm1(baseline) + pseudocount)
     )
 
+  # Direction, half-change time and censoring, on the same scale and baseline as t_peak.
+  # t_half: first grid time at which the change from baseline reaches half of the peak change
+  # (in the gene's own direction). t_peak_censored: the largest change is at the last grid point,
+  # so the true peak is at or after the end of the window.
+  dev_peak <- traj0[cbind(seq_len(nrow(traj0)), peak_idx)]
+  direction <- ifelse(dev_peak > 0, "induced", ifelse(dev_peak < 0, "repressed", NA_character_))
+  t_peak_censored <- peak_idx == ncol(traj_mat)
+  half_idx <- vapply(seq_len(nrow(traj0)), function(i) {
+    if (!is.finite(dev_peak[i]) || dev_peak[i] == 0) return(NA_integer_)
+    as.integer(which(sign(dev_peak[i]) * traj0[i, ] >= 0.5 * abs(dev_peak[i]))[1])
+  }, integer(1))
+  t_half <- tt[half_idx]
+
   # ----------------------------------------------------------------
   # Onset + AUC + OWP
   # ----------------------------------------------------------------
 
-  t_onset <- vapply(seq_len(nrow(traj_mat)), function(i)
+  # Onset is signed by the gene's direction: only departures in that direction count, so an induced gene's onset
+  # cannot land on a dip (and vice versa). NA when the trajectory never departs from baseline.
+  t_onset <- vapply(seq_len(nrow(traj_mat)), function(i) {
+    if (!is.finite(dev_peak[i]) || dev_peak[i] == 0) return(NA_real_)
     calc_onset_zdiff(
       as.numeric(traj_mat[i, ]), tt,
-      N_minutes, z_diff_threshold, require_consecutive, onset_mode
-    ), numeric(1))
+      N_minutes, z_diff_threshold, require_consecutive, onset_mode, sign = sign(dev_peak[i])
+    )
+  }, numeric(1))
 
   auc_norm <- vapply(seq_len(nrow(traj_mat)), function(i) {
     y <- as.numeric(traj_mat[i, ])
@@ -214,6 +233,9 @@ get_descriptors <- function(
     max_curv = max_curv,
     mean_turn = mean_turn,
     max_turn = max_turn,
+    direction = direction,
+    t_half = t_half,
+    t_peak_censored = t_peak_censored,
     stringsAsFactors = FALSE
   )
 }
@@ -997,6 +1019,7 @@ build_dimred_pc_df <- function(traj_mat, tt, asso_df.ls, scale_map_use,
   descriptor_scale[!is.finite(descriptor_scale)] <- length(tt)
   desc$t_onset <- desc$t_onset * descriptor_scale
   desc$t_peak <- desc$t_peak * descriptor_scale
+  desc$t_half <- desc$t_half * descriptor_scale
 
   pc_df <- data.frame(
     gene_celltype = gene_celltype,
@@ -1409,9 +1432,140 @@ chronopack_compute_descriptors_from_files <- function(
   }
   desc$t_onset <- desc$t_onset * descriptor_scale
   desc$t_peak <- desc$t_peak * descriptor_scale
+  desc$t_half <- desc$t_half * descriptor_scale
   desc <- dplyr::select(desc, -gene_celltype)
   write.csv(desc, output_path)
   normalizePath(output_path, mustWork = FALSE)
+}
+
+# Onset gate (opt-in), per context, from the tradeSeq fit behind the aligned trajectories.
+# Change from baseline: Delta(t) = (x(t) - x(t_1)) beta on the aligned grid (t_1 = first grid point, mapped to this
+# context's own minutes), with its pointwise SE from the coefficient covariance and a simultaneous (sup-t) critical
+# value from n_draws coefficient draws.
+#   onset_band_pass: the band's lower edge, in the gene's direction, stays above delta (log scale; 0.2 = a 22% change)
+#                    for hold_minutes of the context's own minutes (or until the end of the window).
+#   onset_tag_span:  (tags = TRUE) longest first-to-last distance, in the context's own minutes, of a run of at least
+#                    min_tags consecutive in-window sampling times whose pooled mean count per cell (counts / summed
+#                    exp(offset)) is more than delta past the fit at t_1 in the gene's direction, counting only
+#                    sampling times with at least min_tag_counts UMIs. 0 when there is no such run.
+# direction: +1 / -1 per gene (NA: no gate). grid_minutes: aligned minutes of the trajectory grid.
+chronopack_onset_gate_from_sce <- function(
+  sce, genes, direction, grid_minutes, tmax, offset = 0, scale = 1, output_path = NULL,
+  lineage_pick = 1, delta = 0.2, hold_minutes = 20, level = 0.95, n_draws = 1000, seed = 0,
+  tags = FALSE, min_tags = 3, min_tag_counts = 10
+) {
+  if (is.character(sce)) sce <- readRDS(sce)
+  rd_ts <- S4Vectors::metadata(SummarizedExperiment::rowData(sce))$tradeSeq
+  if (is.null(rd_ts)) rd_ts <- SummarizedExperiment::rowData(sce)$tradeSeq
+  cd_ts <- SummarizedExperiment::colData(sce)$tradeSeq
+  if (is.null(rd_ts) || is.null(cd_ts) || is.null(cd_ts$dm) || is.null(cd_ts$X)) {
+    stop("SCE does not contain tradeSeq fit metadata (rowData/colData tradeSeq, dm, X).")
+  }
+  genes <- as.character(genes)
+  direction <- as.numeric(direction)
+  missing <- setdiff(genes, rownames(sce))
+  if (length(missing)) stop("Genes not in the tradeSeq fit: ", paste(utils::head(missing, 5), collapse = ", "))
+
+  dm <- cd_ts$dm
+  X <- cd_ts$X
+  t_cols <- grep("^t[0-9]+$", colnames(dm), value = TRUE)
+  ell <- as.integer(lineage_pick)
+  if (!(ell %in% as.integer(sub("^t", "", t_cols)))) ell <- as.integer(sub("^t", "", t_cols[1]))
+  df_pred <- tradeSeq:::.getPredictRangeDf(dm, lineageId = ell, nPoints = as.integer(round(tmax)) + 1L)
+  slingshot_coldata <- SummarizedExperiment::colData(sce)$crv
+  pseudotime <- if (!is.null(slingshot_coldata)) {
+    slingshot_coldata[, grep(x = colnames(slingshot_coldata), pattern = "pseudotime"), drop = FALSE]
+  } else {
+    as.matrix(dm[, t_cols, drop = FALSE])
+  }
+  X_pred <- tradeSeq:::predictGAM(lpmatrix = X, df = df_pred, pseudotime = pseudotime)
+  pcols <- colnames(X_pred)
+  p <- length(pcols)
+  minutes_pred <- as.numeric(df_pred[[paste0("t", ell)]]) * tmax
+
+  # Prediction design at the aligned grid, in this context's own minutes (linear interpolation, as the alignment).
+  t_real <- (as.numeric(grid_minutes) - offset) / scale
+  X_al <- vapply(seq_len(p), function(j) stats::approx(minutes_pred, X_pred[, j], xout = t_real, rule = 2)$y,
+                 numeric(length(t_real)))
+  X_al <- matrix(X_al, nrow = length(t_real))
+  xd <- sweep(X_al, 2, X_al[1, ], "-")
+  n_grid <- nrow(xd)
+  step <- stats::median(diff(t_real))
+  need <- max(1L, as.integer(round(hold_minutes / step)) + 1L)
+
+  beta_all <- as.matrix(rd_ts$beta[[1]])
+  idx <- match(genes, rownames(sce))
+  beta_rows <- if (!is.null(rownames(beta_all)) && all(genes %in% rownames(beta_all))) match(genes, rownames(beta_all)) else idx
+  beta_mat <- beta_all[beta_rows, , drop = FALSE]
+  if (!is.null(colnames(beta_mat)) && all(pcols %in% colnames(beta_mat))) beta_mat <- beta_mat[, pcols, drop = FALSE]
+  if (ncol(beta_mat) != p) stop("Beta columns do not match the prediction design.")
+
+  set.seed(seed)
+  Z <- matrix(stats::rnorm(n_draws * p), n_draws, p)
+
+  band_pass <- rep(NA, length(genes))
+  for (g in seq_along(genes)) {
+    s <- direction[g]
+    if (!is.finite(s) || s == 0) next
+    S <- as.matrix(rd_ts$Sigma[[idx[g]]])
+    if (!is.null(rownames(S)) && all(pcols %in% rownames(S))) S <- S[pcols, pcols, drop = FALSE]
+    S <- (S + t(S)) / 2
+    b <- as.numeric(beta_mat[g, ])
+    d <- as.numeric(xd %*% b)
+    se <- sqrt(pmax(0, rowSums((xd %*% S) * xd)))
+    L <- tryCatch(t(chol(S + 1e-12 * diag(p))), error = function(e) {
+      ev <- eigen(S, symmetric = TRUE)
+      ev$vectors %*% diag(sqrt(pmax(ev$values, 0)), p)
+    })
+    dev <- abs((Z %*% t(L)) %*% t(xd))
+    dev <- sweep(dev, 2, ifelse(se > 0, se, Inf), "/")
+    crit <- as.numeric(stats::quantile(apply(dev, 1, max), level))
+    ok <- (s * d - crit * se) > delta
+    r <- rle(ok)
+    ends <- cumsum(r$lengths)
+    band_pass[g] <- any(r$values & (r$lengths >= need | ends == n_grid))
+  }
+  out <- data.frame(gene = genes, onset_band_pass = band_pass, stringsAsFactors = FALSE)
+
+  if (isTRUE(tags)) {
+    if (!("counts" %in% SummarizedExperiment::assayNames(sce))) {
+      stop("The tag rule needs the counts assay in the tradeSeq SCE.")
+    }
+    cells <- rep(TRUE, nrow(dm))
+    l_col <- paste0("l", ell)
+    if (l_col %in% colnames(dm)) cells <- as.numeric(dm[[l_col]]) == 1
+    cell_min <- round(as.numeric(as.matrix(pseudotime)[, match(ell, as.integer(sub("^t", "", t_cols)))]) * tmax, 6)
+    off_col <- grep("offset", colnames(dm), value = TRUE)[1]
+    expo <- if (is.na(off_col)) rep(1, nrow(dm)) else exp(as.numeric(dm[[off_col]]))
+    tag_real <- sort(unique(cell_min[cells]))
+    if (length(tag_real) > 100) {
+      stop("The tag rule needs discrete sampling times; found ", length(tag_real), " distinct cell times.")
+    }
+    tag_al <- tag_real * scale + offset
+    in_win <- tag_al >= min(grid_minutes) - 1e-9 & tag_al <= max(grid_minutes) + 1e-9
+    tag_real <- tag_real[in_win]
+    cnt <- SummarizedExperiment::assay(sce, "counts")[genes, cells, drop = FALSE]
+    cm <- cell_min[cells]
+    summed <- vapply(tag_real, function(tg) as.numeric(Matrix::rowSums(cnt[, cm == tg, drop = FALSE])), numeric(length(genes)))
+    summed <- matrix(summed, nrow = length(genes))
+    exposure <- vapply(tag_real, function(tg) sum(expo[cells][cm == tg]), numeric(1))
+    eta0 <- as.numeric(beta_mat %*% X_al[1, ])
+    span <- rep(NA_real_, length(genes))
+    for (g in seq_along(genes)) {
+      s <- direction[g]
+      if (!is.finite(s) || s == 0) next
+      ok <- suppressWarnings(s * (log(summed[g, ] / exposure) - eta0[g]) > delta) & summed[g, ] >= min_tag_counts
+      ok[is.na(ok)] <- FALSE
+      r <- rle(ok)
+      ends <- cumsum(r$lengths)
+      starts <- ends - r$lengths + 1
+      good <- which(r$values & r$lengths >= min_tags)
+      span[g] <- if (length(good)) max(tag_real[ends[good]] - tag_real[starts[good]]) else 0
+    }
+    out$onset_tag_span <- span
+  }
+  if (!is.null(output_path)) write.csv(out, output_path, row.names = FALSE)
+  invisible(out)
 }
 
 chronopack_cluster_trajectory_matrix_to_files <- function(

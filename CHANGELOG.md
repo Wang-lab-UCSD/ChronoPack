@@ -172,6 +172,38 @@ Changes since the previous collaborator test (2026-10-19):
   derivative features (PCA fit on `reference` when given) instead of the full
   features. The default (`n_pcs=None`) is unchanged. The descriptive
   `variance_threshold` / `pca_columns` PCA still does not affect the clusters.
+- `cp.tl.compute_gene_trajectory_descriptors()` adds three columns; existing
+  descriptors are unchanged. `direction` ("induced" / "repressed", the sign of the
+  largest change from baseline); `t_half`, the first time the change reaches half
+  of the peak change; and `t_peak_censored`, True when the largest change is at
+  the last grid point (the gene is still changing at the end of the window, and
+  `t_peak` holds the window end as a lower bound). The docstring now lists every
+  descriptor, notes that `auc_norm` and `owp` / `owp_ddt` are not oriented by
+  direction, and states the time units.
+- `cp.pl.cluster_violin()` and `cp.pl.trajectory_features()`: a feature with a
+  `<feature>_censored` column (e.g. `t_peak`) has its censored genes coloured
+  separately (`censored=True`, `censored_color`, `censored_label`). In the violin
+  they stay in the violin, box and summaries at the window end, and the summary
+  gains `n_censored`; in the feature plot the colour scale covers uncensored
+  values only. Without such a column, plots are unchanged.
+- `cp.pl.cluster_violin()` no longer fixes the `t_peak` axis to 0-1 when
+  `trim_percentiles=False`, which left the panel empty since `t_peak` is in minutes.
+- `t_onset` now counts only departures in the gene's `direction`, so an induced
+  gene's onset can no longer land on a dip (or a repressed gene's on a bump);
+  it is NaN when the gene never departs in its own direction. This changes the
+  onset of genes whose first departure went the other way (e.g. an early hump
+  before a dip): 3-15% of significant genes per context in the K562 + TNF-alpha
+  and co-culture data.
+- `cp.tl.compute_gene_trajectory_descriptors(onset_gate=...)`: opt-in, experimental
+  gate on `t_onset`; without it the output columns are unchanged. Adds
+  `onset_gate_pass` and `t_onset_gated` (`t_onset` where the gate passes).
+  `onset_gate="band"`: the simultaneous 95% band of the change from baseline,
+  from the NB-GAM coefficient covariance, stays more than 22% past baseline in
+  the gene's direction for 20 min. `"band_or_tags"` also passes genes with
+  consecutive sampling times (at least 3, covering at least 30 min, each with at
+  least 10 UMIs) whose pooled mean count is more than 22% past baseline. Reads the
+  tradeSeq SCEs recorded by `align_gene_trajectories` (or `sce_dict=`); settings
+  in `onset_gate_args`.
 
 Benchmark datasets, comparator methods, gold standards, and benchmarking
 metrics for GRN and C2C remain outside ChronoPack for this release.

@@ -111,6 +111,21 @@ def test_r_backed_plot_rendering_smoke(tmp_path):
     assert result.preview_png[:8] == b"\x89PNG\r\n\x1a\n"
 
 
+def test_trajectory_features_colours_censored_values(tmp_path):
+    pytest.importorskip("rpy2")
+    import chronopack as cp
+
+    adata = _synthetic_gene_trajectory_adata()
+    adata.obs["t_peak_censored"] = [True, False, False, True]
+    out = tmp_path / "t_peak_features.png"
+    result = cp.pl.trajectory_features(adata, x="PC1", y="PC2", color="t_peak", output=out)
+
+    assert result.data["t_peak_censored"].tolist() == [True, False, False, True]
+    assert out.stat().st_size > 0
+    off = cp.pl.trajectory_features(adata, x="PC1", y="PC2", color="t_peak", censored=False)
+    assert "t_peak_censored" not in off.data
+
+
 def _medoid_adata():
     ad = pytest.importorskip("anndata")
 

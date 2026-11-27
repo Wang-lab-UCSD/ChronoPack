@@ -75,6 +75,15 @@ def test_cross_context_plots_render(tmp_path):
         adata, ["t_peak", "t_onset"], cluster_use="impulse-up", cluster_col="mode2", top_k=5, output=tmp_path / "violin.svg"
     )
     assert violin.data["feature"].tolist().count("t_peak") == 3
+    adata.obs["t_peak_censored"] = adata.obs["t_peak"] >= 30
+    censored = cp.pl.cluster_violin(
+        adata, ["t_peak", "t_onset"], cluster_use="impulse-up", cluster_col="mode2", top_k=5, use_top_k=False,
+        output=tmp_path / "violin_censored.svg",
+    )
+    t_peak_rows = censored.data[censored.data["feature"] == "t_peak"]
+    assert t_peak_rows["n_censored"].sum() == int(adata.obs.loc[adata.obs["mode2"] == "impulse-up", "t_peak_censored"].sum())
+    assert censored.data.loc[censored.data["feature"] == "t_onset", "n_censored"].sum() == 0
+    assert Path(censored.output).stat().st_size > 0
     for result in (sankey, chord, pie, violin):
         assert Path(result.output).stat().st_size > 0
         assert result.preview_png[:4] == b"\x89PNG"

@@ -47,6 +47,10 @@ def __getattr__(name):
         from . import _response_plots
 
         return getattr(_response_plots, name)
+    if name == "time_alignment":
+        from ._time_alignment_plots import time_alignment
+
+        return time_alignment
     if name == "gene_dynamics_curves":
         from ._gene_dynamics_plots import gene_dynamics_curves
 
@@ -86,5 +90,6 @@ __all__ = [
     "r_plotting_resource_path",
     "read_r_plotting_resource",
     "response_specificity_volcano",
+    "time_alignment",
     "trajectory_features",
 ]

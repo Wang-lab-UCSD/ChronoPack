@@ -204,6 +204,23 @@ Changes since the previous collaborator test (2026-10-19):
   least 10 UMIs) whose pooled mean count is more than 22% past baseline. Reads the
   tradeSeq SCEs recorded by `align_gene_trajectories` (or `sce_dict=`); settings
   in `onset_gate_args`.
+- `cp.tl.estimate_time_alignment()` / `cp.pl.time_alignment()`: data-driven estimate
+  of the `scale_map` / `offset_map` that `align_gene_trajectories` takes, from the
+  first rise of reporter genes (e.g. NFKBIA for NF-kB) in the per-sampling-time means
+  of the cells rather than the NB-GAM. The two contexts' per-tag curves are registered
+  onto each other in both directions (no curve shape assumed; whole curves as
+  templates; weights combine the data SEs with the templates' interpolation
+  uncertainty), with cell-bootstrap intervals; also per-reporter estimates and an
+  agreement test, onset / midpoint / peak shifts after alignment as a check, logistic
+  rise fits (midpoint, width) as descriptors and a secondary estimate, `fix_scale=` to
+  estimate offsets only and `current=` to check existing maps. Reads the tradeSeq SCEs
+  (as `align_gene_trajectories`) or AnnData; nothing is applied. On synthetic contexts
+  the scale is within 7% of the truth with 96-100% interval coverage across rise
+  shapes, fold changes, cell numbers and 5-30-min sampling; the known biases (a rise
+  covered by about one sampling interval, a reference sampled more coarsely than the
+  context, asynchronous responses) are documented. NFKBIA in the co-culture data:
+  K562b scale 0.95 (0.71-1.42), THP1 0.53 (0.33-0.77; current 0.65); offsets at the
+  current scales -63 for K562b (current -68) and -7 for THP1 (current -10).
 
 Benchmark datasets, comparator methods, gold standards, and benchmarking
 metrics for GRN and C2C remain outside ChronoPack for this release.

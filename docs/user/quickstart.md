@@ -58,6 +58,10 @@ traj = cp.tl.align_gene_trajectories(
 )
 traj = cp.tl.compute_gene_trajectory_descriptors(traj, inplace=False)
 sig = traj[traj.obs["pvalue_1"] < 0.05].copy()
+
+# With several contexts: estimate the time maps from a reporter's rise (nothing is applied).
+# al = cp.tl.estimate_time_alignment(sce_dict, ["NFKBIA"], reference="K562a", time_map=time_map, current=traj)
+# al.alignment; cp.pl.time_alignment(al, output="alignment.png")
 clusters = cp.tl.cluster_gene_trajectories(sig, k=range(2, 21), alpha=0.1)
 labels = clusters.assignments[3]  # cluster labels for k = 3
 ```

@@ -35,6 +35,8 @@ __all__ = [
     "tmm_norm_factors",
     "ResponseHeterogeneityResult",
     "response_heterogeneity",
+    "TimeAlignmentResult",
+    "estimate_time_alignment",
 ]
 
 
@@ -82,6 +84,10 @@ def __getattr__(name):
         from . import _response_heterogeneity
 
         return getattr(_response_heterogeneity, name)
+    if name in {"TimeAlignmentResult", "estimate_time_alignment"}:
+        from . import _time_alignment
+
+        return getattr(_time_alignment, name)
     if name == "topk_mode_recovery":
         from . import _mode_conservation
 
